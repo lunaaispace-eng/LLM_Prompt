@@ -42,6 +42,46 @@
                     "Qwen3.5-4B-Q4_K_M.gguf"
                 ]
             },
+            "Qwen3.5-9B-Uncensored-HauhauCS": {
+                "author": "HauhauCS",
+                "repo_name": "Qwen3.5-9B-Uncensored-HauhauCS-Aggressive",
+                "repo_id": "HauhauCS/Qwen3.5-9B-Uncensored-HauhauCS-Aggressive",
+                "alt_repo_ids": [],
+                "mmproj_file": "mmproj-Qwen3.5-9B-Uncensored-HauhauCS-Aggressive-BF16.gguf",
+                "defaults": {
+                    "context_length": 32768,
+                    "image_max_tokens": 4096,
+                    "n_batch": 1024,
+                    "gpu_layers": -1,
+                    "top_k": 20,
+                    "pool_size": 4194304
+                },
+                "model_files": [
+                    "Qwen3.5-9B-Uncensored-HauhauCS-Aggressive-Q8_0.gguf",
+                    "Qwen3.5-9B-Uncensored-HauhauCS-Aggressive-Q4_K_M.gguf",
+                    "Qwen3.5-9B-Uncensored-HauhauCS-Aggressive-Q6_K.gguf"
+                ]
+            },
+            "Qwen3.5-4B-Uncensored-HauhauCS": {
+                "author": "HauhauCS",
+                "repo_name": "Qwen3.5-4B-Uncensored-HauhauCS-Aggressive",
+                "repo_id": "HauhauCS/Qwen3.5-4B-Uncensored-HauhauCS-Aggressive",
+                "alt_repo_ids": [],
+                "mmproj_file": "mmproj-Qwen3.5-4B-Uncensored-HauhauCS-Aggressive-BF16.gguf",
+                "defaults": {
+                    "context_length": 32768,
+                    "image_max_tokens": 4096,
+                    "n_batch": 1024,
+                    "gpu_layers": -1,
+                    "top_k": 20,
+                    "pool_size": 4194304
+                },
+                "model_files": [
+                    "Qwen3.5-4B-Uncensored-HauhauCS-Aggressive-Q8_0.gguf",
+                    "Qwen3.5-4B-Uncensored-HauhauCS-Aggressive-Q4_K_M.gguf",
+                    "Qwen3.5-4B-Uncensored-HauhauCS-Aggressive-Q6_K.gguf"
+                ]
+            },
             "Qwen3-VL-8B-Instruct": {
                 "author": "Qwen",
                 "repo_name": "Qwen3-VL-8B-Instruct-GGUF",
