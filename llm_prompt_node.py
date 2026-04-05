@@ -27,6 +27,8 @@ import torch
 from llama_cpp import Llama
 from PIL import Image
 
+from huggingface_hub import hf_hub_download
+
 import folder_paths
 from .output_cleaner import CleanConfig, clean_output
 
@@ -270,6 +272,40 @@ def _pick_device(device_choice: str) -> str:
     return device_choice
 
 
+def _download_file(repo_ids: list[str], filename: str, target_path: Path):
+    """Download a single file from HuggingFace to target_path."""
+    if target_path.exists():
+        return
+
+    target_path.parent.mkdir(parents=True, exist_ok=True)
+
+    for repo_id in repo_ids:
+        if not repo_id:
+            continue
+        print(f"[LLM_Prompt] Downloading {filename} from {repo_id}...")
+        try:
+            downloaded = hf_hub_download(
+                repo_id=repo_id,
+                filename=filename,
+                repo_type="model",
+                local_dir=str(target_path.parent),
+            )
+            downloaded_path = Path(downloaded)
+            if downloaded_path.exists() and downloaded_path.resolve() != target_path.resolve():
+                downloaded_path.replace(target_path)
+            if target_path.exists():
+                print(f"[LLM_Prompt] Downloaded: {target_path}")
+                return
+        except Exception as exc:
+            print(f"[LLM_Prompt] Download failed from {repo_id}: {exc}")
+
+    raise FileNotFoundError(
+        f"[LLM_Prompt] Could not download {filename}. "
+        f"Tried: {', '.join(r for r in repo_ids if r)}. "
+        f"Download manually to: {target_path}"
+    )
+
+
 # ---------------------------------------------------------------------------
 # Model entry resolution
 # ---------------------------------------------------------------------------
@@ -495,17 +531,26 @@ class LLMPromptNode:
             if resolved.mmproj_filename else None
         )
 
-        # Check files exist
+        # Auto-download from HuggingFace if not found locally
+        repo_ids = [r for r in [resolved.repo_id] + resolved.alt_repo_ids if r]
+
         if not model_path.exists():
-            raise FileNotFoundError(
-                f"[LLM_Prompt] Model not found: {model_path}\n"
-                f"Place your GGUF file there or update gguf_models.json."
-            )
+            if repo_ids:
+                _download_file(repo_ids, resolved.model_filename, model_path)
+            else:
+                raise FileNotFoundError(
+                    f"[LLM_Prompt] Model not found: {model_path}\n"
+                    f"No repo_id in catalog — download manually or add repo_id to gguf_models.json."
+                )
+
         if mmproj_path and not mmproj_path.exists():
-            raise FileNotFoundError(
-                f"[LLM_Prompt] Vision projector not found: {mmproj_path}\n"
-                f"Download the mmproj file for this model."
-            )
+            if repo_ids and resolved.mmproj_filename:
+                _download_file(repo_ids, resolved.mmproj_filename, mmproj_path)
+            else:
+                raise FileNotFoundError(
+                    f"[LLM_Prompt] Vision projector not found: {mmproj_path}\n"
+                    f"No repo_id in catalog — download manually or add repo_id to gguf_models.json."
+                )
 
         device_kind = _pick_device(device)
         n_gpu_layers = resolved.gpu_layers if device_kind == "cuda" else 0
