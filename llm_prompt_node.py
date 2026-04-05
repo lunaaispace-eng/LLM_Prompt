@@ -28,7 +28,7 @@ from llama_cpp import Llama
 from PIL import Image
 
 import folder_paths
-from output_cleaner import CleanConfig, clean_output
+from .output_cleaner import CleanConfig, clean_output
 
 # ---------------------------------------------------------------------------
 # Constants
