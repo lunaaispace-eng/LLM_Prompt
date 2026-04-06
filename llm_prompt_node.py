@@ -367,6 +367,34 @@ def _resolve_model(model_name: str) -> ResolvedModel:
     )
 
 
+def _looks_like_reasoning(text: str) -> bool:
+    """Detect if model output is reasoning/planning instead of a final prompt.
+
+    Catches: numbered lists, markdown bold headers, bullet analysis,
+    first-person planning, and thinking patterns.
+    """
+    if not text:
+        return False
+    # Standard planning: "I should", "First,", "Let me", etc.
+    if re.search(r"(?i)\b(i\s+(should|need|must|will|am\s+going\s+to|have\s+to))\b", text):
+        return True
+    if re.search(r"(?im)^\s*(okay[,.:]?|first[,.:]?|next[,.:]?|then[,.:]?|wait[,.:]?|let me)\b", text):
+        return True
+    # Numbered analysis steps: "1. **Subject:**" or "2. Deconstruct"
+    numbered = len(re.findall(r"(?m)^\s*\d+\.\s+\*{0,2}[A-Z]", text))
+    if numbered >= 2:
+        return True
+    # Markdown bold headers: "**Subject:**" "**Lighting:**"
+    bold_headers = len(re.findall(r"(?m)\*{1,2}[A-Za-z][^*]+\*{1,2}\s*:", text))
+    if bold_headers >= 2:
+        return True
+    # Bullet point analysis
+    bullets = len(re.findall(r"(?m)^\s*[-*]\s+", text))
+    if bullets >= 3:
+        return True
+    return False
+
+
 # ---------------------------------------------------------------------------
 # The Node — built on QwenVL-Mod's proven inference code
 # ---------------------------------------------------------------------------
@@ -585,6 +613,8 @@ class LLMPromptNode:
             "verbose": False,
             "pool_size": resolved.pool_size,
             "top_k": resolved.top_k,
+            # Qwen 3.5: disable thinking mode at template level
+            "chat_template_kwargs": {"enable_thinking": False},
         }
         if has_mmproj and self.chat_handler is not None:
             llm_kwargs["chat_handler"] = self.chat_handler
@@ -676,26 +706,12 @@ class LLMPromptNode:
         max_tokens: int,
         seed: int,
     ) -> str:
-        """Invoke with planning detection and retry (same as QwenVL-Mod pattern)."""
-
-        def _looks_like_planning(text: str) -> bool:
-            if not text:
-                return False
-            return bool(
-                re.search(
-                    r"(?im)^\s*(okay[,.:]?|first[,.:]?|next[,.:]?|then[,.:]?|wait[,.:]?)\b",
-                    text,
-                )
-                or re.search(
-                    r"(?i)\b(i\s+(should|need|must|will|am\s+going\s+to|have\s+to))\b",
-                    text,
-                )
-            )
+        """Invoke with planning/reasoning detection and retry."""
 
         raw = self._invoke(system_prompt, user_prompt, images_b64, max_tokens, 0.6, 0.9, 1.05, seed)
         cleaned = clean_model_output(raw, OutputCleanConfig(mode="prompt"))
 
-        if not cleaned or _looks_like_planning(cleaned) or "<think" in raw.lower():
+        if not cleaned or _looks_like_reasoning(raw) or "<think" in raw.lower():
             retry_system = (
                 "You are a professional prompt writer.\n"
                 "Output ONLY ONE final prompt paragraph.\n"
@@ -705,7 +721,7 @@ class LLMPromptNode:
             retry_user = f"Rewrite the following into the final prompt paragraph:\n\n{raw}"
             raw_retry = self._invoke(retry_system, retry_user, [], max_tokens, 0.4, 0.95, 1.05, seed + 999)
             cleaned_retry = clean_model_output(raw_retry, OutputCleanConfig(mode="prompt"))
-            if cleaned_retry and not _looks_like_planning(cleaned_retry):
+            if cleaned_retry and not _looks_like_reasoning(cleaned_retry):
                 return cleaned_retry
 
         return cleaned or ""
@@ -769,6 +785,7 @@ class LLMPromptNode:
             parts.append(f"ASPECT RATIO / CANVAS FORMAT:\n{ar_label}")
 
         final_user_prompt = "\n\n".join(parts) if parts else "Describe a scene vividly."
+
 
         # Process images
         images_b64: list[str] = []
