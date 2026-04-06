@@ -458,6 +458,28 @@ class LLMPromptNode:
                     "max": 4096,
                     "tooltip": "Maximum tokens to generate.",
                 }),
+                "temperature": ("FLOAT", {
+                    "default": 0.7,
+                    "min": 0.1,
+                    "max": 2.0,
+                    "step": 0.05,
+                }),
+                "top_p": ("FLOAT", {
+                    "default": 0.9,
+                    "min": 0.0,
+                    "max": 1.0,
+                    "step": 0.05,
+                }),
+                "repetition_penalty": ("FLOAT", {
+                    "default": 1.1,
+                    "min": 0.5,
+                    "max": 2.0,
+                    "step": 0.05,
+                }),
+                "english_output": ("BOOLEAN", {
+                    "default": False,
+                    "tooltip": "Force final output in English using translation prompt.",
+                }),
                 "device": (device_options, {
                     "default": "auto",
                     "tooltip": "Device for inference. auto = GPU if available.",
@@ -704,11 +726,14 @@ class LLMPromptNode:
         user_prompt: str,
         images_b64: list[str],
         max_tokens: int,
+        temperature: float,
+        top_p: float,
+        repetition_penalty: float,
         seed: int,
     ) -> str:
         """Invoke with planning/reasoning detection and retry."""
 
-        raw = self._invoke(system_prompt, user_prompt, images_b64, max_tokens, 0.6, 0.9, 1.05, seed)
+        raw = self._invoke(system_prompt, user_prompt, images_b64, max_tokens, temperature, top_p, repetition_penalty, seed)
         cleaned = clean_model_output(raw, OutputCleanConfig(mode="prompt"))
 
         if not cleaned or _looks_like_reasoning(raw) or "<think" in raw.lower():
@@ -738,6 +763,10 @@ class LLMPromptNode:
         user_prompt: str,
         output_format: str,
         max_tokens: int,
+        temperature: float,
+        top_p: float,
+        repetition_penalty: float,
+        english_output: bool,
         device: str,
         keep_model_loaded: bool,
         seed: int,
@@ -819,9 +848,9 @@ class LLMPromptNode:
                     user_prompt=final_user_prompt,
                     images_b64=images_b64 if self.chat_handler is not None else [],
                     max_tokens=max_tokens,
-                    temperature=0.6,
-                    top_p=0.9,
-                    repetition_penalty=1.05,
+                    temperature=temperature,
+                    top_p=top_p,
+                    repetition_penalty=repetition_penalty,
                     seed=seed,
                 )
             else:
@@ -830,8 +859,29 @@ class LLMPromptNode:
                     user_prompt=final_user_prompt,
                     images_b64=images_b64 if self.chat_handler is not None else [],
                     max_tokens=max_tokens,
+                    temperature=temperature,
+                    top_p=top_p,
+                    repetition_penalty=repetition_penalty,
                     seed=seed,
                 )
+
+            # English output: translate if needed
+            if english_output and result:
+                result = self._invoke(
+                    system_prompt=(
+                        "Return a single English paragraph (150-300 words). No prefixes, bullets, JSON, or </think>. "
+                        "Cover subject, environment, lighting, camera settings, composition, color/texture, and style. "
+                        "Output only the prompt."
+                    ),
+                    user_prompt=result,
+                    images_b64=[],
+                    max_tokens=max_tokens,
+                    temperature=0.3,
+                    top_p=0.95,
+                    repetition_penalty=1.05,
+                    seed=seed + 1,
+                )
+                result = clean_model_output(result, OutputCleanConfig(mode="prompt"))
 
             return (result,)
 
