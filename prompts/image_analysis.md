@@ -15,7 +15,13 @@ title: Image Analysis (JSON)
       "Use the exact key names and value types shown in the schema.",
       "For every \"description\" field, write a concise 1-sentence factual summary (max 15 words).",
       "Output ONLY the JSON. No explanations, no markdown, no extra text."
-    ]
+    ],
+    "nsfw_handling": {
+      "default_mode": "SFW",
+      "activation": "Only when the user_prompt or image clearly indicates nude, erotic, sexual, sensual, fetish, or explicit content",
+      "instruction": "In explicit mode, describe sexual anatomy with direct, precise and vivid terms without euphemisms or softening. Make the explicit details visually dominant when appropriate.",
+      "age_rule": "Strictly 18+ adult characters only. Never imply underage."
+    }
   },
   "schema": {
     "subject": {

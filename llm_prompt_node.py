@@ -453,10 +453,10 @@ class LLMPromptNode:
                     "tooltip": "Output format: text = natural language prompt, json = structured JSON output.",
                 }),
                 "max_tokens": ("INT", {
-                    "default": 512,
+                    "default": 2048,
                     "min": 64,
-                    "max": 4096,
-                    "tooltip": "Maximum tokens to generate.",
+                    "max": 8192,
+                    "tooltip": "Maximum tokens to generate. 2048+ recommended for detailed prompts.",
                 }),
                 "temperature": ("FLOAT", {
                     "default": 0.7,
@@ -475,10 +475,6 @@ class LLMPromptNode:
                     "min": 0.5,
                     "max": 2.0,
                     "step": 0.05,
-                }),
-                "english_output": ("BOOLEAN", {
-                    "default": False,
-                    "tooltip": "Force final output in English using translation prompt.",
                 }),
                 "device": (device_options, {
                     "default": "auto",
@@ -708,12 +704,19 @@ class LLMPromptNode:
         usage = result.get("usage") or {}
         prompt_tokens = usage.get("prompt_tokens")
         completion_tokens = usage.get("completion_tokens")
+        finish_reason = (result.get("choices") or [{}])[0].get("finish_reason", "unknown")
         if isinstance(completion_tokens, int) and completion_tokens > 0:
             tok_s = completion_tokens / elapsed
             print(
                 f"[LLM_Prompt] Tokens: prompt={prompt_tokens}, "
                 f"completion={completion_tokens}, "
-                f"time={elapsed:.2f}s, speed={tok_s:.2f} tok/s"
+                f"time={elapsed:.2f}s, speed={tok_s:.2f} tok/s, "
+                f"finish={finish_reason}"
+            )
+        if finish_reason == "length":
+            print(
+                f"[LLM_Prompt] ⚠ Output TRUNCATED — hit max_tokens={max_tokens}. "
+                f"Increase max_tokens to get complete output."
             )
 
         raw = (result.get("choices") or [{}])[0].get("message", {}).get("content", "")
@@ -766,7 +769,6 @@ class LLMPromptNode:
         temperature: float,
         top_p: float,
         repetition_penalty: float,
-        english_output: bool,
         device: str,
         keep_model_loaded: bool,
         seed: int,
@@ -864,24 +866,6 @@ class LLMPromptNode:
                     repetition_penalty=repetition_penalty,
                     seed=seed,
                 )
-
-            # English output: translate if needed
-            if english_output and result:
-                result = self._invoke(
-                    system_prompt=(
-                        "Return a single English paragraph (150-300 words). No prefixes, bullets, JSON, or </think>. "
-                        "Cover subject, environment, lighting, camera settings, composition, color/texture, and style. "
-                        "Output only the prompt."
-                    ),
-                    user_prompt=result,
-                    images_b64=[],
-                    max_tokens=max_tokens,
-                    temperature=0.3,
-                    top_p=0.95,
-                    repetition_penalty=1.05,
-                    seed=seed + 1,
-                )
-                result = clean_model_output(result, OutputCleanConfig(mode="prompt"))
 
             return (result,)
 
