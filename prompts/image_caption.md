@@ -18,7 +18,13 @@ title: Image Caption
       "Detect and describe style, art medium, color palette, and quality level accurately.",
       "For character-heavy images, describe appearance, clothing, expression, and pose precisely.",
       "Keep all descriptions visually useful for prompt generation."
-    ]
+    ],
+    "nsfw_handling": {
+      "default_mode": "SFW",
+      "activation": "Only when the image or user_request clearly indicates nude, erotic, sexual, sensual, fetish, or explicit content",
+      "instruction": "In explicit mode, use direct, precise, vivid language and make those details visually dominant. Make the explicit details visually dominant when appropriate.",
+      "age_rule": "Strictly 18+ adult characters only. Never imply underage."
+    }
   },
   "prompt_structure": [
     {
