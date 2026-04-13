@@ -1,13 +1,11 @@
-"""LLM Prompt — Single ComfyUI node for prompt generation via GGUF vision models.
+"""LLM Prompt — ComfyUI node for prompt generation via GGUF vision models.
 
-Loads system prompts from .md files in the prompts/ folder.
-Accepts user_prompt (multiline text) and style (STRING from external nodes).
-Uses llama-cpp-python with Qwen 3.5 optimal settings.
-
-Usage:
-    1. Place GGUF models in ComfyUI/models/LLM/GGUF/
-    2. Add .md system prompt files to the prompts/ folder
-    3. Connect the node — select model, pick a prompt preset, type your prompt
+Built on the proven QwenVL-Mod GGUF inference code. Adds:
+  - System prompt presets from .md files in prompts/ folder
+  - User prompt (multiline text input)
+  - Style input (STRING from external nodes)
+  - Width/height aspect ratio auto-detection
+  - Output format toggle (text/json)
 """
 
 import base64
@@ -20,17 +18,17 @@ import re
 import time
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Optional
 
 import numpy as np
 import torch
+from huggingface_hub import hf_hub_download
 from llama_cpp import Llama
 from PIL import Image
 
-from huggingface_hub import hf_hub_download
-
 import folder_paths
-from .output_cleaner import CleanConfig, clean_output
+
+# Bundled output cleaner — no external dependencies
+from .output_cleaner import OutputCleanConfig, clean_model_output
 
 # ---------------------------------------------------------------------------
 # Constants
@@ -39,15 +37,6 @@ from .output_cleaner import CleanConfig, clean_output
 NODE_DIR = Path(__file__).parent
 PROMPTS_DIR = NODE_DIR / "prompts"
 GGUF_CONFIG_PATH = NODE_DIR / "gguf_models.json"
-
-# Qwen 3.5 optimal inference settings (Unsloth recommendations)
-PROMPT_GEN_PARAMS = {
-    "temperature": 0.6,
-    "top_p": 0.95,
-    "top_k": 20,
-    "min_p": 0.0,
-    "repeat_penalty": 1.0,
-}
 
 # Aspect ratio mapping: (w_ratio, h_ratio) -> label
 _ASPECT_LABELS = {
@@ -71,11 +60,9 @@ def _detect_aspect_ratio(width: int, height: int) -> str:
     g = gcd(width, height)
     w_r, h_r = width // g, height // g
 
-    # Direct match
     if (w_r, h_r) in _ASPECT_LABELS:
         return _ASPECT_LABELS[(w_r, h_r)]
 
-    # Find closest known ratio
     actual = width / height
     best_label = None
     best_diff = float("inf")
@@ -88,7 +75,6 @@ def _detect_aspect_ratio(width: int, height: int) -> str:
     if best_diff < 0.05:
         return best_label
 
-    # Fallback: describe orientation with raw ratio
     if width > height:
         return f"{w_r}:{h_r} landscape"
     elif height > width:
@@ -102,11 +88,8 @@ def _detect_aspect_ratio(width: int, height: int) -> str:
 def load_system_prompts() -> dict[str, str]:
     """Load all .md files from prompts/ folder.
 
-    Each file becomes a preset. The filename (without extension) is the
-    display name. File content is the system prompt text.
-
-    Optional YAML frontmatter (between --- markers) can set:
-        title: Display Name Override
+    Each file becomes a preset. Optional YAML frontmatter (between --- markers)
+    can set: title: Display Name Override
     """
     prompts = {}
     if not PROMPTS_DIR.exists():
@@ -122,7 +105,6 @@ def load_system_prompts() -> dict[str, str]:
         if not text:
             continue
 
-        # Check for YAML frontmatter
         title = md_file.stem.replace("_", " ").title()
         content = text
 
@@ -135,7 +117,6 @@ def load_system_prompts() -> dict[str, str]:
                     title = meta.get("title", title)
                 content = match.group(2).strip()
             except Exception:
-                # No yaml available or parse error — use full text
                 content = text
 
         if content:
@@ -147,35 +128,32 @@ def load_system_prompts() -> dict[str, str]:
 SYSTEM_PROMPTS = load_system_prompts()
 
 # ---------------------------------------------------------------------------
-# Model catalog
+# Model catalog (same structure as QwenVL-Mod gguf_models.json)
 # ---------------------------------------------------------------------------
 
-def load_model_catalog() -> dict:
-    """Load gguf_models.json catalog for VL models."""
-    fallback = {"base_dir": "LLM/GGUF", "models": {}}
+def _load_gguf_vl_catalog():
     if not GGUF_CONFIG_PATH.exists():
-        return fallback
+        return {"base_dir": "LLM/GGUF", "models": {}}
     try:
         with open(GGUF_CONFIG_PATH, "r", encoding="utf-8") as fh:
             data = json.load(fh) or {}
     except Exception as exc:
         print(f"[LLM_Prompt] gguf_models.json load failed: {exc}")
-        return fallback
+        return {"base_dir": "LLM/GGUF", "models": {}}
 
     base_dir = data.get("base_dir") or "LLM/GGUF"
-    raw_models = data.get("models", {})
-
     flattened: dict[str, dict] = {}
-    seen: set[str] = set()
 
-    # Parse qwenVL_model repos (vision models)
-    repos = raw_models.get("qwenVL_model") or {}
+    # Parse qwenVL_model repos (vision models) — may be at root or nested under "models"
+    raw_models = data.get("models") or {}
+    repos = raw_models.get("qwenVL_model") or data.get("qwenVL_model") or data.get("vl_repos") or {}
+    seen: set[str] = set()
     for repo_key, repo in repos.items():
         if not isinstance(repo, dict):
             continue
-        author = repo.get("author")
-        repo_name = repo.get("repo_name") or repo_key
-        repo_id = repo.get("repo_id")
+        author = repo.get("author") or repo.get("publisher")
+        repo_name = repo.get("repo_name") or repo.get("repo_name_override") or repo_key
+        repo_id = repo.get("repo_id") or (f"{author}/{repo_name}" if author and repo_name else None)
         alt_repo_ids = repo.get("alt_repo_ids") or []
         defaults = repo.get("defaults") or {}
         mmproj_file = repo.get("mmproj_file")
@@ -196,13 +174,40 @@ def load_model_catalog() -> dict:
                 "mmproj_filename": mmproj_file,
             }
 
+    # Also parse text-only Qwen_model if present
+    text_repos = raw_models.get("Qwen_model") or data.get("Qwen_model") or {}
+    if isinstance(text_repos, dict):
+        for repo_key, repo in text_repos.items():
+            if not isinstance(repo, dict):
+                continue
+            author = repo.get("author") or repo.get("publisher")
+            repo_name = repo.get("repo_name") or repo.get("repo_name_override") or repo_key
+            repo_id = repo.get("repo_id")
+            alt_repo_ids = repo.get("alt_repo_ids") or []
+            defaults = repo.get("defaults") if isinstance(repo.get("defaults"), dict) else {}
+            model_files = repo.get("model_files") or []
+            for model_file in model_files:
+                display = Path(model_file).name
+                if display in seen:
+                    display = f"{display} ({repo_key})"
+                seen.add(display)
+                entry = dict(defaults)
+                entry.update({
+                    "author": author,
+                    "repo_dirname": repo_name,
+                    "repo_id": repo_id,
+                    "alt_repo_ids": alt_repo_ids,
+                    "filename": model_file,
+                })
+                flattened[display] = entry
+
     return {"base_dir": base_dir, "models": flattened}
 
 
-MODEL_CATALOG = load_model_catalog()
+GGUF_VL_CATALOG = _load_gguf_vl_catalog()
 
 # ---------------------------------------------------------------------------
-# Helpers
+# Helpers (same as QwenVL-Mod)
 # ---------------------------------------------------------------------------
 
 def _resolve_base_dir(base_dir_value: str) -> Path:
@@ -219,8 +224,7 @@ def _safe_dirname(value: str) -> str:
     return "".join(ch for ch in value if ch.isalnum() or ch in "._- ").strip() or "unknown"
 
 
-def _filter_kwargs(fn, kwargs: dict) -> dict:
-    """Filter kwargs to only those accepted by fn's signature."""
+def _filter_kwargs_for_callable(fn, kwargs: dict) -> dict:
     try:
         sig = inspect.signature(fn)
     except Exception:
@@ -236,7 +240,6 @@ def _filter_kwargs(fn, kwargs: dict) -> dict:
 
 
 def _tensor_to_base64_png(tensor) -> str | None:
-    """Convert a ComfyUI image tensor to base64 PNG."""
     if tensor is None:
         return None
     if tensor.ndim == 4:
@@ -249,7 +252,6 @@ def _tensor_to_base64_png(tensor) -> str | None:
 
 
 def _sample_video_frames(video, frame_count: int):
-    """Sample evenly-spaced frames from a video tensor."""
     if video is None:
         return []
     if video.ndim != 4:
@@ -269,16 +271,17 @@ def _pick_device(device_choice: str) -> str:
         if getattr(torch.backends, "mps", None) and torch.backends.mps.is_available():
             return "mps"
         return "cpu"
-    return device_choice
+    if device_choice.startswith("cuda") and torch.cuda.is_available():
+        return "cuda"
+    if device_choice == "mps" and getattr(torch.backends, "mps", None) and torch.backends.mps.is_available():
+        return "mps"
+    return "cpu"
 
 
-def _download_file(repo_ids: list[str], filename: str, target_path: Path):
-    """Download a single file from HuggingFace to target_path."""
+def _download_single_file(repo_ids: list[str], filename: str, target_path: Path):
     if target_path.exists():
         return
-
     target_path.parent.mkdir(parents=True, exist_ok=True)
-
     for repo_id in repo_ids:
         if not repo_id:
             continue
@@ -298,7 +301,6 @@ def _download_file(repo_ids: list[str], filename: str, target_path: Path):
                 return
         except Exception as exc:
             print(f"[LLM_Prompt] Download failed from {repo_id}: {exc}")
-
     raise FileNotFoundError(
         f"[LLM_Prompt] Could not download {filename}. "
         f"Tried: {', '.join(r for r in repo_ids if r)}. "
@@ -307,7 +309,7 @@ def _download_file(repo_ids: list[str], filename: str, target_path: Path):
 
 
 # ---------------------------------------------------------------------------
-# Model entry resolution
+# Model entry resolution (same as QwenVL-Mod)
 # ---------------------------------------------------------------------------
 
 @dataclass(frozen=True)
@@ -328,11 +330,9 @@ class ResolvedModel:
 
 
 def _resolve_model(model_name: str) -> ResolvedModel:
-    """Resolve a model display name to full paths and settings."""
-    all_models = MODEL_CATALOG.get("models") or {}
+    all_models = GGUF_VL_CATALOG.get("models") or {}
     entry = all_models.get(model_name) or {}
 
-    # Fallback: match by filename
     if not entry:
         wanted = {model_name, f"{model_name}.gguf"}
         if "/" in model_name:
@@ -360,30 +360,50 @@ def _resolve_model(model_name: str) -> ResolvedModel:
         mmproj_filename=str(entry["mmproj_filename"]) if entry.get("mmproj_filename") else None,
         context_length=_int("context_length", 32768),
         image_max_tokens=_int("image_max_tokens", 4096),
-        n_batch=_int("n_batch", 1024),
+        n_batch=_int("n_batch", 512),
         gpu_layers=_int("gpu_layers", -1),
-        top_k=_int("top_k", 20),
+        top_k=_int("top_k", 0),
         pool_size=_int("pool_size", 4194304),
     )
 
 
+def _looks_like_reasoning(text: str) -> bool:
+    """Detect if model output is reasoning/planning instead of a final prompt.
+
+    Catches: numbered lists, markdown bold headers, bullet analysis,
+    first-person planning, and thinking patterns.
+    """
+    if not text:
+        return False
+    # Standard planning: "I should", "First,", "Let me", etc.
+    if re.search(r"(?i)\b(i\s+(should|need|must|will|am\s+going\s+to|have\s+to))\b", text):
+        return True
+    if re.search(r"(?im)^\s*(okay[,.:]?|first[,.:]?|next[,.:]?|then[,.:]?|wait[,.:]?|let me)\b", text):
+        return True
+    # Numbered analysis steps: "1. **Subject:**" or "2. Deconstruct"
+    numbered = len(re.findall(r"(?m)^\s*\d+\.\s+\*{0,2}[A-Z]", text))
+    if numbered >= 2:
+        return True
+    # Markdown bold headers: "**Subject:**" "**Lighting:**"
+    bold_headers = len(re.findall(r"(?m)\*{1,2}[A-Za-z][^*]+\*{1,2}\s*:", text))
+    if bold_headers >= 2:
+        return True
+    # Bullet point analysis
+    bullets = len(re.findall(r"(?m)^\s*[-*]\s+", text))
+    if bullets >= 3:
+        return True
+    return False
+
+
 # ---------------------------------------------------------------------------
-# The Node
+# The Node — built on QwenVL-Mod's proven inference code
 # ---------------------------------------------------------------------------
 
 class LLMPromptNode:
-    """Single-purpose node: generate or enhance prompts using a local GGUF VL model.
+    """Prompt generation node using local GGUF VL models.
 
-    Inputs:
-        - model_name: GGUF model from catalog
-        - system_prompt: preset from .md files in prompts/ folder
-        - custom_system_prompt: override or extend the preset
-        - user_prompt: your prompt text (multiline)
-        - style: STRING input from external nodes (prepended to user_prompt)
-        - image/video: optional vision inputs
-
-    Output:
-        - PROMPT: the generated/enhanced prompt text (STRING)
+    Uses the same inference code as QwenVL-Mod GGUF. Adds system prompt
+    presets from .md files, user prompt, style, and aspect ratio inputs.
     """
 
     RETURN_TYPES = ("STRING",)
@@ -399,17 +419,11 @@ class LLMPromptNode:
 
     @classmethod
     def INPUT_TYPES(cls):
-        # Model list from catalog
-        all_models = MODEL_CATALOG.get("models") or {}
-        model_keys = sorted([
-            key for key, entry in all_models.items()
-            if (entry or {}).get("mmproj_filename")
-        ]) or ["(add models to gguf_models.json)"]
+        all_models = GGUF_VL_CATALOG.get("models") or {}
+        model_keys = sorted(all_models.keys()) or ["(add models to gguf_models.json)"]
 
-        # System prompt presets from .md files
         prompt_presets = list(SYSTEM_PROMPTS.keys()) if SYSTEM_PROMPTS else ["(add .md files to prompts/)"]
 
-        # Device options
         num_gpus = torch.cuda.device_count()
         gpu_list = [f"cuda:{i}" for i in range(num_gpus)]
         device_options = ["auto", "cpu", "mps"] + gpu_list
@@ -418,7 +432,7 @@ class LLMPromptNode:
             "required": {
                 "model_name": (model_keys, {
                     "default": model_keys[0],
-                    "tooltip": "GGUF vision model from gguf_models.json catalog.",
+                    "tooltip": "GGUF model from gguf_models.json catalog.",
                 }),
                 "system_prompt": (prompt_presets, {
                     "default": prompt_presets[0],
@@ -439,10 +453,28 @@ class LLMPromptNode:
                     "tooltip": "Output format: text = natural language prompt, json = structured JSON output.",
                 }),
                 "max_tokens": ("INT", {
-                    "default": 512,
+                    "default": 2048,
                     "min": 64,
-                    "max": 4096,
-                    "tooltip": "Maximum tokens to generate.",
+                    "max": 8192,
+                    "tooltip": "Maximum tokens to generate. 2048+ recommended for detailed prompts.",
+                }),
+                "temperature": ("FLOAT", {
+                    "default": 0.7,
+                    "min": 0.1,
+                    "max": 2.0,
+                    "step": 0.05,
+                }),
+                "top_p": ("FLOAT", {
+                    "default": 0.9,
+                    "min": 0.0,
+                    "max": 1.0,
+                    "step": 0.05,
+                }),
+                "repetition_penalty": ("FLOAT", {
+                    "default": 1.1,
+                    "min": 0.5,
+                    "max": 2.0,
+                    "step": 0.05,
                 }),
                 "device": (device_options, {
                     "default": "auto",
@@ -450,7 +482,7 @@ class LLMPromptNode:
                 }),
                 "keep_model_loaded": ("BOOLEAN", {
                     "default": True,
-                    "tooltip": "Keep model in VRAM between runs. Faster but uses memory.",
+                    "tooltip": "Keep model in VRAM between runs.",
                 }),
                 "seed": ("INT", {
                     "default": 1,
@@ -461,15 +493,15 @@ class LLMPromptNode:
             "optional": {
                 "style": ("STRING", {
                     "forceInput": True,
-                    "tooltip": "Style description from external node. Injected as visual treatment layer.",
+                    "tooltip": "Style description from external node.",
                 }),
                 "width": ("INT", {
                     "forceInput": True,
-                    "tooltip": "Image width in pixels. Auto-detected as aspect ratio for composition guidance.",
+                    "tooltip": "Image width — auto-detected as aspect ratio.",
                 }),
                 "height": ("INT", {
                     "forceInput": True,
-                    "tooltip": "Image height in pixels. Auto-detected as aspect ratio for composition guidance.",
+                    "tooltip": "Image height — auto-detected as aspect ratio.",
                 }),
                 "image": ("IMAGE", {
                     "tooltip": "Input image for vision analysis.",
@@ -481,16 +513,15 @@ class LLMPromptNode:
         }
 
     # ------------------------------------------------------------------
-    # VRAM cleanup
+    # VRAM cleanup (same as QwenVL-Mod)
     # ------------------------------------------------------------------
 
     def clear(self):
-        """Unload model and free VRAM."""
         if self.chat_handler is not None:
             try:
-                if hasattr(self.chat_handler, "close"):
+                if hasattr(self.chat_handler, 'close'):
                     self.chat_handler.close()
-                elif hasattr(self.chat_handler, "__del__"):
+                elif hasattr(self.chat_handler, '__del__'):
                     self.chat_handler.__del__()
             except Exception:
                 pass
@@ -498,7 +529,7 @@ class LLMPromptNode:
 
         if self.llm is not None:
             try:
-                if hasattr(self.llm, "close"):
+                if hasattr(self.llm, 'close'):
                     self.llm.close()
                 del self.llm
             except Exception:
@@ -513,13 +544,12 @@ class LLMPromptNode:
             torch.cuda.synchronize()
 
     # ------------------------------------------------------------------
-    # Model loading
+    # Model loading (same as QwenVL-Mod GGUF)
     # ------------------------------------------------------------------
 
     def _load_model(self, model_name: str, device: str):
-        """Load a GGUF vision model with Qwen 3.5 settings."""
         resolved = _resolve_model(model_name)
-        base_dir = _resolve_base_dir(MODEL_CATALOG.get("base_dir") or "LLM/GGUF")
+        base_dir = _resolve_base_dir(GGUF_VL_CATALOG.get("base_dir") or "LLM/GGUF")
 
         author_dir = _safe_dirname(resolved.author or "")
         repo_dir = _safe_dirname(resolved.repo_dirname)
@@ -531,26 +561,19 @@ class LLMPromptNode:
             if resolved.mmproj_filename else None
         )
 
-        # Auto-download from HuggingFace if not found locally
         repo_ids = [r for r in [resolved.repo_id] + resolved.alt_repo_ids if r]
 
         if not model_path.exists():
             if repo_ids:
-                _download_file(repo_ids, resolved.model_filename, model_path)
+                _download_single_file(repo_ids, resolved.model_filename, model_path)
             else:
-                raise FileNotFoundError(
-                    f"[LLM_Prompt] Model not found: {model_path}\n"
-                    f"No repo_id in catalog — download manually or add repo_id to gguf_models.json."
-                )
+                raise FileNotFoundError(f"[LLM_Prompt] Model not found: {model_path}")
 
         if mmproj_path and not mmproj_path.exists():
             if repo_ids and resolved.mmproj_filename:
-                _download_file(repo_ids, resolved.mmproj_filename, mmproj_path)
+                _download_single_file(repo_ids, resolved.mmproj_filename, mmproj_path)
             else:
-                raise FileNotFoundError(
-                    f"[LLM_Prompt] Vision projector not found: {mmproj_path}\n"
-                    f"No repo_id in catalog — download manually or add repo_id to gguf_models.json."
-                )
+                raise FileNotFoundError(f"[LLM_Prompt] mmproj not found: {mmproj_path}")
 
         device_kind = _pick_device(device)
         n_gpu_layers = resolved.gpu_layers if device_kind == "cuda" else 0
@@ -564,15 +587,14 @@ class LLMPromptNode:
             device_kind,
         )
         if self.llm is not None and self.current_signature == signature:
-            return  # Already loaded
+            return
 
-        # Cleanup before loading
         self.clear()
         if torch.cuda.is_available():
             torch.cuda.synchronize()
             time.sleep(0.1)
 
-        # Load vision handler
+        # Load vision handler (same as QwenVL-Mod)
         self.chat_handler = None
         if has_mmproj:
             handler_cls = None
@@ -585,8 +607,7 @@ class LLMPromptNode:
                     handler_cls = Qwen25VLChatHandler
                 except ImportError:
                     raise RuntimeError(
-                        "[LLM_Prompt] No Qwen VL chat handler found in llama_cpp. "
-                        "Update llama-cpp-python to a vision-capable build."
+                        "[LLM_Prompt] No Qwen VL chat handler found in llama_cpp."
                     )
 
             mmproj_kwargs = {
@@ -595,12 +616,12 @@ class LLMPromptNode:
                 "force_reasoning": False,
                 "verbose": False,
             }
-            mmproj_kwargs = _filter_kwargs(
+            mmproj_kwargs = _filter_kwargs_for_callable(
                 getattr(handler_cls, "__init__", handler_cls), mmproj_kwargs
             )
             self.chat_handler = handler_cls(**mmproj_kwargs)
 
-        # Load LLM
+        # Load LLM (same kwargs as QwenVL-Mod)
         llm_kwargs = {
             "model_path": str(model_path),
             "n_ctx": resolved.context_length,
@@ -610,7 +631,7 @@ class LLMPromptNode:
             "verbose": False,
             "pool_size": resolved.pool_size,
             "top_k": resolved.top_k,
-            # Qwen 3.5: thinking mode OFF for prompt generation
+            # Qwen 3.5: disable thinking mode at template level
             "chat_template_kwargs": {"enable_thinking": False},
         }
         if has_mmproj and self.chat_handler is not None:
@@ -620,27 +641,22 @@ class LLMPromptNode:
 
         print(
             f"[LLM_Prompt] Loading: {model_path.name} "
-            f"(device={device_kind}, gpu_layers={n_gpu_layers}, "
-            f"ctx={resolved.context_length}, thinking=off)"
+            f"(device={device_kind}, gpu_layers={n_gpu_layers}, ctx={resolved.context_length})"
         )
 
-        llm_kwargs_filtered = _filter_kwargs(
+        llm_kwargs_filtered = _filter_kwargs_for_callable(
             getattr(Llama, "__init__", Llama), llm_kwargs
         )
 
-        # Warn if vision handler can't be passed
         if has_mmproj and self.chat_handler and "chat_handler" not in llm_kwargs_filtered:
-            print(
-                "[LLM_Prompt] Warning: llama_cpp.Llama() doesn't accept chat_handler. "
-                "Images will be ignored. Update llama-cpp-python."
-            )
+            print("[LLM_Prompt] Warning: Llama() doesn't accept chat_handler. Images will be ignored.")
 
         self.llm = Llama(**llm_kwargs_filtered)
         self.current_signature = signature
         print(f"[LLM_Prompt] Model loaded: {model_path.name}")
 
     # ------------------------------------------------------------------
-    # Inference
+    # Inference (same create_chat_completion as QwenVL-Mod)
     # ------------------------------------------------------------------
 
     def _invoke(
@@ -649,11 +665,12 @@ class LLMPromptNode:
         user_prompt: str,
         images_b64: list[str],
         max_tokens: int,
+        temperature: float,
+        top_p: float,
+        repetition_penalty: float,
         seed: int,
-        clean_cfg: CleanConfig | None = None,
     ) -> str:
-        """Run inference with the loaded model."""
-        # Build messages
+        """Run inference — same call signature as QwenVL-Mod GGUF."""
         if images_b64 and self.chat_handler is not None:
             content = [{"type": "text", "text": user_prompt}]
             for img in images_b64:
@@ -676,26 +693,34 @@ class LLMPromptNode:
         result = self.llm.create_chat_completion(
             messages=messages,
             max_tokens=int(max_tokens),
+            temperature=float(temperature),
+            top_p=float(top_p),
+            repeat_penalty=float(repetition_penalty),
             seed=int(seed),
             stop=["<|im_end|>", "<|im_start|>"],
-            **PROMPT_GEN_PARAMS,
         )
         elapsed = max(time.perf_counter() - start, 1e-6)
 
-        # Log performance
         usage = result.get("usage") or {}
         prompt_tokens = usage.get("prompt_tokens")
         completion_tokens = usage.get("completion_tokens")
+        finish_reason = (result.get("choices") or [{}])[0].get("finish_reason", "unknown")
         if isinstance(completion_tokens, int) and completion_tokens > 0:
             tok_s = completion_tokens / elapsed
             print(
                 f"[LLM_Prompt] Tokens: prompt={prompt_tokens}, "
                 f"completion={completion_tokens}, "
-                f"time={elapsed:.2f}s, speed={tok_s:.2f} tok/s"
+                f"time={elapsed:.2f}s, speed={tok_s:.2f} tok/s, "
+                f"finish={finish_reason}"
+            )
+        if finish_reason == "length":
+            print(
+                f"[LLM_Prompt] ⚠ Output TRUNCATED — hit max_tokens={max_tokens}. "
+                f"Increase max_tokens to get complete output."
             )
 
         raw = (result.get("choices") or [{}])[0].get("message", {}).get("content", "")
-        cleaned = clean_output(str(raw or ""), clean_cfg or CleanConfig(mode="prompt"))
+        cleaned = clean_model_output(str(raw or ""), OutputCleanConfig(mode="text"))
         return cleaned.strip()
 
     def _invoke_with_retry(
@@ -704,40 +729,30 @@ class LLMPromptNode:
         user_prompt: str,
         images_b64: list[str],
         max_tokens: int,
+        temperature: float,
+        top_p: float,
+        repetition_penalty: float,
         seed: int,
     ) -> str:
-        """Invoke with planning detection and retry."""
-        raw = self._invoke(system_prompt, user_prompt, images_b64, max_tokens, seed)
+        """Invoke with planning/reasoning detection and retry."""
 
-        # Check if output is just planning/thinking
-        if not raw or self._looks_like_planning(raw):
+        raw = self._invoke(system_prompt, user_prompt, images_b64, max_tokens, temperature, top_p, repetition_penalty, seed)
+        cleaned = clean_model_output(raw, OutputCleanConfig(mode="prompt"))
+
+        if not cleaned or _looks_like_reasoning(raw) or "<think" in raw.lower():
             retry_system = (
                 "You are a professional prompt writer.\n"
-                "Output ONLY the final prompt text.\n"
-                "No analysis, no planning steps, no first-person, no <think>.\n"
-                "No bullet points, no headings, no JSON, no markdown fences."
+                "Output ONLY ONE final prompt paragraph.\n"
+                "No analysis, no planning steps, no first-person, and no <think>.\n"
+                "No bullet points, no headings, no JSON, no markdown, no quotes."
             )
-            retry_user = f"Rewrite the following into the final prompt:\n\n{raw}"
-            retry = self._invoke(retry_system, retry_user, [], max_tokens, seed + 999)
-            if retry and not self._looks_like_planning(retry):
-                return retry
+            retry_user = f"Rewrite the following into the final prompt paragraph:\n\n{raw}"
+            raw_retry = self._invoke(retry_system, retry_user, [], max_tokens, 0.4, 0.95, 1.05, seed + 999)
+            cleaned_retry = clean_model_output(raw_retry, OutputCleanConfig(mode="prompt"))
+            if cleaned_retry and not _looks_like_reasoning(cleaned_retry):
+                return cleaned_retry
 
-        return raw or ""
-
-    @staticmethod
-    def _looks_like_planning(text: str) -> bool:
-        if not text:
-            return False
-        return bool(
-            re.search(
-                r"(?im)^\s*(okay[,.:]?|first[,.:]?|next[,.:]?|then[,.:]?|wait[,.:]?)\b",
-                text,
-            )
-            or re.search(
-                r"(?i)\b(i\s+(should|need|must|will|am\s+going\s+to|have\s+to))\b",
-                text,
-            )
-        )
+        return cleaned or ""
 
     # ------------------------------------------------------------------
     # Main entry point
@@ -751,6 +766,9 @@ class LLMPromptNode:
         user_prompt: str,
         output_format: str,
         max_tokens: int,
+        temperature: float,
+        top_p: float,
+        repetition_penalty: float,
         device: str,
         keep_model_loaded: bool,
         seed: int,
@@ -760,11 +778,6 @@ class LLMPromptNode:
         image=None,
         video=None,
     ):
-        """Generate a prompt using the LLM.
-
-        Combines: system_prompt (from .md) + style + aspect_ratio + user_prompt -> LLM -> cleaned output.
-        output_format: "text" for natural language, "json" for structured JSON.
-        """
         # Resolve system prompt
         if custom_system_prompt and custom_system_prompt.strip():
             sys_prompt = custom_system_prompt.strip()
@@ -778,7 +791,7 @@ class LLMPromptNode:
                 "Output only the final prompt text."
             )
 
-        # Add output formatting instruction based on format choice
+        # Append output format instruction
         if output_format == "json":
             sys_prompt += (
                 "\n\nReturn the output as valid JSON only. "
@@ -788,11 +801,11 @@ class LLMPromptNode:
         else:
             sys_prompt += (
                 "\n\nReturn only the final prompt text. "
-                "No preface, no explanations, no analysis, no JSON, no markdown fences, no </think>. "
-                "Do not write planning steps and do not use first-person."
+                "No preface, no explanations, no analysis, no JSON, no markdown fences, and no </think>.\n"
+                "Do not write planning steps (no 'First', 'Next', 'Then') and do not use first-person ('I', 'we')."
             )
 
-        # Build user prompt with labeled sections the model can parse
+        # Build user prompt with labeled sections
         parts = []
         if user_prompt and user_prompt.strip():
             parts.append(f"USER PROMPT:\n{user_prompt.strip()}")
@@ -803,6 +816,7 @@ class LLMPromptNode:
             parts.append(f"ASPECT RATIO / CANVAS FORMAT:\n{ar_label}")
 
         final_user_prompt = "\n\n".join(parts) if parts else "Describe a scene vividly."
+
 
         # Process images
         images_b64: list[str] = []
@@ -828,32 +842,28 @@ class LLMPromptNode:
             self._load_model(model_name, device)
 
             if images_b64 and self.chat_handler is None:
-                print(
-                    "[LLM_Prompt] Warning: images provided but no vision projector loaded. "
-                    "Images will be ignored."
-                )
+                print("[LLM_Prompt] Warning: images provided but no vision projector. Images will be ignored.")
 
             if output_format == "json":
-                # For JSON: don't strip JSON wrappers, don't strip planning
                 result = self._invoke(
                     system_prompt=sys_prompt,
                     user_prompt=final_user_prompt,
                     images_b64=images_b64 if self.chat_handler is not None else [],
                     max_tokens=max_tokens,
+                    temperature=temperature,
+                    top_p=top_p,
+                    repetition_penalty=repetition_penalty,
                     seed=seed,
-                    clean_cfg=CleanConfig(
-                        mode="text",
-                        strip_json_wrappers=False,
-                        strip_planning=False,
-                    ),
                 )
             else:
-                # For text: full cleaning with planning retry
                 result = self._invoke_with_retry(
                     system_prompt=sys_prompt,
                     user_prompt=final_user_prompt,
                     images_b64=images_b64 if self.chat_handler is not None else [],
                     max_tokens=max_tokens,
+                    temperature=temperature,
+                    top_p=top_p,
+                    repetition_penalty=repetition_penalty,
                     seed=seed,
                 )
 
@@ -862,7 +872,6 @@ class LLMPromptNode:
         finally:
             if not keep_model_loaded:
                 self.clear()
-                print("[LLM_Prompt] Model unloaded (keep_model_loaded=False)")
 
 
 # ---------------------------------------------------------------------------
