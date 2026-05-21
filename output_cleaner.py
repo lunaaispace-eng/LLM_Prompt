@@ -33,6 +33,9 @@ _MARKER_RE = re.compile(
 _IM_TOKEN_RE = re.compile(
     r"(?i)<\|?im_(start|end)\|?>|<im_(start|end)>|<\|endoftext\|>",
 )
+_THINKING_LINE_RE = re.compile(
+    r"(?im)^\s*(thinking|reasoning|analysis)\s*[:\-].*$"
+)
 _PLANNING_RE = re.compile(
     r"(?is)\b("
     r"i\s+(should|need|must|will|want|am\s+going\s+to|have\s+to)\b|"
@@ -63,6 +66,7 @@ def clean_model_output(text: str, config: OutputCleanConfig | None = None) -> st
             if len(parts) == 2:
                 cleaned = parts[1]
         cleaned = cleaned.strip()
+        cleaned = _THINKING_LINE_RE.sub("", cleaned).strip()
 
     cleaned = _IM_TOKEN_RE.sub("", cleaned).strip()
 
