@@ -631,7 +631,7 @@ class LLMPromptNode:
             "verbose": False,
             "pool_size": resolved.pool_size,
             "top_k": resolved.top_k,
-            # Qwen 3.5: disable thinking mode at template level
+            # Qwen 3.5: disable thinking mode at template level (when supported)
             "chat_template_kwargs": {"enable_thinking": False},
         }
         if has_mmproj and self.chat_handler is not None:
@@ -690,15 +690,22 @@ class LLMPromptNode:
             ]
 
         start = time.perf_counter()
-        result = self.llm.create_chat_completion(
-            messages=messages,
-            max_tokens=int(max_tokens),
-            temperature=float(temperature),
-            top_p=float(top_p),
-            repeat_penalty=float(repetition_penalty),
-            seed=int(seed),
-            stop=["<|im_end|>", "<|im_start|>"],
+        completion_kwargs = {
+            "messages": messages,
+            "max_tokens": int(max_tokens),
+            "temperature": float(temperature),
+            "top_p": float(top_p),
+            "repeat_penalty": float(repetition_penalty),
+            "seed": int(seed),
+            # Guardrails for Qwen 3.5 templates that may still emit reasoning tags/tokens.
+            "stop": ["<|im_end|>", "<|im_start|>", "<think>", "</think>"],
+            # Some llama.cpp builds honor this here even if not on Llama().__init__.
+            "chat_template_kwargs": {"enable_thinking": False},
+        }
+        completion_kwargs = _filter_kwargs_for_callable(
+            self.llm.create_chat_completion, completion_kwargs
         )
+        result = self.llm.create_chat_completion(**completion_kwargs)
         elapsed = max(time.perf_counter() - start, 1e-6)
 
         usage = result.get("usage") or {}
@@ -720,8 +727,7 @@ class LLMPromptNode:
             )
 
         raw = (result.get("choices") or [{}])[0].get("message", {}).get("content", "")
-        cleaned = clean_model_output(str(raw or ""), OutputCleanConfig(mode="text"))
-        return cleaned.strip()
+        return str(raw or "").strip()
 
     def _invoke_with_retry(
         self,
