@@ -682,11 +682,25 @@ class LLMPromptNode:
                     "max": 1.0,
                     "step": 0.05,
                 }),
+                "top_k": ("INT", {
+                    "default": 30,
+                    "min": 0,
+                    "max": 200,
+                    "tooltip": "Top-K sampling. 0 = disabled. 30 is a quality floor for Qwen, 64 for Gemma 4.",
+                }),
+                "min_p": ("FLOAT", {
+                    "default": 0.05,
+                    "min": 0.0,
+                    "max": 1.0,
+                    "step": 0.01,
+                    "tooltip": "Min-P sampling — sets a quality floor by filtering tokens below this probability. 0.05 is a safe default.",
+                }),
                 "repetition_penalty": ("FLOAT", {
-                    "default": 1.1,
+                    "default": 1.0,
                     "min": 0.5,
                     "max": 2.0,
                     "step": 0.05,
+                    "tooltip": "Repetition penalty. 1.0 = disabled (Google's Gemma 4 recommendation). Raise only if you see repetition.",
                 }),
                 "device": (device_options, {
                     "default": "auto",
@@ -969,6 +983,8 @@ class LLMPromptNode:
         top_p: float,
         repetition_penalty: float,
         seed: int,
+        top_k: int = 30,
+        min_p: float = 0.05,
     ) -> str:
         """Run inference â€” same call signature as QwenVL-Mod GGUF."""
         if images_b64 and self.chat_handler is not None:
@@ -995,6 +1011,8 @@ class LLMPromptNode:
             "max_tokens": int(max_tokens),
             "temperature": float(temperature),
             "top_p": float(top_p),
+            "top_k": int(top_k),
+            "min_p": float(min_p),
             "repeat_penalty": float(repetition_penalty),
             "seed": int(seed),
         }
@@ -1168,6 +1186,8 @@ class LLMPromptNode:
         max_tokens: int,
         temperature: float,
         top_p: float,
+        top_k: int,
+        min_p: float,
         repetition_penalty: float,
         device: str,
         keep_model_loaded: bool,
@@ -1281,9 +1301,22 @@ class LLMPromptNode:
                 max_tokens=max_tokens,
                 temperature=temperature,
                 top_p=top_p,
+                top_k=top_k,
+                min_p=min_p,
                 repetition_penalty=repetition_penalty,
                 seed=seed,
             )
+
+            # Qwen 3.5 specifically pollutes its own KV cache state across runs
+            # when keep_model_loaded=True — second/third inference returns empty
+            # output. Clear the cache after each Qwen 3.5 invocation as a fix.
+            # (Discovered via lihaoyun6/ComfyUI-llama-cpp_vlm.)
+            if "qwen" in (self.loaded_model_name_lower or "") and "3.5" in (self.loaded_model_name_lower or ""):
+                try:
+                    self.llm.n_tokens = 0
+                    self.llm._ctx.memory_clear(True)
+                except Exception:
+                    pass
 
             return (result,)
 
