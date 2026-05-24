@@ -1307,16 +1307,11 @@ class LLMPromptNode:
                 seed=seed,
             )
 
-            # Qwen 3.5 specifically pollutes its own KV cache state across runs
-            # when keep_model_loaded=True — second/third inference returns empty
-            # output. Clear the cache after each Qwen 3.5 invocation as a fix.
-            # (Discovered via lihaoyun6/ComfyUI-llama-cpp_vlm.)
-            if "qwen" in (self.loaded_model_name_lower or "") and "3.5" in (self.loaded_model_name_lower or ""):
-                try:
-                    self.llm.n_tokens = 0
-                    self.llm._ctx.memory_clear(True)
-                except Exception:
-                    pass
+            # NOTE: Qwen 3.5 cache-clear was tried here but caused mixed output
+            # when the _ctx.memory_clear() call silently failed on some
+            # llama-cpp-python versions — leaving n_tokens=0 with stale KV cache.
+            # If the "works twice then stops" issue returns, the right fix is to
+            # toggle keep_model_loaded=False, not to manipulate cache internals.
 
             return (result,)
 
