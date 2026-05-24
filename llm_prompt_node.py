@@ -796,17 +796,22 @@ class LLMPromptNode:
             # because older GGUF builds may not embed it.
             m_name_lower = model_path.name.lower()
             if "gemma" in m_name_lower:
-                # Try "gemma3" first (newer llama-cpp-python), fall back to "gemma"
-                # (older versions). Both use the same <start_of_turn>...<end_of_turn>
-                # template, so "gemma" works for Gemma 3/4/SuperGemma too.
+                # Try "gemma3" first (newer llama-cpp-python). If unavailable, DO
+                # NOT fall back to the legacy "gemma" handler — it is the Gemma 1/2
+                # template and is incompatible with Gemma 4's <|channel> / channel
+                # thought-block tokens. The model would produce garbage output
+                # like ",[]" because the chat structure is wrong.
+                #
+                # Instead, leave chat_format unset so llama-cpp-python uses the
+                # GGUF's embedded Jinja2 template — which is correct for Gemma 4
+                # GGUFs built after Google's April 11 chat template fix.
                 try:
                     from llama_cpp.llama_chat_format import _CHAT_HANDLERS  # type: ignore
                     if "gemma3" in _CHAT_HANDLERS:
                         llm_kwargs["chat_format"] = "gemma3"
-                    else:
-                        llm_kwargs["chat_format"] = "gemma"
+                    # else: no override — embedded GGUF template
                 except Exception:
-                    llm_kwargs["chat_format"] = "gemma"
+                    pass  # no override — embedded GGUF template
             elif "llama-3" in m_name_lower:
                 llm_kwargs["chat_format"] = "llama-3"
             elif "qwen" in m_name_lower:
