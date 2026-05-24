@@ -195,8 +195,19 @@ def _scan_llm_folder() -> dict[str, dict]:
             if "mmproj" in f.name.lower()
         ]
 
+        # Detect text-only models that should NOT be paired with mmproj.
+        # SuperGemma uncensored variants are text-only — auto-attaching a
+        # Gemma 4 mmproj that happens to be in the same folder causes the
+        # vision projector to load on weights it doesn't match, hanging the
+        # model. Mirrors VRGDG's _is_text_only_supergemma_model heuristic.
+        is_text_only = (
+            "26" in name_lower
+            and "uncensored" in name_lower
+            and "vision" not in name_lower
+        )
+
         mmproj_path = None
-        if mmproj_candidates:
+        if mmproj_candidates and not is_text_only:
             if len(mmproj_candidates) == 1:
                 mmproj_path = mmproj_candidates[0]
             else:
