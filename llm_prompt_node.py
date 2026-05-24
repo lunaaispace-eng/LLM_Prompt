@@ -1,4 +1,4 @@
-﻿
+
 """LLM Prompt â€” ComfyUI node for prompt generation via GGUF vision models.
 
 Built on the proven QwenVL-Mod GGUF inference code. Adds:
@@ -389,58 +389,56 @@ def _looks_like_reasoning(text: str) -> bool:
 
 
 def _strip_think_blocks(text: str) -> str:
-    """Remove thinking content from model output.
+    """Strip thinking content from model output.
 
-    Handles:
-    - Tagged blocks:   <think>...</think>content  â†’ content
-    - Unclosed tags:   <think>...EOF              â†’ empty
-    - Qwen 3.5 raw reasoning sections (no tags): strips everything up to the
-      last recognizable section header, then takes what follows as the output.
-    - Trailing 'cw' terminator artifact from Qwen 3.5 thinking mode.
+    Mirrors VRGDG's approach: split on </think> and take whatever comes after.
+    Bulletproof against unclosed tags, malformed think blocks, and post-think
+    notes. Then peel off labeled draft markers like "Final Prompt:" if present.
     """
-    if not text:
-        return text
+    cleaned = str(text or "")
 
-    # Remove tagged think blocks (complete and unclosed)
-    cleaned = re.sub(r"(?is)<think>.*?</think>", "", text)
-    cleaned = re.sub(r"(?is)<think>.*$", "", cleaned)
+    # Strip explicit reasoning headers at the start (some models emit them raw, no tags)
+    cleaned = re.sub(r"(?is)^\s*thinking process\s*:\s*", "", cleaned)
+    cleaned = re.sub(r"(?is)^\s*reasoning\s*:\s*", "", cleaned)
+    cleaned = re.sub(r"(?is)^\s*analysis\s*:\s*", "", cleaned)
+    cleaned = re.sub(r"(?is)^\s*\*+\s*thinking process\s*:?\s*\*+\s*", "", cleaned)
+    cleaned = re.sub(r"(?is)^\s*\*+\s*reasoning\s*:?\s*\*+\s*", "", cleaned)
+    cleaned = re.sub(r"(?is)^\s*\*+\s*analysis\s*:?\s*\*+\s*", "", cleaned)
 
-    # Strip Qwen 3.5 raw reasoning: find the last "Revised Draft:" or "Ready to output"
-    # marker and take only the content that follows it as the actual output.
-    reasoning_section_end = re.search(
-        r"(?im)^.*?(revised\s+draft\s*:|final\s+output\s*:).*$",
-        cleaned
-    )
-    if reasoning_section_end:
-        after = cleaned[reasoning_section_end.end():].strip()
-        if after:
-            cleaned = after
+    # The key trick: if </think> exists anywhere, take only what comes after it.
+    # Handles unclosed tags, nested tags, anything.
+    if re.search(r"</think>", cleaned, flags=re.IGNORECASE):
+        cleaned = re.split(r"</think>", cleaned, flags=re.IGNORECASE)[-1]
+    # Mop up any lingering <think>...</think> pairs and stray <think> openers
+    cleaned = re.sub(r"<think>.*?</think>", "", cleaned, flags=re.IGNORECASE | re.DOTALL)
+    cleaned = re.sub(r"<think>", "", cleaned, flags=re.IGNORECASE)
+    cleaned = cleaned.strip()
 
-    # Strip trailing meta-lines Qwen 3.5 emits after the draft â€” loop until stable
-    for _ in range(10):
-        before = cleaned
-        cleaned = re.sub(
-            r"(?im)^\s*(ready\s+to\s+output|looks\s+(solid|good|tight)|final\s+(check|review|polish|output)[^\n]*|token\s+count[^\n]*|approx\.?\s*\d+\s+tokens[^\n]*|good\s+range[^\n]*|section\s+order[^\n]*|let'?s\s+refine[^\n]*|check\s+for\s+(nsfw|aspect)[^\n]*)\.*\s*$",
-            "", cleaned
-        ).strip()
-        if cleaned == before:
-            break
+    # If the model labels its final answer, extract just that part
+    labeled_patterns = [
+        r"(?is)(?:\*?\s*final prompt\s*:\*?)(.+)$",
+        r"(?is)(?:\*?\s*revised prompt\s*:\*?)(.+)$",
+        r"(?is)(?:\*?\s*final plan\s*:\*?)(.+)$",
+        r"(?is)(?:\*?\s*draft\s*:\*?)(.+)$",
+    ]
+    for pat in labeled_patterns:
+        m = re.search(pat, cleaned, flags=re.IGNORECASE)
+        if m:
+            candidate = m.group(1).strip()
+            if candidate:
+                cleaned = candidate
+                break
 
-    # Strip trailing Qwen 3.5 thinking terminator artifact: bare "cw" at end of output
-    cleaned = re.sub(r"(?m)\bcw\s*$", "", cleaned).strip()
-
-    # Gemma 4 / SuperGemma: strip control tokens that can leak from embedded templates
+    # Gemma 4 / SuperGemma control token artifacts
     cleaned = re.sub(r"_?\s*<\|?channel\|?>\s*(?:thought|analysis|reasoning)?\s*", "", cleaned, flags=re.IGNORECASE)
     cleaned = re.sub(r"</?thought>", "", cleaned, flags=re.IGNORECASE)
-
-    # SuperGemma uncensored: hard-cut on loop runaway tokens â€” everything after is garbage
+    # SuperGemma loop runaway tokens
     for _marker in ("thought_turn", "turn_turn"):
         if _marker in cleaned:
             cleaned = cleaned.split(_marker)[0]
-
-    # SuperGemma uncensored: strip language prefix artifacts emitted before the actual answer
-    cleaned = re.sub(r"^ë‚˜ì˜ ë‹µë³€ì€ ë‹¤ìŒê³¼ ê°™ìŠµë‹ˆë‹¤\.\s*", "", cleaned)
-    cleaned = re.sub(r"^å›žç­”[:ï¼š]\s*", "", cleaned)
+    # SuperGemma language prefix artifacts
+    cleaned = re.sub(r"^나의 답변은 다음과 같습니다\.\s*", "", cleaned)
+    cleaned = re.sub(r"^回答[:：]\s*", "", cleaned)
     cleaned = re.sub(r"^(?:Assistant|Answer):\s*", "", cleaned, flags=re.IGNORECASE)
 
     return cleaned.strip()
@@ -818,23 +816,13 @@ class LLMPromptNode:
             "top_p": float(top_p),
             "repeat_penalty": float(repetition_penalty),
             "seed": int(seed),
-            # enable_thinking=False: passed here via chat_template_kwargs so the embedded
-            # Jinja2 template in the GGUF can act on it. Best-effort â€” silently ignored
-            # by models whose templates don't check for it.
-            "chat_template_kwargs": {"enable_thinking": False},
         }
+        # Stripped down to match VRGDG's minimal call signature.
+        # No stop tokens (model knows its own EOS). No chat_template_kwargs.
+        # Post-processing in _strip_think_blocks() handles thinking output.
         completion_kwargs = _filter_kwargs_for_callable(
             self.llm.create_chat_completion, completion_kwargs
         )
-        # Stop tokens applied AFTER filtering so they can never be silently dropped.
-        # Neither <think> nor </think> are stop tokens.
-        # Stopping on <think> produces empty output when thinking models emit it first.
-        # Stopping on </think> halts generation before the actual answer (which comes
-        # AFTER the closing tag) â€” _strip_think_blocks() handles the full block in post.
-        completion_kwargs["stop"] = [
-            "<|im_end|>", "<|im_start|>",
-            "<end_of_turn>", "<eos>", "<|eot_id|>", "<|end_of_text|>",
-        ]
         result = self.llm.create_chat_completion(**completion_kwargs)
         elapsed = max(time.perf_counter() - start, 1e-6)
 
@@ -1082,31 +1070,19 @@ class LLMPromptNode:
             if images_b64 and self.chat_handler is None:
                 print("[LLM_Prompt] Warning: images provided but no vision projector. Images will be ignored.")
 
-            if output_format in ("json", "list"):
-                # Direct invoke â€” no reasoning detection or retry.
-                # json: structured output. list: numbered multi-scene output where
-                # numbered lines would be falsely flagged as reasoning.
-                result = self._invoke(
-                    system_prompt=sys_prompt,
-                    user_prompt=final_user_prompt,
-                    images_b64=images_b64 if self.chat_handler is not None else [],
-                    max_tokens=max_tokens,
-                    temperature=temperature,
-                    top_p=top_p,
-                    repetition_penalty=repetition_penalty,
-                    seed=seed,
-                )
-            else:
-                result = self._invoke_with_retry(
-                    system_prompt=sys_prompt,
-                    user_prompt=final_user_prompt,
-                    images_b64=images_b64 if self.chat_handler is not None else [],
-                    max_tokens=max_tokens,
-                    temperature=temperature,
-                    top_p=top_p,
-                    repetition_penalty=repetition_penalty,
-                    seed=seed,
-                )
+            # All output formats route through _invoke() directly.
+            # _invoke() returns text already cleaned by _strip_think_blocks().
+            # No reasoning detection, no retry loops, no false positives.
+            result = self._invoke(
+                system_prompt=sys_prompt,
+                user_prompt=final_user_prompt,
+                images_b64=images_b64 if self.chat_handler is not None else [],
+                max_tokens=max_tokens,
+                temperature=temperature,
+                top_p=top_p,
+                repetition_penalty=repetition_penalty,
+                seed=seed,
+            )
 
             return (result,)
 
