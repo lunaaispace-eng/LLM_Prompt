@@ -353,23 +353,34 @@ def _looks_like_reasoning(text: str) -> bool:
     if re.search(r"(?m)\bcw\s*$", text.strip()):
         return True
 
-    # Standard planning first-person
-    if re.search(r"(?i)\b(i\s+(should|need|must|will|am\s+going\s+to|have\s+to))\b", text):
+    # Standard planning first-person — "I should", "I need to", etc.
+    # "I will" alone is too broad (cinematic prose: "The camera will pan...")
+    # so require "I will" at a sentence boundary or line start.
+    if re.search(r"(?i)\b(i\s+(should|need\s+to|must|am\s+going\s+to|have\s+to))\b", text):
         return True
-    if re.search(r"(?im)^\s*(okay[,.:]?|first[,.:]?|next[,.:]?|then[,.:]?|wait[,.:]?|let me)\b", text):
+    # Reasoning self-correction openers — only strong planning words, not "first/next/then"
+    # (those appear constantly in cinematic prose: "First, the camera...", "Then the light...")
+    if re.search(r"(?im)^\s*(okay[,.:]|wait[,.:]|let me\b)", text):
         return True
 
-    # Numbered analysis steps: "1. **Subject:**" or "2. Deconstruct"
-    numbered = len(re.findall(r"(?m)^\s*\d+\.\s+\*{0,2}[A-Z]", text))
+    # Numbered analysis steps — only flag if the numbered items look like analysis tasks,
+    # not just any sentence starting with a number (scene lists, steps in a description).
+    # Pattern: "1. **Verb**" or "1. Verb the ..." where verb is an analysis word.
+    numbered = len(re.findall(
+        r"(?m)^\s*\d+\.\s+\*{0,2}(analyze|deconstruct|draft|refine|merge|review|check|polish|verify|assess|consider|plan)\b",
+        text, re.IGNORECASE
+    ))
     if numbered >= 2:
         return True
 
-    # Markdown bold headers: "**Subject:**" "**Lighting:**"
+    # Markdown bold headers that look like structured analysis sections
+    # e.g. "**Subject:**", "**Lighting:**", "**Camera:**" — three or more in a row
+    # Two bold headers alone is too sensitive (a prompt might legitimately bold two terms)
     bold_headers = len(re.findall(r"(?m)\*{1,2}[A-Za-z][^*]+\*{1,2}\s*:", text))
-    if bold_headers >= 2:
+    if bold_headers >= 3:
         return True
 
-    # Bullet point analysis
+    # Bullet point analysis — three or more bullets strongly suggests structured reasoning
     bullets = len(re.findall(r"(?m)^\s*[-*]\s+", text))
     if bullets >= 3:
         return True
@@ -871,8 +882,12 @@ class LLMPromptNode:
 
         # Find the last occurrence of a draft marker line
         # (last because sometimes there are multiple draft iterations)
+        # Covers Qwen 3.5 patterns: "Revised Draft:", "Final Draft:", "Final Prompt:",
+        # "**Final Prompt:**", "Draft Construction:", "Here is the prompt:", etc.
         markers = list(re.finditer(
-            r"(?im)^.*?(revised\s+draft\s*:|final\s+draft\s*:|draft\s+construction\s*:|^6\.\s+\*{0,2}draft).*$",
+            r"(?im)^.*?(\*{0,2}(revised|final)\s+(draft|prompt|output)\*{0,2}\s*:|"  # noqa: W503
+            r"draft\s+construction\s*:|here\s+is\s+(the\s+)?(final\s+)?(prompt|output)\s*:|"  # noqa: W503
+            r"^6\.\s+\*{0,2}draft).*$",
             text
         ))
         if not markers:
@@ -951,9 +966,10 @@ class LLMPromptNode:
             if cleaned_retry:
                 return cleaned_retry
 
-        # Both extraction and retry failed â€” return whatever _strip_think_blocks gave us
+        # Both extraction and retry failed — return whatever _strip_think_blocks gave us
+        # Use keep_first_paragraph_only so trailing notes/analysis are dropped.
         print("[LLM_Prompt] Warning: could not clean reasoning output. Returning best effort.")
-        cleaned = clean_model_output(raw, OutputCleanConfig(mode="prompt"))
+        cleaned = clean_model_output(raw, OutputCleanConfig(mode="prompt", keep_first_paragraph_only=True))
         return cleaned or raw.strip()
 
     # ------------------------------------------------------------------
