@@ -818,11 +818,17 @@ class LLMPromptNode:
             "seed": int(seed),
         }
         # Stripped down to match VRGDG's minimal call signature.
-        # No stop tokens (model knows its own EOS). No chat_template_kwargs.
-        # Post-processing in _strip_think_blocks() handles thinking output.
+        # No chat_template_kwargs. Post-processing in _strip_think_blocks()
+        # handles thinking output.
         completion_kwargs = _filter_kwargs_for_callable(
             self.llm.create_chat_completion, completion_kwargs
         )
+        # Gemma-family models lose their natural EOS (</s>) at load time because
+        # llama.cpp's EOG-list logic conflicts with <|tool_response>. Without an
+        # explicit stop list they generate until max_tokens. Add Gemma stops back.
+        # Qwen/other models keep llama.cpp's default EOS handling (no stop list).
+        if "gemma" in (self.loaded_model_name_lower or ""):
+            completion_kwargs["stop"] = ["<end_of_turn>", "<eos>", "</s>"]
         result = self.llm.create_chat_completion(**completion_kwargs)
         elapsed = max(time.perf_counter() - start, 1e-6)
 
