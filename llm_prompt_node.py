@@ -1045,9 +1045,15 @@ class LLMPromptNode:
             "repeat_penalty": float(repetition_penalty),
             "seed": int(seed),
         }
-        # Stripped down to match VRGDG's minimal call signature.
-        # No chat_template_kwargs. Post-processing in _strip_think_blocks()
-        # handles thinking output.
+        # Qwen 3.x thinking-mode kill switch via chat template. The /no_think
+        # control token in the user prompt only works on some Qwen GGUF builds —
+        # passing enable_thinking=False at the chat-template level is more
+        # reliable because it bypasses the model's training entirely and renders
+        # the chat template WITHOUT the thinking infrastructure.
+        # (Approach borrowed from lihaoyun6/ComfyUI-llama-cpp_vlm.)
+        if "qwen" in (self.loaded_model_name_lower or ""):
+            completion_kwargs["chat_template_kwargs"] = {"enable_thinking": False}
+
         completion_kwargs = _filter_kwargs_for_callable(
             self.llm.create_chat_completion, completion_kwargs
         )
