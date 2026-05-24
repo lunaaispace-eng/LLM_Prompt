@@ -53,7 +53,12 @@ _ASPECT_LABELS = {
 
 
 def _detect_aspect_ratio(width: int, height: int) -> str:
-    """Convert pixel dimensions to a composition-intent aspect ratio string."""
+    """Convert pixel dimensions to a composition-intent aspect ratio label.
+
+    Kept for back-compat. New code should call _build_canvas_profile() which
+    returns a richer multi-line profile that guides the LLM toward composition,
+    framing, depth, and camera choices appropriate for the canvas shape.
+    """
     from math import gcd
     g = gcd(width, height)
     w_r, h_r = width // g, height // g
@@ -78,6 +83,120 @@ def _detect_aspect_ratio(width: int, height: int) -> str:
     elif height > width:
         return f"{w_r}:{h_r} portrait"
     return f"{w_r}:{h_r} square"
+
+
+def _classify_canvas_shape(width: int, height: int) -> str:
+    """Bucket the canvas into a shape category that drives composition rules.
+
+    Buckets (by aspect ratio = width / height):
+      ultra_tall   : <= 0.50    (9:21 and taller)
+      tall         : 0.51-0.70  (9:16, 2:3, 3:4 vertical)
+      portrait     : 0.71-0.95  (4:5, slight portrait)
+      square       : 0.95-1.05  (1:1 and near-square)
+      landscape    : 1.05-1.40  (5:4, 4:3, 3:2 photographic)
+      cinematic    : 1.41-1.90  (16:9 and similar widescreen)
+      ultra_wide   : >= 1.91    (21:9, 32:9, anamorphic)
+    """
+    if width <= 0 or height <= 0:
+        return "unknown"
+    ratio = width / height
+    if ratio <= 0.50:
+        return "ultra_tall"
+    if ratio <= 0.70:
+        return "tall"
+    if ratio <= 0.95:
+        return "portrait"
+    if ratio <= 1.05:
+        return "square"
+    if ratio <= 1.40:
+        return "landscape"
+    if ratio <= 1.90:
+        return "cinematic"
+    return "ultra_wide"
+
+
+# Composition profiles per shape — model-independent guidance.
+# These describe what to DO with the canvas shape, not what to do for any
+# specific generator (SD/SDXL/Flux/Wan/LTX). Detail density is intentionally
+# left out because it depends on the target model and is the user's call.
+_CANVAS_PROFILES = {
+    "ultra_tall": {
+        "framing": "extreme vertical — full-body or head-to-toe, subject dominates the column",
+        "composition": "strong vertical emphasis, subject centered horizontally, layered vertical depth",
+        "camera": "85-135mm portrait lens feel, shallow depth of field, compressed perspective",
+        "depth": "shallow — clean separation between subject and background",
+        "avoid": "panoramic vistas, wide horizontal sweeps, group compositions, environmental establishing shots",
+    },
+    "tall": {
+        "framing": "half-body to full-body portrait, subject takes most of the frame height",
+        "composition": "vertical emphasis, subject anchored center or rule-of-thirds vertical",
+        "camera": "85mm portrait lens feel, shallow to medium depth of field",
+        "depth": "shallow — background softly blurred, subject in sharp focus",
+        "avoid": "wide environmental shots, panoramic landscapes, lateral camera motion",
+    },
+    "portrait": {
+        "framing": "close-up to medium portrait, subject prominent with limited environment",
+        "composition": "subject-forward, modest vertical bias",
+        "camera": "50-85mm normal-to-portrait lens feel, moderate depth of field",
+        "depth": "moderate — subject sharp, environment softened but recognizable",
+        "avoid": "wide vistas, complex multi-subject scenes",
+    },
+    "square": {
+        "framing": "tight centered subject, minimal environment, headshot or product-style framing",
+        "composition": "centered, symmetrical balance, single focal point",
+        "camera": "50-85mm normal lens feel, controlled depth",
+        "depth": "moderate to shallow — subject is the entire focus",
+        "avoid": "off-center subjects, panoramic compositions, sprawling environments",
+    },
+    "landscape": {
+        "framing": "medium shot, subject within scene, room for environmental context",
+        "composition": "rule-of-thirds, subject can be centered or offset, balanced horizontal flow",
+        "camera": "35-50mm normal lens feel, moderate depth of field",
+        "depth": "moderate — subject and environment both rendered with clarity",
+        "avoid": "extreme verticality, towering compositions, claustrophobic framing",
+    },
+    "cinematic": {
+        "framing": "medium to wide shot, subject within environment, cinematic establishing feel",
+        "composition": "rule-of-thirds horizontal, leading lines, layered foreground-midground-background",
+        "camera": "24-35mm wide lens feel, deeper depth of field, slight perspective compression",
+        "depth": "deep to moderate — environment matters as much as subject",
+        "avoid": "tight vertical framing, towering portrait composition, single-element close-ups",
+    },
+    "ultra_wide": {
+        "framing": "wide environmental shot, panoramic sweep, subject occupies a portion of the horizontal expanse",
+        "composition": "strong horizontal flow, panoramic balance, lateral leading lines, anamorphic feel",
+        "camera": "21-24mm wide lens or anamorphic 2.39:1 cinematic, deep depth of field",
+        "depth": "deep — full environmental rendering, foreground to far background",
+        "avoid": "vertical subject emphasis, head-to-toe portraits, tight close-ups, centered single-subject framing",
+    },
+}
+
+
+def _build_canvas_profile(width: int, height: int) -> str:
+    """Build a rich composition profile string from canvas dimensions.
+
+    Returns a multi-line block suitable for injecting into the LLM user prompt.
+    Pure aspect-ratio-driven — no assumptions about target diffusion model or
+    detail density (those are user-controlled via the user_prompt text).
+    """
+    if width <= 0 or height <= 0:
+        return ""
+
+    label = _detect_aspect_ratio(width, height)
+    shape = _classify_canvas_shape(width, height)
+    profile = _CANVAS_PROFILES.get(shape)
+    if not profile:
+        return f"CANVAS FORMAT:\n{label} ({width}x{height})"
+
+    return (
+        f"CANVAS FORMAT:\n"
+        f"- Aspect: {label} ({width}x{height})\n"
+        f"- Framing: {profile['framing']}\n"
+        f"- Composition: {profile['composition']}\n"
+        f"- Camera: {profile['camera']}\n"
+        f"- Depth: {profile['depth']}\n"
+        f"- Avoid: {profile['avoid']}"
+    )
 
 # ---------------------------------------------------------------------------
 # System prompt loading from .md files
@@ -1113,8 +1232,9 @@ class LLMPromptNode:
         if style and style.strip():
             parts.append(f"STYLE DESCRIPTION:\n{style.strip()}")
         if width > 0 and height > 0:
-            ar_label = _detect_aspect_ratio(width, height)
-            parts.append(f"ASPECT RATIO / CANVAS FORMAT:\n{ar_label}")
+            canvas_block = _build_canvas_profile(width, height)
+            if canvas_block:
+                parts.append(canvas_block)
 
         final_user_prompt = "\n\n".join(parts) if parts else "Describe a scene vividly."
 
