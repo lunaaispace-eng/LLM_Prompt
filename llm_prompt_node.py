@@ -1,4 +1,5 @@
-"""LLM Prompt — ComfyUI node for prompt generation via GGUF vision models.
+﻿
+"""LLM Prompt â€” ComfyUI node for prompt generation via GGUF vision models.
 
 Built on the proven QwenVL-Mod GGUF inference code. Adds:
   - System prompt presets from .md files in prompts/ folder
@@ -21,13 +22,12 @@ from pathlib import Path
 
 import numpy as np
 import torch
-from huggingface_hub import hf_hub_download
 from llama_cpp import Llama
 from PIL import Image
 
 import folder_paths
 
-# Bundled output cleaner — no external dependencies
+# Bundled output cleaner â€” no external dependencies
 from .output_cleaner import OutputCleanConfig, clean_model_output
 
 # ---------------------------------------------------------------------------
@@ -36,8 +36,6 @@ from .output_cleaner import OutputCleanConfig, clean_model_output
 
 NODE_DIR = Path(__file__).parent
 PROMPTS_DIR = NODE_DIR / "prompts"
-GGUF_CONFIG_PATH = NODE_DIR / "gguf_models.json"
-
 # Aspect ratio mapping: (w_ratio, h_ratio) -> label
 _ASPECT_LABELS = {
     (1, 1):   "1:1 square",
@@ -128,101 +126,129 @@ def load_system_prompts() -> dict[str, str]:
 SYSTEM_PROMPTS = load_system_prompts()
 
 # ---------------------------------------------------------------------------
-# Model catalog (same structure as QwenVL-Mod gguf_models.json)
+# Model folder scanner â€” replaces static gguf_models.json catalog
 # ---------------------------------------------------------------------------
 
-def _load_gguf_vl_catalog():
-    if not GGUF_CONFIG_PATH.exists():
-        return {"base_dir": "LLM/GGUF", "models": {}}
+# LLM model folder: ComfyUI/models/LLM
+# Scans recursively for .gguf files, auto-detects mmproj companions.
+# mmproj detection: any .gguf file in the same folder whose name contains "mmproj".
+
+def _get_llm_folders() -> list[Path]:
+    """Return all registered LLM folders from ComfyUI folder_paths.
+
+    Covers multiple registered paths (e.g. two installs pointing to different drives)
+    and falls back to models/LLM if nothing is registered.
+    """
+    folders: list[Path] = []
     try:
-        with open(GGUF_CONFIG_PATH, "r", encoding="utf-8") as fh:
-            data = json.load(fh) or {}
-    except Exception as exc:
-        print(f"[LLM_Prompt] gguf_models.json load failed: {exc}")
-        return {"base_dir": "LLM/GGUF", "models": {}}
+        if hasattr(folder_paths, "get_folder_paths"):
+            for key in ("llm", "LLM", "llm_gguf", "LLM_gguf"):
+                for d in folder_paths.get_folder_paths(key):
+                    p = Path(d)
+                    if p not in folders:
+                        folders.append(p)
+    except Exception:
+        pass
+    if not folders:
+        folders.append(Path(folder_paths.models_dir) / "LLM")
+    return folders
 
-    base_dir = data.get("base_dir") or "LLM/GGUF"
-    flattened: dict[str, dict] = {}
 
-    # Parse qwenVL_model repos (vision models) — may be at root or nested under "models"
-    raw_models = data.get("models") or {}
-    repos = raw_models.get("qwenVL_model") or data.get("qwenVL_model") or data.get("vl_repos") or {}
-    seen: set[str] = set()
-    for repo_key, repo in repos.items():
-        if not isinstance(repo, dict):
+def _scan_llm_folder() -> dict[str, dict]:
+    """Scan all registered LLM folders recursively and return a dict of display_name -> model info.
+
+    For each .gguf found that is NOT an mmproj file:
+      - display_name = filename (e.g. "Qwen3-VL-8B-Q8_0.gguf")
+      - full_path    = absolute path to the model file
+      - mmproj_path  = absolute path to companion mmproj if found in same folder, else None
+
+    mmproj detection rules (in order):
+      1. Any .gguf in the same folder whose name contains "mmproj" (case-insensitive)
+      2. If multiple mmproj files exist, prefer the one whose name most closely matches
+         the model file name (longest common prefix).
+    """
+    llm_folders = _get_llm_folders()
+    existing = [f for f in llm_folders if f.exists()]
+    if not existing:
+        print(f"[LLM_Prompt] No LLM folders found. Checked: {[str(f) for f in llm_folders]}")
+        return {}
+
+    models: dict[str, dict] = {}
+    seen_names: set[str] = set()
+
+    # Walk all registered folders
+    all_ggufs = []
+    for llm_folder in existing:
+        all_ggufs.extend(sorted(llm_folder.rglob("*.gguf")))
+
+    for gguf_file in all_ggufs:
+        name_lower = gguf_file.name.lower()
+
+        # Skip mmproj files â€” they are companions, not models
+        if "mmproj" in name_lower:
             continue
-        author = repo.get("author") or repo.get("publisher")
-        repo_name = repo.get("repo_name") or repo.get("repo_name_override") or repo_key
-        repo_id = repo.get("repo_id") or (f"{author}/{repo_name}" if author and repo_name else None)
-        alt_repo_ids = repo.get("alt_repo_ids") or []
-        defaults = repo.get("defaults") or {}
-        mmproj_file = repo.get("mmproj_file")
-        model_files = repo.get("model_files") or []
 
-        for model_file in model_files:
-            display = Path(model_file).name
-            if display in seen:
-                display = f"{display} ({repo_key})"
-            seen.add(display)
-            flattened[display] = {
-                **defaults,
-                "author": author,
-                "repo_dirname": repo_name,
-                "repo_id": repo_id,
-                "alt_repo_ids": alt_repo_ids,
-                "filename": model_file,
-                "mmproj_filename": mmproj_file,
-            }
+        # Find mmproj companions in the same folder
+        folder = gguf_file.parent
+        mmproj_candidates = [
+            f for f in folder.glob("*.gguf")
+            if "mmproj" in f.name.lower()
+        ]
 
-    # Also parse text-only Qwen_model if present
-    text_repos = raw_models.get("Qwen_model") or data.get("Qwen_model") or {}
-    if isinstance(text_repos, dict):
-        for repo_key, repo in text_repos.items():
-            if not isinstance(repo, dict):
-                continue
-            author = repo.get("author") or repo.get("publisher")
-            repo_name = repo.get("repo_name") or repo.get("repo_name_override") or repo_key
-            repo_id = repo.get("repo_id")
-            alt_repo_ids = repo.get("alt_repo_ids") or []
-            defaults = repo.get("defaults") if isinstance(repo.get("defaults"), dict) else {}
-            model_files = repo.get("model_files") or []
-            for model_file in model_files:
-                display = Path(model_file).name
-                if display in seen:
-                    display = f"{display} ({repo_key})"
-                seen.add(display)
-                entry = dict(defaults)
-                entry.update({
-                    "author": author,
-                    "repo_dirname": repo_name,
-                    "repo_id": repo_id,
-                    "alt_repo_ids": alt_repo_ids,
-                    "filename": model_file,
-                })
-                flattened[display] = entry
+        mmproj_path = None
+        if mmproj_candidates:
+            if len(mmproj_candidates) == 1:
+                mmproj_path = mmproj_candidates[0]
+            else:
+                # Pick the one with the longest common prefix with the model filename
+                model_stem = gguf_file.stem.lower()
+                best = max(
+                    mmproj_candidates,
+                    key=lambda f: len(
+                        next(
+                            (model_stem[:i] for i in range(len(model_stem), 0, -1)
+                             if f.stem.lower().startswith(model_stem[:i])),
+                            ""
+                        )
+                    )
+                )
+                mmproj_path = best
 
-    return {"base_dir": base_dir, "models": flattened}
+        # Build display name â€” use filename, suffix with parent folder if duplicate
+        display = gguf_file.name
+        if display in seen_names:
+            display = f"{gguf_file.parent.name}/{gguf_file.name}"
+        seen_names.add(display)
+
+        models[display] = {
+            "full_path": str(gguf_file),
+            "mmproj_path": str(mmproj_path) if mmproj_path else None,
+        }
+
+    if models:
+        print(f"[LLM_Prompt] Found {len(models)} model(s) across {len(existing)} LLM folder(s): {[str(f) for f in existing]}")
+    else:
+        print(f"[LLM_Prompt] No GGUF models found. Scanned: {[str(f) for f in existing]}")
+
+    return models
 
 
-GGUF_VL_CATALOG = _load_gguf_vl_catalog()
+# Scanned at startup â€” refreshed on each INPUT_TYPES call so new models appear
+# without restarting ComfyUI.
+_SCANNED_MODELS: dict[str, dict] = {}
+
+
+def _refresh_model_list() -> dict[str, dict]:
+    global _SCANNED_MODELS
+    _SCANNED_MODELS = _scan_llm_folder()
+    return _SCANNED_MODELS
+
+
+_refresh_model_list()
 
 # ---------------------------------------------------------------------------
 # Helpers (same as QwenVL-Mod)
 # ---------------------------------------------------------------------------
-
-def _resolve_base_dir(base_dir_value: str) -> Path:
-    base_dir = Path(base_dir_value)
-    if base_dir.is_absolute():
-        return base_dir
-    return Path(folder_paths.models_dir) / base_dir
-
-
-def _safe_dirname(value: str) -> str:
-    value = (value or "").strip()
-    if not value:
-        return "unknown"
-    return "".join(ch for ch in value if ch.isalnum() or ch in "._- ").strip() or "unknown"
-
 
 def _filter_kwargs_for_callable(fn, kwargs: dict) -> dict:
     try:
@@ -278,125 +304,139 @@ def _pick_device(device_choice: str) -> str:
     return "cpu"
 
 
-def _download_single_file(repo_ids: list[str], filename: str, target_path: Path):
-    if target_path.exists():
-        return
-    target_path.parent.mkdir(parents=True, exist_ok=True)
-    for repo_id in repo_ids:
-        if not repo_id:
-            continue
-        print(f"[LLM_Prompt] Downloading {filename} from {repo_id}...")
-        try:
-            downloaded = hf_hub_download(
-                repo_id=repo_id,
-                filename=filename,
-                repo_type="model",
-                local_dir=str(target_path.parent),
-            )
-            downloaded_path = Path(downloaded)
-            if downloaded_path.exists() and downloaded_path.resolve() != target_path.resolve():
-                downloaded_path.replace(target_path)
-            if target_path.exists():
-                print(f"[LLM_Prompt] Downloaded: {target_path}")
-                return
-        except Exception as exc:
-            print(f"[LLM_Prompt] Download failed from {repo_id}: {exc}")
-    raise FileNotFoundError(
-        f"[LLM_Prompt] Could not download {filename}. "
-        f"Tried: {', '.join(r for r in repo_ids if r)}. "
-        f"Download manually to: {target_path}"
-    )
-
-
 # ---------------------------------------------------------------------------
-# Model entry resolution (same as QwenVL-Mod)
+# Model resolution â€” from scanned folder list
 # ---------------------------------------------------------------------------
 
-@dataclass(frozen=True)
-class ResolvedModel:
-    display_name: str
-    repo_id: str | None
-    alt_repo_ids: list[str]
-    author: str | None
-    repo_dirname: str
-    model_filename: str
-    mmproj_filename: str | None
-    context_length: int
-    image_max_tokens: int
-    n_batch: int
-    gpu_layers: int
-    top_k: int
-    pool_size: int
-
-
-def _resolve_model(model_name: str) -> ResolvedModel:
-    all_models = GGUF_VL_CATALOG.get("models") or {}
-    entry = all_models.get(model_name) or {}
-
+def _resolve_model_paths(model_name: str) -> tuple[Path, Path | None]:
+    """Return (model_path, mmproj_path | None) for a display name from the scanned list."""
+    entry = _SCANNED_MODELS.get(model_name)
     if not entry:
-        wanted = {model_name, f"{model_name}.gguf"}
-        if "/" in model_name:
-            tail = model_name.rsplit("/", 1)[-1].strip()
-            wanted.update({tail, f"{tail}.gguf"})
-        for candidate in all_models.values():
-            fn = candidate.get("filename")
-            if fn and Path(fn).name in wanted:
-                entry = candidate
-                break
-
-    def _int(name: str, default: int) -> int:
-        try:
-            return int(entry.get(name, default))
-        except Exception:
-            return default
-
-    return ResolvedModel(
-        display_name=model_name,
-        repo_id=entry.get("repo_id"),
-        alt_repo_ids=[str(x) for x in (entry.get("alt_repo_ids") or []) if x],
-        author=str(entry.get("author")) if entry.get("author") else None,
-        repo_dirname=_safe_dirname(str(entry.get("repo_dirname") or model_name)),
-        model_filename=str(entry.get("filename") or model_name),
-        mmproj_filename=str(entry["mmproj_filename"]) if entry.get("mmproj_filename") else None,
-        context_length=_int("context_length", 32768),
-        image_max_tokens=_int("image_max_tokens", 4096),
-        n_batch=_int("n_batch", 512),
-        gpu_layers=_int("gpu_layers", -1),
-        top_k=_int("top_k", 0),
-        pool_size=_int("pool_size", 4194304),
-    )
+        raise FileNotFoundError(
+            f"[LLM_Prompt] Model not found in scan: {model_name}. "
+            f"Check that the file exists in your LLM folder."
+        )
+    model_path = Path(entry["full_path"])
+    mmproj_path = Path(entry["mmproj_path"]) if entry.get("mmproj_path") else None
+    return model_path, mmproj_path
 
 
 def _looks_like_reasoning(text: str) -> bool:
     """Detect if model output is reasoning/planning instead of a final prompt.
 
     Catches: numbered lists, markdown bold headers, bullet analysis,
-    first-person planning, and thinking patterns.
+    first-person planning, Qwen 3.5 raw thinking headers, and known
+    terminator artifacts.
     """
     if not text:
         return False
-    # Standard planning: "I should", "First,", "Let me", etc.
+
+    # Qwen 3.5 raw thinking headers â€” emitted without <think> tags
+    # e.g. "Thinking Process:", "1. **Analyze the Inputs:**"
+    if re.search(r"(?im)^\s*thinking\s+process\s*:", text):
+        return True
+    if re.search(r"(?im)^\s*analysis\s*:", text):
+        return True
+    if re.search(r"(?im)^\s*draft\s+(construction|output)\s*:", text):
+        return True
+    if re.search(r"(?im)^\s*final\s+(review|check|polish|draft)\s*:", text):
+        return True
+    if re.search(r"(?im)^\s*internal\s+section", text):
+        return True
+
+    # Qwen 3.5 reasoning self-talk patterns
+    if re.search(r"(?im)^\s*\d+\.\s+\*{0,2}(analyze|deconstruct|draft|refine|merge|review|check|polish|verify)\b", text):
+        return True
+
+    # Known Qwen 3.5 thinking terminator artifact leaking through
+    # Appears as a bare "cw" or "cw\n" at the very end of output
+    if re.search(r"(?m)\bcw\s*$", text.strip()):
+        return True
+
+    # Standard planning first-person
     if re.search(r"(?i)\b(i\s+(should|need|must|will|am\s+going\s+to|have\s+to))\b", text):
         return True
     if re.search(r"(?im)^\s*(okay[,.:]?|first[,.:]?|next[,.:]?|then[,.:]?|wait[,.:]?|let me)\b", text):
         return True
+
     # Numbered analysis steps: "1. **Subject:**" or "2. Deconstruct"
     numbered = len(re.findall(r"(?m)^\s*\d+\.\s+\*{0,2}[A-Z]", text))
     if numbered >= 2:
         return True
+
     # Markdown bold headers: "**Subject:**" "**Lighting:**"
     bold_headers = len(re.findall(r"(?m)\*{1,2}[A-Za-z][^*]+\*{1,2}\s*:", text))
     if bold_headers >= 2:
         return True
+
     # Bullet point analysis
     bullets = len(re.findall(r"(?m)^\s*[-*]\s+", text))
     if bullets >= 3:
         return True
+
     return False
 
 
+def _strip_think_blocks(text: str) -> str:
+    """Remove thinking content from model output.
+
+    Handles:
+    - Tagged blocks:   <think>...</think>content  â†’ content
+    - Unclosed tags:   <think>...EOF              â†’ empty
+    - Qwen 3.5 raw reasoning sections (no tags): strips everything up to the
+      last recognizable section header, then takes what follows as the output.
+    - Trailing 'cw' terminator artifact from Qwen 3.5 thinking mode.
+    """
+    if not text:
+        return text
+
+    # Remove tagged think blocks (complete and unclosed)
+    cleaned = re.sub(r"(?is)<think>.*?</think>", "", text)
+    cleaned = re.sub(r"(?is)<think>.*$", "", cleaned)
+
+    # Strip Qwen 3.5 raw reasoning: find the last "Revised Draft:" or "Ready to output"
+    # marker and take only the content that follows it as the actual output.
+    reasoning_section_end = re.search(
+        r"(?im)^.*?(revised\s+draft\s*:|final\s+output\s*:).*$",
+        cleaned
+    )
+    if reasoning_section_end:
+        after = cleaned[reasoning_section_end.end():].strip()
+        if after:
+            cleaned = after
+
+    # Strip trailing meta-lines Qwen 3.5 emits after the draft â€” loop until stable
+    for _ in range(10):
+        before = cleaned
+        cleaned = re.sub(
+            r"(?im)^\s*(ready\s+to\s+output|looks\s+(solid|good|tight)|final\s+(check|review|polish|output)[^\n]*|token\s+count[^\n]*|approx\.?\s*\d+\s+tokens[^\n]*|good\s+range[^\n]*|section\s+order[^\n]*|let'?s\s+refine[^\n]*|check\s+for\s+(nsfw|aspect)[^\n]*)\.*\s*$",
+            "", cleaned
+        ).strip()
+        if cleaned == before:
+            break
+
+    # Strip trailing Qwen 3.5 thinking terminator artifact: bare "cw" at end of output
+    cleaned = re.sub(r"(?m)\bcw\s*$", "", cleaned).strip()
+
+    # Gemma 4 / SuperGemma: strip control tokens that can leak from embedded templates
+    cleaned = re.sub(r"_?\s*<\|?channel\|?>\s*(?:thought|analysis|reasoning)?\s*", "", cleaned, flags=re.IGNORECASE)
+    cleaned = re.sub(r"</?thought>", "", cleaned, flags=re.IGNORECASE)
+
+    # SuperGemma uncensored: hard-cut on loop runaway tokens â€” everything after is garbage
+    for _marker in ("thought_turn", "turn_turn"):
+        if _marker in cleaned:
+            cleaned = cleaned.split(_marker)[0]
+
+    # SuperGemma uncensored: strip language prefix artifacts emitted before the actual answer
+    cleaned = re.sub(r"^ë‚˜ì˜ ë‹µë³€ì€ ë‹¤ìŒê³¼ ê°™ìŠµë‹ˆë‹¤\.\s*", "", cleaned)
+    cleaned = re.sub(r"^å›žç­”[:ï¼š]\s*", "", cleaned)
+    cleaned = re.sub(r"^(?:Assistant|Answer):\s*", "", cleaned, flags=re.IGNORECASE)
+
+    return cleaned.strip()
+
+
 # ---------------------------------------------------------------------------
-# The Node — built on QwenVL-Mod's proven inference code
+# The Node â€” built on QwenVL-Mod's proven inference code
 # ---------------------------------------------------------------------------
 
 class LLMPromptNode:
@@ -416,11 +456,13 @@ class LLMPromptNode:
         self.llm = None
         self.chat_handler = None
         self.current_signature = None
+        self.loaded_model_name_lower = ""
 
     @classmethod
     def INPUT_TYPES(cls):
-        all_models = GGUF_VL_CATALOG.get("models") or {}
-        model_keys = sorted(all_models.keys()) or ["(add models to gguf_models.json)"]
+        # Refresh scan every time the node UI loads â€” new models appear without restart
+        models = _refresh_model_list()
+        model_keys = sorted(models.keys()) or ["(no .gguf files found in models/LLM)"]
 
         prompt_presets = list(SYSTEM_PROMPTS.keys()) if SYSTEM_PROMPTS else ["(add .md files to prompts/)"]
 
@@ -432,7 +474,7 @@ class LLMPromptNode:
             "required": {
                 "model_name": (model_keys, {
                     "default": model_keys[0],
-                    "tooltip": "GGUF model from gguf_models.json catalog.",
+                    "tooltip": "GGUF model from models/LLM folder. Rescans on each load.",
                 }),
                 "system_prompt": (prompt_presets, {
                     "default": prompt_presets[0],
@@ -448,15 +490,15 @@ class LLMPromptNode:
                     "multiline": True,
                     "tooltip": "Your prompt text. Combined with style input if connected.",
                 }),
-                "output_format": (["text", "json"], {
+                "output_format": (["text", "json", "list"], {
                     "default": "text",
-                    "tooltip": "Output format: text = natural language prompt, json = structured JSON output.",
+                    "tooltip": "text = single prompt with reasoning cleanup. json = structured JSON. list = numbered multi-scene output (bypasses reasoning detection â€” use for LTX video track generation).",
                 }),
                 "max_tokens": ("INT", {
                     "default": 2048,
                     "min": 64,
-                    "max": 8192,
-                    "tooltip": "Maximum tokens to generate. 2048+ recommended for detailed prompts.",
+                    "max": 32000,
+                    "tooltip": "Maximum tokens to generate. 2048 works for most prompts. Raise for large models like Gemma 4 26B.",
                 }),
                 "temperature": ("FLOAT", {
                     "default": 0.7,
@@ -489,6 +531,20 @@ class LLMPromptNode:
                     "min": 1,
                     "max": 2**32 - 1,
                 }),
+                "n_ctx": ("INT", {
+                    "default": 32768,
+                    "min": 2048,
+                    "max": 262144,
+                    "step": 256,
+                    "tooltip": "Context window size. 32768 works for most models. Gemma 4 supports up to 128K, SuperGemma up to 262K. Higher values use more VRAM.",
+                }),
+                "n_gpu_layers": ("INT", {
+                    "default": -1,
+                    "min": -1,
+                    "max": 200,
+                    "step": 1,
+                    "tooltip": "-1 = offload all layers to GPU (recommended). Reduce if VRAM runs out loading large models like Gemma 4 26B. Ignored (forced to 0) when device is CPU.",
+                }),
             },
             "optional": {
                 "style": ("STRING", {
@@ -497,11 +553,11 @@ class LLMPromptNode:
                 }),
                 "width": ("INT", {
                     "forceInput": True,
-                    "tooltip": "Image width — auto-detected as aspect ratio.",
+                    "tooltip": "Image width â€” auto-detected as aspect ratio.",
                 }),
                 "height": ("INT", {
                     "forceInput": True,
-                    "tooltip": "Image height — auto-detected as aspect ratio.",
+                    "tooltip": "Image height â€” auto-detected as aspect ratio.",
                 }),
                 "image": ("IMAGE", {
                     "tooltip": "Input image for vision analysis.",
@@ -537,6 +593,7 @@ class LLMPromptNode:
             self.llm = None
 
         self.current_signature = None
+        self.loaded_model_name_lower = ""
         gc.collect()
 
         if torch.cuda.is_available():
@@ -547,45 +604,28 @@ class LLMPromptNode:
     # Model loading (same as QwenVL-Mod GGUF)
     # ------------------------------------------------------------------
 
-    def _load_model(self, model_name: str, device: str):
-        resolved = _resolve_model(model_name)
-        base_dir = _resolve_base_dir(GGUF_VL_CATALOG.get("base_dir") or "LLM/GGUF")
-
-        author_dir = _safe_dirname(resolved.author or "")
-        repo_dir = _safe_dirname(resolved.repo_dirname)
-        target_dir = base_dir / author_dir / repo_dir
-
-        model_path = target_dir / Path(resolved.model_filename).name
-        mmproj_path = (
-            target_dir / Path(resolved.mmproj_filename).name
-            if resolved.mmproj_filename else None
-        )
-
-        repo_ids = [r for r in [resolved.repo_id] + resolved.alt_repo_ids if r]
+    def _load_model(self, model_name: str, device: str, n_ctx: int = 32768, n_gpu_layers: int = -1):
+        # Resolve paths directly from the scanned folder list â€” no JSON catalog needed
+        model_path, mmproj_path = _resolve_model_paths(model_name)
 
         if not model_path.exists():
-            if repo_ids:
-                _download_single_file(repo_ids, resolved.model_filename, model_path)
-            else:
-                raise FileNotFoundError(f"[LLM_Prompt] Model not found: {model_path}")
-
+            raise FileNotFoundError(f"[LLM_Prompt] Model file missing: {model_path}")
         if mmproj_path and not mmproj_path.exists():
-            if repo_ids and resolved.mmproj_filename:
-                _download_single_file(repo_ids, resolved.mmproj_filename, mmproj_path)
-            else:
-                raise FileNotFoundError(f"[LLM_Prompt] mmproj not found: {mmproj_path}")
+            print(f"[LLM_Prompt] Warning: mmproj not found at {mmproj_path}, running text-only.")
+            mmproj_path = None
 
         device_kind = _pick_device(device)
-        n_gpu_layers = resolved.gpu_layers if device_kind == "cuda" else 0
-        has_mmproj = mmproj_path is not None and mmproj_path.exists()
+        # CPU always 0; on GPU use the user-supplied value (-1 = all layers, N = partial offload)
+        effective_gpu_layers = 0 if device_kind == "cpu" else n_gpu_layers
+        has_mmproj = mmproj_path is not None
 
-        signature = (
-            str(model_path),
-            str(mmproj_path) if has_mmproj else "",
-            resolved.context_length,
-            n_gpu_layers,
-            device_kind,
-        )
+        signature = {
+            "model_path": str(model_path),
+            "mmproj_path": str(mmproj_path) if has_mmproj else "",
+            "n_gpu_layers": effective_gpu_layers,
+            "n_ctx": n_ctx,
+            "device_kind": device_kind,
+        }
         if self.llm is not None and self.current_signature == signature:
             return
 
@@ -594,54 +634,123 @@ class LLMPromptNode:
             torch.cuda.synchronize()
             time.sleep(0.1)
 
-        # Load vision handler (same as QwenVL-Mod)
+        # Load vision handler â€” handler selection order matches JamePeng 0.3.39 API
         self.chat_handler = None
         if has_mmproj:
+            m_name_lower = model_path.name.lower()
             handler_cls = None
-            try:
-                from llama_cpp.llama_chat_format import Qwen3VLChatHandler
-                handler_cls = Qwen3VLChatHandler
-            except ImportError:
+
+            # Gemma 4 vision: Gemma3ChatHandler (chat_format="gemma3")
+            if "gemma" in m_name_lower:
+                try:
+                    from llama_cpp.llama_chat_format import Gemma3ChatHandler
+                    handler_cls = Gemma3ChatHandler
+                    print("[LLM_Prompt] Using Gemma3ChatHandler for vision.")
+                except ImportError:
+                    pass
+
+            # Qwen 3.5 (text+vision): Qwen35ChatHandler
+            if handler_cls is None and ("qwen3.5" in m_name_lower or "qwen3-5" in m_name_lower or "qwen35" in m_name_lower):
+                try:
+                    from llama_cpp.llama_chat_format import Qwen35ChatHandler
+                    handler_cls = Qwen35ChatHandler
+                    print("[LLM_Prompt] Using Qwen35ChatHandler.")
+                except ImportError:
+                    pass
+
+            # Qwen 3 VL
+            if handler_cls is None:
+                try:
+                    from llama_cpp.llama_chat_format import Qwen3VLChatHandler
+                    handler_cls = Qwen3VLChatHandler
+                    print("[LLM_Prompt] Using Qwen3VLChatHandler for vision.")
+                except ImportError:
+                    pass
+
+            # Qwen 2.5 VL fallback
+            if handler_cls is None:
                 try:
                     from llama_cpp.llama_chat_format import Qwen25VLChatHandler
                     handler_cls = Qwen25VLChatHandler
+                    print("[LLM_Prompt] Using Qwen25VLChatHandler for vision.")
                 except ImportError:
-                    raise RuntimeError(
-                        "[LLM_Prompt] No Qwen VL chat handler found in llama_cpp."
-                    )
+                    pass
+
+            if handler_cls is None:
+                raise RuntimeError(
+                    "[LLM_Prompt] No compatible vision chat handler found in llama_cpp. "
+                    "Check your llama-cpp-python version."
+                )
+
+            # Build handler kwargs â€” image_min/max_tokens go HERE on the handler.
+            # force_reasoning=False is only supported by Qwen3VLChatHandler and Qwen25VLChatHandler.
+            # Qwen35ChatHandler and Gemma3ChatHandler reject it with a hard TypeError.
+            # We resolve per-handler rather than relying on _filter_kwargs_for_callable because
+            # these handlers use **kwargs internally and don't expose a normal inspectable signature.
+            from llama_cpp.llama_chat_format import Qwen3VLChatHandler as _Q3VL
+            try:
+                from llama_cpp.llama_chat_format import Qwen25VLChatHandler as _Q25VL
+            except ImportError:
+                _Q25VL = None
+
+            supports_force_reasoning = handler_cls in (
+                _Q3VL, *([_Q25VL] if _Q25VL is not None else [])
+            )
 
             mmproj_kwargs = {
                 "clip_model_path": str(mmproj_path),
-                "image_max_tokens": resolved.image_max_tokens,
-                "force_reasoning": False,
+                "image_max_tokens": 4096,
+                "image_min_tokens": 1024,
                 "verbose": False,
             }
+            if supports_force_reasoning:
+                mmproj_kwargs["force_reasoning"] = False
+
             mmproj_kwargs = _filter_kwargs_for_callable(
                 getattr(handler_cls, "__init__", handler_cls), mmproj_kwargs
             )
             self.chat_handler = handler_cls(**mmproj_kwargs)
 
-        # Load LLM (same kwargs as QwenVL-Mod)
+        # Load LLM
         llm_kwargs = {
             "model_path": str(model_path),
-            "n_ctx": resolved.context_length,
-            "n_gpu_layers": n_gpu_layers,
-            "n_batch": resolved.n_batch,
+            "n_ctx": n_ctx,
+            "n_gpu_layers": effective_gpu_layers,
+            "n_batch": 512,
             "swa_full": True,
             "verbose": False,
-            "pool_size": resolved.pool_size,
-            "top_k": resolved.top_k,
-            # Qwen 3.5: disable thinking mode at template level (when supported)
-            "chat_template_kwargs": {"enable_thinking": False},
+            "pool_size": 4194304,
+            "top_k": 0,
+            "flash_attn": True,
+            # chat_template_kwargs does NOT belong here â€” no effect on Llama.__init__.
+            # Passed at inference time via create_chat_completion instead.
         }
         if has_mmproj and self.chat_handler is not None:
+            # image_min/max_tokens belong on the chat handler, not here.
             llm_kwargs["chat_handler"] = self.chat_handler
-            llm_kwargs["image_min_tokens"] = 1024
-            llm_kwargs["image_max_tokens"] = resolved.image_max_tokens
+        else:
+            # Text-only path: set chat_format only for models whose GGUF does NOT embed a
+            # usable Jinja2 template, or where the embedded template needs overriding.
+            #
+            # Qwen 3.5 and Qwen 3.6: DO NOT set chat_format â€” let llama.cpp use the
+            # embedded GGUF template. That is the only path where enable_thinking=False
+            # (passed at inference time) is actually processed correctly.
+            #
+            # Gemma 3/4: embedded template works, but "gemma3" format is still needed
+            # because older GGUF builds may not embed it.
+            m_name_lower = model_path.name.lower()
+            if "gemma" in m_name_lower:
+                llm_kwargs["chat_format"] = "gemma3"
+            elif "llama-3" in m_name_lower:
+                llm_kwargs["chat_format"] = "llama-3"
+            elif "qwen" in m_name_lower:
+                # Let GGUF embedded template handle all Qwen variants (2.5, 3, 3.5, 3.6).
+                # Do not override with chatml â€” it breaks enable_thinking support.
+                pass
 
         print(
             f"[LLM_Prompt] Loading: {model_path.name} "
-            f"(device={device_kind}, gpu_layers={n_gpu_layers}, ctx={resolved.context_length})"
+            f"(device={device_kind}, gpu_layers={effective_gpu_layers}, ctx={n_ctx})"
         )
 
         llm_kwargs_filtered = _filter_kwargs_for_callable(
@@ -653,6 +762,7 @@ class LLMPromptNode:
 
         self.llm = Llama(**llm_kwargs_filtered)
         self.current_signature = signature
+        self.loaded_model_name_lower = model_path.name.lower()
         print(f"[LLM_Prompt] Model loaded: {model_path.name}")
 
     # ------------------------------------------------------------------
@@ -670,7 +780,7 @@ class LLMPromptNode:
         repetition_penalty: float,
         seed: int,
     ) -> str:
-        """Run inference — same call signature as QwenVL-Mod GGUF."""
+        """Run inference â€” same call signature as QwenVL-Mod GGUF."""
         if images_b64 and self.chat_handler is not None:
             content = [{"type": "text", "text": user_prompt}]
             for img in images_b64:
@@ -697,14 +807,23 @@ class LLMPromptNode:
             "top_p": float(top_p),
             "repeat_penalty": float(repetition_penalty),
             "seed": int(seed),
-            # Guardrails for Qwen 3.5 templates that may still emit reasoning tags/tokens.
-            "stop": ["<|im_end|>", "<|im_start|>", "<think>", "</think>"],
-            # Some llama.cpp builds honor this here even if not on Llama().__init__.
+            # enable_thinking=False: passed here via chat_template_kwargs so the embedded
+            # Jinja2 template in the GGUF can act on it. Best-effort â€” silently ignored
+            # by models whose templates don't check for it.
             "chat_template_kwargs": {"enable_thinking": False},
         }
         completion_kwargs = _filter_kwargs_for_callable(
             self.llm.create_chat_completion, completion_kwargs
         )
+        # Stop tokens applied AFTER filtering so they can never be silently dropped.
+        # Neither <think> nor </think> are stop tokens.
+        # Stopping on <think> produces empty output when thinking models emit it first.
+        # Stopping on </think> halts generation before the actual answer (which comes
+        # AFTER the closing tag) â€” _strip_think_blocks() handles the full block in post.
+        completion_kwargs["stop"] = [
+            "<|im_end|>", "<|im_start|>",
+            "<end_of_turn>", "<eos>", "<|eot_id|>", "<|end_of_text|>",
+        ]
         result = self.llm.create_chat_completion(**completion_kwargs)
         elapsed = max(time.perf_counter() - start, 1e-6)
 
@@ -722,12 +841,67 @@ class LLMPromptNode:
             )
         if finish_reason == "length":
             print(
-                f"[LLM_Prompt] ⚠ Output TRUNCATED — hit max_tokens={max_tokens}. "
+                f"[LLM_Prompt] âš  Output TRUNCATED â€” hit max_tokens={max_tokens}. "
                 f"Increase max_tokens to get complete output."
             )
 
         raw = (result.get("choices") or [{}])[0].get("message", {}).get("content", "")
-        return str(raw or "").strip()
+        # Strip think blocks here, before any caller sees the output.
+        # This covers both JSON and text paths â€” no downstream path needs to handle it.
+        return _strip_think_blocks(str(raw or ""))
+
+    def _extract_draft_from_reasoning(self, text: str) -> str:
+        """Try to pull the final draft paragraph out of a raw reasoning blob.
+
+        Qwen 3.5 uncensored models consistently structure their thinking output as:
+          1. Analysis / deconstruction
+          2. Drafting section
+          3. "Revised Draft:" or "Final Draft:" followed by the actual output
+          4. Optional review / token count check
+          5. "Ready to output." or similar terminator
+
+        This method finds the last "Revised Draft:" or "Draft Construction:" marker
+        and returns only the paragraph that follows it, stripping any trailing
+        meta-lines and artifacts.
+
+        Returns empty string if no recognisable draft marker is found.
+        """
+        if not text:
+            return ""
+
+        # Find the last occurrence of a draft marker line
+        # (last because sometimes there are multiple draft iterations)
+        markers = list(re.finditer(
+            r"(?im)^.*?(revised\s+draft\s*:|final\s+draft\s*:|draft\s+construction\s*:|^6\.\s+\*{0,2}draft).*$",
+            text
+        ))
+        if not markers:
+            return ""
+
+        # Take everything after the last marker
+        after = text[markers[-1].end():].strip()
+        if not after:
+            return ""
+
+        # Strip all trailing meta/review lines Qwen 3.5 appends after the draft paragraph.
+        # Applied in a loop until no more matches â€” lines can stack.
+        for _ in range(10):
+            before = after
+            after = re.sub(
+                r"(?im)^\s*(ready\s+to\s+output|looks\s+(solid|good|tight)|final\s+(check|review|polish|output)[^\n]*|token\s+count[^\n]*|approx\.?\s*\d+\s+tokens[^\n]*|good\s+range[^\n]*|section\s+order[^\n]*|let'?s\s+refine[^\n]*|check\s+for\s+(nsfw|aspect)[^\n]*)\.*\s*$",
+                "", after
+            ).strip()
+            if after == before:
+                break
+
+        # Strip trailing cw artifact
+        after = re.sub(r"(?m)cw\s*$", "", after).strip()
+
+        # If what remains still looks like reasoning, give up
+        if _looks_like_reasoning(after):
+            return ""
+
+        return after
 
     def _invoke_with_retry(
         self,
@@ -740,25 +914,47 @@ class LLMPromptNode:
         repetition_penalty: float,
         seed: int,
     ) -> str:
-        """Invoke with planning/reasoning detection and retry."""
+        """Invoke with reasoning detection, draft extraction, and retry.
 
+        Strategy (in order):
+        1. _invoke() strips tagged <think> blocks and known Qwen 3.5 raw reasoning markers.
+        2. If output still looks like reasoning, attempt to extract the final draft
+           paragraph directly from the blob â€” the answer is usually in there.
+        3. Only if extraction fails, fire a retry with a tight system prompt.
+        """
         raw = self._invoke(system_prompt, user_prompt, images_b64, max_tokens, temperature, top_p, repetition_penalty, seed)
-        cleaned = clean_model_output(raw, OutputCleanConfig(mode="prompt"))
 
-        if not cleaned or _looks_like_reasoning(raw) or "<think" in raw.lower():
-            retry_system = (
-                "You are a professional prompt writer.\n"
-                "Output ONLY ONE final prompt paragraph.\n"
-                "No analysis, no planning steps, no first-person, and no <think>.\n"
-                "No bullet points, no headings, no JSON, no markdown, no quotes."
-            )
-            retry_user = f"Rewrite the following into the final prompt paragraph:\n\n{raw}"
-            raw_retry = self._invoke(retry_system, retry_user, [], max_tokens, 0.4, 0.95, 1.05, seed + 999)
+        if not _looks_like_reasoning(raw):
+            # Clean output â€” run through cleaner and return
+            return clean_model_output(raw, OutputCleanConfig(mode="prompt")) or raw.strip()
+
+        # Reasoning detected â€” try to extract the draft before retrying
+        print("[LLM_Prompt] Reasoning detected in output. Attempting draft extraction.")
+        extracted = self._extract_draft_from_reasoning(raw)
+        if extracted:
+            print("[LLM_Prompt] Draft extracted successfully.")
+            return clean_model_output(extracted, OutputCleanConfig(mode="prompt")) or extracted.strip()
+
+        # Extraction failed â€” retry with a tight prompt, feeding back only the raw blob
+        print("[LLM_Prompt] Extraction failed. Retrying with distillation prompt.")
+        retry_system = (
+            "You are a professional prompt writer.\n"
+            "Output ONLY ONE final prompt paragraph.\n"
+            "No analysis, no planning steps, no first-person.\n"
+            "No bullet points, no headings, no JSON, no markdown, no quotes."
+        )
+        retry_user = f"Extract and rewrite only the final image prompt from the following text:\n\n{raw}"
+        raw_retry = self._invoke(retry_system, retry_user, [], max_tokens, 0.4, 0.95, 1.05, seed + 999)
+
+        if not _looks_like_reasoning(raw_retry):
             cleaned_retry = clean_model_output(raw_retry, OutputCleanConfig(mode="prompt"))
-            if cleaned_retry and not _looks_like_reasoning(cleaned_retry):
+            if cleaned_retry:
                 return cleaned_retry
 
-        return cleaned or ""
+        # Both extraction and retry failed â€” return whatever _strip_think_blocks gave us
+        print("[LLM_Prompt] Warning: could not clean reasoning output. Returning best effort.")
+        cleaned = clean_model_output(raw, OutputCleanConfig(mode="prompt"))
+        return cleaned or raw.strip()
 
     # ------------------------------------------------------------------
     # Main entry point
@@ -778,6 +974,8 @@ class LLMPromptNode:
         device: str,
         keep_model_loaded: bool,
         seed: int,
+        n_ctx: int = 32768,
+        n_gpu_layers: int = -1,
         style: str = "",
         width: int = 0,
         height: int = 0,
@@ -804,12 +1002,30 @@ class LLMPromptNode:
                 "No preface, no explanations, no markdown fences, no </think>. "
                 "Do not wrap in code blocks."
             )
+        elif output_format == "list":
+            sys_prompt += (
+                "\n\nOutput only the numbered list exactly as specified in your instructions. "
+                "No preface, no explanations, no analysis, no markdown fences, no </think>. "
+                "Keep every item on its own numbered line."
+            )
         else:
             sys_prompt += (
                 "\n\nReturn only the final prompt text. "
                 "No preface, no explanations, no analysis, no JSON, no markdown fences, and no </think>.\n"
                 "Do not write planning steps (no 'First', 'Next', 'Then') and do not use first-person ('I', 'we')."
             )
+
+        # Qwen 3.5 thinking suppression: /no_think is the official control token
+        # recognized by Qwen 3.5's embedded chat template.
+        # Uses self.loaded_model_name_lower set at model load time â€” no signature parsing.
+        m_name_lower = self.loaded_model_name_lower
+        is_qwen35 = (
+            "qwen3.5" in m_name_lower
+            or "qwen3-5" in m_name_lower
+            or "qwen35" in m_name_lower
+        )
+        if is_qwen35:
+            sys_prompt = "/no_think\n" + sys_prompt + "\n/no_think"
 
         # Build user prompt with labeled sections
         parts = []
@@ -845,12 +1061,15 @@ class LLMPromptNode:
 
         # Load model and generate
         try:
-            self._load_model(model_name, device)
+            self._load_model(model_name, device, n_ctx=n_ctx, n_gpu_layers=n_gpu_layers)
 
             if images_b64 and self.chat_handler is None:
                 print("[LLM_Prompt] Warning: images provided but no vision projector. Images will be ignored.")
 
-            if output_format == "json":
+            if output_format in ("json", "list"):
+                # Direct invoke â€” no reasoning detection or retry.
+                # json: structured output. list: numbered multi-scene output where
+                # numbered lines would be falsely flagged as reasoning.
                 result = self._invoke(
                     system_prompt=sys_prompt,
                     user_prompt=final_user_prompt,

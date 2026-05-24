@@ -1,6 +1,6 @@
-"""Output cleaner for LLM responses.
+﻿"""Output cleaner for LLM responses.
 
-Same interface as QwenVL-Mod's AILab_OutputCleaner — strips thinking tags,
+Same interface as QwenVL-Mod's AILab_OutputCleaner â€” strips thinking tags,
 code fences, planning paragraphs, role prefixes, JSON wrappers, and
 chat template tokens from model output.
 """
@@ -34,16 +34,33 @@ _IM_TOKEN_RE = re.compile(
     r"(?i)<\|?im_(start|end)\|?>|<im_(start|end)>|<\|endoftext\|>",
 )
 _THINKING_LINE_RE = re.compile(
-    r"(?im)^\s*(thinking|reasoning|analysis)\s*[:\-].*$"
+    r"(?im)^\s*("
+    r"thinking(\s+process)?\s*[:\-]|"
+    r"reasoning\s*[:\-]|"
+    r"analysis\s*[:\-]|"
+    r"draft\s+construction\s*[:\-]|"
+    r"final\s+(review|check|polish|draft)\s*[:\-]|"
+    r"refining\s+and\s+merging\s*[:\-]|"
+    r"internal\s+sections?\s*[:\-]|"
+    r"token\s+count\s+check\s*[:\-]|"
+    r"section\s+order\s+check\s*[:\-]|"
+    r"ready\s+to\s+output\.?"
+    r").*$"
 )
 _PLANNING_RE = re.compile(
     r"(?is)\b("
-    r"i\s+(should|need|must|will|want|am\s+going\s+to|have\s+to)\b|"
-    r"let's\b|"
-    r"first\b|next\b|then\b|"
-    r"wait\b|"
-    r"so\s+i\s+need\s+to\b|"
-    r"i\s+should\s+focus\s+on\b"
+    # First-person planning intent â€” "I should", "I need to", "I will", etc.
+    # Only fires when "I" is the subject of a planning verb, not in prose.
+    r"i\s+(should|need\s+to|must|will|want\s+to|am\s+going\s+to|have\s+to)\b|"
+    # "Let's" as planning opener â€” "Let's go with", "Let's choose"
+    # NOT "let" as a general verb ("let light filter", "let color breathe")
+    r"let's\s+(go\s+with|choose|use|pick|aim|try|focus|start|begin)\b|"
+    # "So I need to", "So I should"
+    r"so\s+i\s+(need|should|must|have\s+to)\b|"
+    # "I should focus on", "I'll focus on"
+    r"i\s+(should|will|'ll)\s+focus\s+on\b|"
+    # "Wait," as a self-correction opener (only at start of sentence)
+    r"(?:^|\.\s+)wait[,:]"
     r")"
 )
 
