@@ -547,6 +547,35 @@ def _strip_think_blocks(text: str) -> str:
     cleaned = re.sub(r"(?is)^\s*\*+\s*reasoning\s*:?\s*\*+\s*", "", cleaned)
     cleaned = re.sub(r"(?is)^\s*\*+\s*analysis\s*:?\s*\*+\s*", "", cleaned)
 
+    # Strip leading single-char artifacts (",", ".", ";", "|") from chat template
+    # control tokens that decoded as a literal punctuation mark at output start.
+    # These leak from Qwen and Gemma chat templates on some GGUF builds.
+    cleaned = re.sub(r"^[,;.|]\s*", "", cleaned)
+
+    # Strip analytical meta-commentary that small models append. Pattern: a
+    # numbered bold header containing an analytical keyword (Analyze, Review,
+    # Check, Final, Format, Constraint, Verify, Polish, Refine), and everything
+    # after it. Examples we want to strip:
+    #   "4. **Final Review against Constraints:**\n  * Format: ..."
+    #   "1. **Analyze the Request:**\nUser Prompt: ..."
+    # The analytical keyword is the discriminator — natural prompt content very
+    # rarely uses numbered+bold+analytical-word formatting.
+    analytical_pattern = (
+        r"\d+\.\s+\*\*[^*\n]*"
+        r"(?:analyz|review|check|constraint|format|verify|polish|refine|final|breakdown|deconstruct)"
+        r"[^*\n]*\*\*.*$"
+    )
+    # Strip the analytical block when it follows a blank line (trailing meta)
+    cleaned = re.sub(
+        r"\n\s*\n\s*" + analytical_pattern,
+        "", cleaned, flags=re.IGNORECASE | re.DOTALL,
+    )
+    # Or when it starts at the very beginning of output (whole output is meta)
+    cleaned = re.sub(
+        r"^\s*" + analytical_pattern,
+        "", cleaned, flags=re.IGNORECASE | re.DOTALL,
+    )
+
     # The key trick: if </think> exists anywhere, take only what comes after it.
     # Handles unclosed tags, nested tags, anything.
     if re.search(r"</think>", cleaned, flags=re.IGNORECASE):
