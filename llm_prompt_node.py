@@ -154,6 +154,9 @@ def _get_llm_folders() -> list[Path]:
     return folders
 
 
+_LAST_SCAN_SIGNATURE: tuple | None = None
+
+
 def _scan_llm_folder() -> dict[str, dict]:
     """Scan all registered LLM folders recursively and return a dict of display_name -> model info.
 
@@ -238,10 +241,17 @@ def _scan_llm_folder() -> dict[str, dict]:
             "mmproj_path": str(mmproj_path) if mmproj_path else None,
         }
 
-    if models:
-        print(f"[LLM_Prompt] Found {len(models)} model(s) across {len(existing)} LLM folder(s): {[str(f) for f in existing]}")
-    else:
-        print(f"[LLM_Prompt] No GGUF models found. Scanned: {[str(f) for f in existing]}")
+    # ComfyUI calls INPUT_TYPES multiple times per graph validation, so the scan
+    # runs repeatedly. Only print when the result set actually changes — avoids
+    # spamming "Found N model(s)" five times per workflow run.
+    global _LAST_SCAN_SIGNATURE
+    signature = (len(models), tuple(sorted(models.keys())), tuple(str(f) for f in existing))
+    if signature != _LAST_SCAN_SIGNATURE:
+        _LAST_SCAN_SIGNATURE = signature
+        if models:
+            print(f"[LLM_Prompt] Found {len(models)} model(s) across {len(existing)} LLM folder(s): {[str(f) for f in existing]}")
+        else:
+            print(f"[LLM_Prompt] No GGUF models found. Scanned: {[str(f) for f in existing]}")
 
     return models
 
