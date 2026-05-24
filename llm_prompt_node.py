@@ -828,7 +828,14 @@ class LLMPromptNode:
         # explicit stop list they generate until max_tokens. Add Gemma stops back.
         # Qwen/other models keep llama.cpp's default EOS handling (no stop list).
         if "gemma" in (self.loaded_model_name_lower or ""):
-            completion_kwargs["stop"] = ["<end_of_turn>", "<eos>", "</s>"]
+            # SuperGemma uncensored fine-tunes emit "thought_turn" / "turn_turn"
+            # as literal text in runaway loops (the fine-tune broke clean EOS
+            # behavior). Add them as string stops so the model halts when those
+            # appear, before they consume max_tokens worth of garbage.
+            completion_kwargs["stop"] = [
+                "<end_of_turn>", "<eos>", "</s>",
+                "thought_turn", "turn_turn",
+            ]
         result = self.llm.create_chat_completion(**completion_kwargs)
         elapsed = max(time.perf_counter() - start, 1e-6)
 
