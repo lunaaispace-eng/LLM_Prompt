@@ -726,7 +726,12 @@ class LLMPromptNode:
             "n_ctx": n_ctx,
             "n_gpu_layers": effective_gpu_layers,
             "n_batch": 512,
-            "swa_full": True,
+            # swa_full=True forces a full-size SWA cache. It enables cross-run
+            # prompt caching at significant VRAM cost. We do one-shot inference
+            # per run and never reuse the cache — so this just wastes VRAM and
+            # causes 26B Gemma models to thrash. Default (False) is much lighter.
+            # ref: https://github.com/ggml-org/llama.cpp/pull/13194
+            "swa_full": False,
             "verbose": False,
             "pool_size": 4194304,
             "top_k": 0,
