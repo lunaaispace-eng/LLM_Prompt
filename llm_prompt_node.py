@@ -1043,6 +1043,12 @@ class LLMPromptNode:
 
         final_user_prompt = "\n\n".join(parts) if parts else "Describe a scene vividly."
 
+        # Qwen 3.x native control token: tells thinking models to skip the
+        # thinking phase entirely and output the answer directly. Massive speed
+        # win (~3x). Ignored silently by non-Qwen models, so safe to always append.
+        if "qwen" in (model_name or "").lower() and "/no_think" not in final_user_prompt:
+            final_user_prompt = f"{final_user_prompt}\n\n/no_think"
+
 
         # Process images
         images_b64: list[str] = []
