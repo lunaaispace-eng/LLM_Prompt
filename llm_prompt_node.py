@@ -765,7 +765,17 @@ class LLMPromptNode:
             # because older GGUF builds may not embed it.
             m_name_lower = model_path.name.lower()
             if "gemma" in m_name_lower:
-                llm_kwargs["chat_format"] = "gemma3"
+                # Try "gemma3" first (newer llama-cpp-python), fall back to "gemma"
+                # (older versions). Both use the same <start_of_turn>...<end_of_turn>
+                # template, so "gemma" works for Gemma 3/4/SuperGemma too.
+                try:
+                    from llama_cpp.llama_chat_format import _CHAT_HANDLERS  # type: ignore
+                    if "gemma3" in _CHAT_HANDLERS:
+                        llm_kwargs["chat_format"] = "gemma3"
+                    else:
+                        llm_kwargs["chat_format"] = "gemma"
+                except Exception:
+                    llm_kwargs["chat_format"] = "gemma"
             elif "llama-3" in m_name_lower:
                 llm_kwargs["chat_format"] = "llama-3"
             elif "qwen" in m_name_lower:
