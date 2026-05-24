@@ -427,6 +427,25 @@ def _strip_think_blocks(text: str) -> str:
     cleaned = re.sub(r"<think>", "", cleaned, flags=re.IGNORECASE)
     cleaned = cleaned.strip()
 
+    # Gemma 4 uses a different thinking format: <|channel>thought\n...<channel|>
+    # Same trick — split on the closing marker, take what's after. Then handle
+    # tokenizer-decode artifacts: <|channel>thought sometimes decodes as ",se_thought"
+    # or similar garbled bytes when the special tokens aren't registered properly.
+    if re.search(r"<channel\|?>", cleaned, flags=re.IGNORECASE):
+        cleaned = re.split(r"<channel\|?>", cleaned, flags=re.IGNORECASE)[-1]
+    # Strip any leading thought-block opener that may have decoded as garbage bytes
+    # before "_thought" (e.g. ",se_thought", "_thought", "|>thought"). The underscore
+    # before "thought" is the discriminator — natural prose never has "_thought".
+    # Allow up to 20 chars of garbage before it, and don't require any separator after
+    # — the leaked output can be glued directly to the next word ("_thoughtbeautiful").
+    # The leading "_" before "thought" is the discriminator — natural prose never has
+    # "_thought" so this is safe to match without a word boundary, even when glued to
+    # the next word ("_thoughtbeautiful" → "beautiful").
+    cleaned = re.sub(r"^[^\n]{0,20}?_thought\s*\n?", "", cleaned, flags=re.IGNORECASE)
+    # Also catch bare "thought\n" at the very start (when garbage prefix got stripped earlier)
+    cleaned = re.sub(r"^thought\s*\n", "", cleaned, flags=re.IGNORECASE)
+    cleaned = cleaned.strip()
+
     # If the model labels its final answer, extract just that part
     labeled_patterns = [
         r"(?is)(?:\*?\s*final prompt\s*:\*?)(.+)$",
