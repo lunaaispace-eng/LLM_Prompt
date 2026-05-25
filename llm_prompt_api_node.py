@@ -54,11 +54,15 @@ PROVIDERS = {
         "fallback_models": ["<no model loaded — load one in LM Studio>"],
     },
     "Gemini": {
-        "base_url": "https://generativelanguage.googleapis.com/v1beta/openai",
-        # Accept multiple common names. First one found wins.
+        # NATIVE Gemini REST API — NOT the OpenAI-compat layer. The compat layer
+        # silently drops Gemini-specific params (thinking_budget, safety, top_k),
+        # and rejects `seed` and `extra_body` at the HTTP level. Going native
+        # gives us full feature support and matches Luna Core's approach.
+        "base_url": "https://generativelanguage.googleapis.com/v1beta",
         "env_var": ["GEMINI_API_KEY", "GOOGLE_API_KEY", "GOOGLE_GEMINI_API_KEY"],
         "needs_auth": True,
         "live_models": True,
+        "native_protocol": "gemini",  # routes to _send_gemini_native()
         # Last-resort fallback when /models fails (e.g. no API key set yet).
         # Current Gemini API models as of late 2025 / early 2026 — verified
         # against https://ai.google.dev/gemini-api/docs/models. Once an API key
@@ -153,18 +157,32 @@ _MODEL_LIST_CACHE_TS: dict[tuple[str, str], float] = {}
 _MODEL_CACHE_TTL_SECONDS = 60
 
 
-def _fetch_models_from_server(base_url: str, api_key: str | None) -> list[str]:
-    """Query /v1/models. Returns the list of model id strings.
+def _fetch_models_from_server(base_url: str, api_key: str | None, native: str = "") -> list[str]:
+    """Query the models endpoint. Returns the list of model id strings.
 
-    Silently returns [] on any failure (network down, auth missing, etc.).
+    For most providers (OpenAI-compatible), hits `<base>/models` with optional
+    Bearer auth and expects `{"data": [{"id": ...}]}`.
+
+    For Gemini native, hits `<base>/models?key=<api_key>` and expects
+    `{"models": [{"name": "models/gemini-..."}]}`.
+
+    Silently returns [] on any failure.
     """
     if not base_url:
         return []
-    url = base_url.rstrip("/") + "/models"
-    req = urllib.request.Request(url, method="GET")
-    if api_key:
-        req.add_header("Authorization", f"Bearer {api_key}")
     try:
+        if native == "gemini":
+            # Native Gemini models endpoint
+            if not api_key:
+                return []
+            url = f"{base_url.rstrip('/')}/models?key={api_key}"
+            req = urllib.request.Request(url, method="GET")
+        else:
+            url = base_url.rstrip("/") + "/models"
+            req = urllib.request.Request(url, method="GET")
+            if api_key:
+                req.add_header("Authorization", f"Bearer {api_key}")
+
         with urllib.request.urlopen(req, timeout=3.0) as resp:
             payload = json.loads(resp.read().decode("utf-8"))
     except (urllib.error.URLError, urllib.error.HTTPError, json.JSONDecodeError, TimeoutError):
@@ -172,16 +190,37 @@ def _fetch_models_from_server(base_url: str, api_key: str | None) -> list[str]:
     except Exception:
         return []
 
-    data = payload.get("data") if isinstance(payload, dict) else None
-    if not isinstance(data, list):
+    if not isinstance(payload, dict):
         return []
+
     names: list[str] = []
-    for entry in data:
-        if not isinstance(entry, dict):
-            continue
-        name = entry.get("id") or entry.get("name")
-        if isinstance(name, str) and name:
+    if native == "gemini":
+        # Native format: {"models": [{"name": "models/gemini-2.5-flash", "supportedGenerationMethods": [...]}, ...]}
+        for entry in payload.get("models") or []:
+            if not isinstance(entry, dict):
+                continue
+            name = entry.get("name") or ""
+            # Strip "models/" prefix to match how users specify models
+            if name.startswith("models/"):
+                name = name[len("models/"):]
+            if not name.startswith("gemini-"):
+                continue
+            # Only models that support text generation (generateContent)
+            methods = entry.get("supportedGenerationMethods") or []
+            if methods and "generateContent" not in methods:
+                continue
             names.append(name)
+    else:
+        # OpenAI-compatible format
+        data = payload.get("data") if isinstance(payload, dict) else None
+        if not isinstance(data, list):
+            return []
+        for entry in data:
+            if not isinstance(entry, dict):
+                continue
+            name = entry.get("id") or entry.get("name")
+            if isinstance(name, str) and name:
+                names.append(name)
     return names
 
 
@@ -213,7 +252,7 @@ def _get_models_for_provider(
 
     raw_models: list[str] = []
     if cfg.get("live_models") and base_url:
-        raw_models = _fetch_models_from_server(base_url, api_key)
+        raw_models = _fetch_models_from_server(base_url, api_key, cfg.get("native_protocol", ""))
 
     if not raw_models:
         raw_models = list(cfg.get("fallback_models") or [])
@@ -377,24 +416,15 @@ def _sanitize_payload_for_provider(provider: str, payload: dict) -> dict:
             p["max_completion_tokens"] = p.pop("max_tokens")
 
     elif provider == "Gemini":
-        # Gemini's OpenAI-compat layer accepts standard params at top level,
-        # but Gemini-specific config (top_k, thinking_config, safety_settings,
-        # cached_content) goes through extra_body.google.
-        extra_body = p.pop("extra_body", {}) or {}
-        google_cfg = extra_body.get("google", {}) or {}
-        # Route top_k through extra_body if set
-        if "top_k" in p:
-            top_k_val = p.pop("top_k")
-            if top_k_val:  # only if non-zero
-                google_cfg["top_k"] = top_k_val
-        # Gemini doesn't honor min_p / repetition_penalty
+        # Gemini is handled by the NATIVE API path (_send_gemini_native), not
+        # this OpenAI-compat path. If we ever end up here for Gemini, strip
+        # everything the compat endpoint rejects.
+        p.pop("seed", None)
+        p.pop("extra_body", None)
+        p.pop("top_k", None)
         p.pop("min_p", None)
         p.pop("repetition_penalty", None)
         p.pop("repeat_penalty", None)
-        if google_cfg:
-            extra_body["google"] = google_cfg
-        if extra_body:
-            p["extra_body"] = extra_body
 
     elif provider == "LM Studio (local)":
         # LM Studio accepts everything llama.cpp-style; nothing to strip
@@ -437,19 +467,8 @@ _GEMINI_SAFETY_BLOCK_NONE = [
 ]
 
 
-def _apply_gemini_extras(payload: dict, thinking_budget: int) -> dict:
-    """Inject Gemini-specific extra_body settings: safety, thinking_budget."""
-    extra_body = payload.get("extra_body") or {}
-    google_cfg = extra_body.get("google") or {}
-
-    google_cfg["safety_settings"] = list(_GEMINI_SAFETY_BLOCK_NONE)
-
-    if thinking_budget >= 0:
-        google_cfg["thinking_config"] = {"thinking_budget": int(thinking_budget)}
-
-    extra_body["google"] = google_cfg
-    payload["extra_body"] = extra_body
-    return payload
+# _apply_gemini_extras() removed — was for the broken OpenAI-compat extra_body
+# approach. Gemini now uses the native API path directly via _send_gemini_native.
 
 
 # Cache: hash of stable prefix -> Gemini cached content resource name + expiry
@@ -513,7 +532,212 @@ def _gemini_create_cached_content(
 
 
 # ---------------------------------------------------------------------------
-# HTTP chat completion
+# Native Gemini chat completion
+# ---------------------------------------------------------------------------
+# The OpenAI-compat layer rejects `seed`, `extra_body`, and silently drops
+# Gemini-specific config. The native API supports everything we want.
+
+def _convert_messages_to_gemini(messages: list[dict]) -> tuple[dict | None, list[dict]]:
+    """Convert OpenAI-style messages to Gemini native format.
+
+    Returns (system_instruction, contents) where:
+      - system_instruction is {"parts": [{"text": "..."}]} or None
+      - contents is list of {"role": "user"|"model", "parts": [...]}.
+
+    Handles multimodal user content (text + image_url) by converting image_url
+    data URIs to Gemini's inline_data blocks.
+    """
+    import base64
+
+    system_text = None
+    contents = []
+    for msg in messages:
+        role = msg.get("role")
+        content = msg.get("content")
+        if role == "system":
+            if isinstance(content, str) and content:
+                system_text = content
+            continue
+        # User / assistant messages
+        gemini_role = "model" if role == "assistant" else "user"
+        parts: list[dict] = []
+        if isinstance(content, str):
+            if content:
+                parts.append({"text": content})
+        elif isinstance(content, list):
+            for block in content:
+                if not isinstance(block, dict):
+                    continue
+                t = block.get("type")
+                if t == "text":
+                    text = block.get("text", "")
+                    if text:
+                        parts.append({"text": text})
+                elif t == "image_url":
+                    url = block.get("image_url", {}).get("url", "")
+                    # Expect data URI: data:image/png;base64,XXXX
+                    if url.startswith("data:"):
+                        try:
+                            header, b64 = url.split(",", 1)
+                            mime = header.split(";")[0].replace("data:", "")
+                            parts.append({
+                                "inline_data": {
+                                    "mime_type": mime or "image/png",
+                                    "data": b64,
+                                }
+                            })
+                        except Exception:
+                            pass
+        if parts:
+            contents.append({"role": gemini_role, "parts": parts})
+
+    system_instruction = {"parts": [{"text": system_text}]} if system_text else None
+    return system_instruction, contents
+
+
+def _send_gemini_native(
+    base_url: str,
+    api_key: str,
+    model: str,
+    messages: list[dict],
+    sampling: dict,
+    output_format: str,
+    stop_sequences: list[str],
+    thinking_budget: int,
+    cached_content_name: str | None,
+    timeout: float,
+) -> str:
+    """Send a chat request to Gemini's native generateContent endpoint.
+
+    Full support for Gemini-specific features:
+      - thinkingConfig.thinkingBudget
+      - safetySettings (hardcoded BLOCK_NONE for all categories)
+      - cachedContent reference
+      - top_k (as topK, not silently dropped)
+      - responseMimeType for JSON mode
+    """
+    if not api_key:
+        raise RuntimeError("Gemini native API requires an API key.")
+    if not model or model.startswith("<"):
+        raise RuntimeError(f"Invalid model: {model!r}.")
+
+    # Endpoint: POST /v1beta/models/{model}:generateContent?key={api_key}
+    url = f"{base_url.rstrip('/')}/models/{model}:generateContent?key={api_key}"
+
+    system_instruction, contents = _convert_messages_to_gemini(messages)
+
+    generation_config: dict[str, Any] = {}
+    if "temperature" in sampling:
+        generation_config["temperature"] = float(sampling["temperature"])
+    if "top_p" in sampling:
+        generation_config["topP"] = float(sampling["top_p"])
+    if sampling.get("top_k", 0):
+        generation_config["topK"] = int(sampling["top_k"])
+    if "max_tokens" in sampling:
+        generation_config["maxOutputTokens"] = int(sampling["max_tokens"])
+    if stop_sequences:
+        generation_config["stopSequences"] = list(stop_sequences)
+    if output_format == "json":
+        generation_config["responseMimeType"] = "application/json"
+    if thinking_budget >= 0:
+        # 0 disables thinking entirely (recommended for prompt gen).
+        generation_config["thinkingConfig"] = {"thinkingBudget": int(thinking_budget)}
+
+    payload: dict[str, Any] = {
+        "contents": contents,
+        "generationConfig": generation_config,
+        "safetySettings": list(_GEMINI_SAFETY_BLOCK_NONE),
+    }
+    if system_instruction:
+        payload["systemInstruction"] = system_instruction
+    if cached_content_name:
+        payload["cachedContent"] = cached_content_name
+
+    body = json.dumps(payload).encode("utf-8")
+
+    # Retry once on 429 / 503
+    last_err: Exception | None = None
+    for attempt in range(2):
+        req = urllib.request.Request(url, data=body, method="POST")
+        req.add_header("Content-Type", "application/json")
+        start = time.perf_counter()
+        try:
+            with urllib.request.urlopen(req, timeout=timeout) as resp:
+                raw = resp.read().decode("utf-8")
+            elapsed = max(time.perf_counter() - start, 1e-6)
+            break
+        except urllib.error.HTTPError as e:
+            if e.code in (429, 503) and attempt == 0:
+                print(f"[LLM_Prompt_API] Gemini HTTP {e.code}, retrying in 1.5s...")
+                time.sleep(1.5)
+                last_err = e
+                continue
+            try:
+                err_body = e.read().decode("utf-8", errors="replace")
+            except Exception:
+                err_body = ""
+            raise RuntimeError(
+                f"HTTP {e.code} from Gemini: {err_body[:500] or e.reason}"
+            ) from None
+        except urllib.error.URLError as e:
+            raise RuntimeError(f"Cannot reach Gemini: {e.reason}") from None
+        except TimeoutError:
+            if attempt == 0:
+                print("[LLM_Prompt_API] Gemini timeout, retrying...")
+                last_err = TimeoutError("first attempt timed out")
+                continue
+            raise RuntimeError(f"Gemini timed out after {timeout}s") from None
+    else:
+        raise RuntimeError(f"Both Gemini attempts failed: {last_err}") from None
+
+    try:
+        data = json.loads(raw)
+    except json.JSONDecodeError:
+        raise RuntimeError(f"Non-JSON response from Gemini: {raw[:500]}") from None
+
+    # Response: {"candidates": [{"content": {"parts": [{"text": "..."}]}, "finishReason": ...}], "usageMetadata": ...}
+    candidates = data.get("candidates")
+    if not isinstance(candidates, list) or not candidates:
+        err = data.get("error")
+        if isinstance(err, dict):
+            raise RuntimeError(f"Gemini API error: {err.get('message', err)}")
+        # Often this happens because the prompt was blocked by safety despite BLOCK_NONE
+        # for some hard-blocked categories (CSAM etc.)
+        prompt_feedback = data.get("promptFeedback")
+        if prompt_feedback:
+            raise RuntimeError(f"Gemini blocked the request: {prompt_feedback}")
+        raise RuntimeError(f"No candidates in Gemini response: {raw[:500]}")
+
+    first = candidates[0] or {}
+    finish = first.get("finishReason", "")
+    content = first.get("content") or {}
+    parts = content.get("parts") or []
+    text_parts: list[str] = []
+    for p in parts:
+        if isinstance(p, dict):
+            t = p.get("text")
+            if isinstance(t, str):
+                text_parts.append(t)
+    result_text = "".join(text_parts)
+
+    usage = data.get("usageMetadata") or {}
+    pt = usage.get("promptTokenCount")
+    ct = usage.get("candidatesTokenCount")
+    cached = usage.get("cachedContentTokenCount")
+    tt = usage.get("thoughtsTokenCount")
+    cache_note = f", cached={cached}" if cached else ""
+    think_note = f", thoughts={tt}" if tt else ""
+    print(
+        f"[LLM_Prompt_API] Gemini | {model} | "
+        f"prompt={pt}, completion={ct}{cache_note}{think_note}, "
+        f"finish={finish}, time={elapsed:.2f}s"
+    )
+
+    return result_text.strip()
+
+
+# ---------------------------------------------------------------------------
+# HTTP chat completion (OpenAI-compatible — LM Studio, Grok, Custom)
 # ---------------------------------------------------------------------------
 
 def _send_chat_completion(
@@ -746,7 +970,7 @@ class LLMPromptAPINode:
             if prov_cfg.get("needs_auth") and not key:
                 continue  # Skip auth-required providers without a key
             try:
-                live = _fetch_models_from_server(base, key)
+                live = _fetch_models_from_server(base, key, prov_cfg.get("native_protocol", ""))
                 all_models.extend(live)
             except Exception:
                 pass
@@ -1048,38 +1272,48 @@ class LLMPromptAPINode:
         if stop_sequences and stop_sequences.strip():
             stops = [s.strip() for s in stop_sequences.split(",") if s.strip()]
 
-        # Gemini-specific extra_body (safety + thinking)
-        extra_body: dict | None = None
-        if provider == "Gemini":
-            extra_body = {}
-            _apply_gemini_extras(extra_body, gemini_thinking_budget)
+        # Send the request — route Gemini through its native API for full
+        # feature support (thinking_budget, safety, top_k, caching). Other
+        # providers go through the OpenAI-compatible /v1/chat/completions path.
+        try:
+            if cfg.get("native_protocol") == "gemini":
+                # Caching: create or reuse a cached content resource for the stable prefix
+                cache_name: str | None = None
+                if enable_caching and resolved_key and sys_prompt and stable_user_text:
+                    cache_name = _gemini_create_cached_content(
+                        api_key=resolved_key,
+                        model=model_name,
+                        system_text=sys_prompt,
+                        stable_user_text=stable_user_text,
+                    )
+                    if cache_name:
+                        print(f"[LLM_Prompt_API] Using Gemini cached content: {cache_name}")
 
-            # Caching: create or reuse a cached content resource for the stable prefix
-            if enable_caching and resolved_key and sys_prompt and stable_user_text:
-                cache_name = _gemini_create_cached_content(
+                raw = _send_gemini_native(
+                    base_url=base_url,
                     api_key=resolved_key,
                     model=model_name,
-                    system_text=sys_prompt,
-                    stable_user_text=stable_user_text,
+                    messages=messages,
+                    sampling=sampling,
+                    output_format=output_format,
+                    stop_sequences=stops,
+                    thinking_budget=gemini_thinking_budget,
+                    cached_content_name=cache_name,
+                    timeout=float(timeout_seconds),
                 )
-                if cache_name:
-                    extra_body.setdefault("google", {})["cached_content"] = cache_name
-                    print(f"[LLM_Prompt_API] Using Gemini cached content: {cache_name}")
-
-        # Send the request
-        try:
-            raw = _send_chat_completion(
-                provider=provider,
-                base_url=base_url,
-                api_key=resolved_key,
-                model=model_name,
-                messages=messages,
-                sampling=sampling,
-                output_format=output_format,
-                stop_sequences=stops,
-                timeout=float(timeout_seconds),
-                extra_body=extra_body,
-            )
+            else:
+                raw = _send_chat_completion(
+                    provider=provider,
+                    base_url=base_url,
+                    api_key=resolved_key,
+                    model=model_name,
+                    messages=messages,
+                    sampling=sampling,
+                    output_format=output_format,
+                    stop_sequences=stops,
+                    timeout=float(timeout_seconds),
+                    extra_body=None,
+                )
         finally:
             if unload_after_run and provider == "LM Studio (local)":
                 ok, msg = _unload_lm_studio_model(base_url, model_name)
