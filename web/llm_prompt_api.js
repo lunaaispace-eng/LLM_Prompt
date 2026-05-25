@@ -1,7 +1,7 @@
 // LLM_Prompt_API — frontend extension for the LLM Prompt (API) node.
 //
 // Responsibilities:
-//   - Refresh the model_name dropdown when provider / server_url / api_key change
+//   - Refresh the model_name dropdown when provider / server_url change
 //   - Live-query /v1/models for LM Studio, Gemini, Custom (cached 60s)
 //   - Apply capability filter (text / vision / multimodal) before showing
 //   - Show "Unload Now" button only when LM Studio is selected
@@ -132,7 +132,6 @@ function updateModelDropdown(node, options) {
 async function refreshModels(node) {
     const providerW = node.widgets?.find((w) => w.name === "provider");
     const urlW = node.widgets?.find((w) => w.name === "server_url");
-    const keyW = node.widgets?.find((w) => w.name === "api_key");
     const filterW = node.widgets?.find((w) => w.name === "model_filter");
     if (!providerW) return;
 
@@ -141,19 +140,23 @@ async function refreshModels(node) {
     if (!cfg) return;
 
     const baseUrl = (urlW?.value?.trim() || cfg.defaultUrl).replace(/\/$/, "");
-    const apiKey = keyW?.value?.trim() || "";
     const filterMode = filterW?.value || "all";
 
+    // We never have the API key in the browser — it lives in os.environ or
+    // .env on the ComfyUI server side. So for providers that require auth,
+    // the browser-side live query is expected to fail; the dropdown is
+    // populated from the Python-side INPUT_TYPES instead (which DOES have
+    // env access). Show the fallback list as a sensible default here.
     let all = [];
     let source = "fallback";
-    if (cfg.liveModels && baseUrl) {
-        all = await fetchLiveModels(baseUrl, apiKey);
+    if (cfg.liveModels && baseUrl && !cfg.needsAuth) {
+        all = await fetchLiveModels(baseUrl, null);
         if (all.length > 0) source = "live /v1/models";
     }
     if (all.length === 0) {
         all = [...cfg.fallback];
-        if (cfg.needsAuth && !apiKey) {
-            source = `fallback (no ${cfg.envVar} set — paste API key to see real list)`;
+        if (cfg.needsAuth) {
+            source = `fallback (browser has no key — server-side dropdown uses ${cfg.envVar} from env or .env)`;
         } else {
             source = "fallback (live query failed or returned empty)";
         }
@@ -293,7 +296,7 @@ app.registerExtension({
             refreshModels(node);
             updateProviderSpecificVisibility(node);
 
-            // Wire up callbacks on provider / server_url / api_key / model_filter
+            // Wire up callbacks on provider / server_url / model_filter
             const watch = (name, callback) => {
                 const w = node.widgets?.find((widget) => widget.name === name);
                 if (!w) return;
@@ -311,7 +314,6 @@ app.registerExtension({
                 updateProviderSpecificVisibility(node);
             });
             watch("server_url", () => refreshModels(node));
-            watch("api_key", () => refreshModels(node));
             watch("model_filter", () => refreshModels(node));
 
             return r;
