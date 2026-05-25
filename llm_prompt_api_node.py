@@ -195,19 +195,21 @@ def _fetch_models_from_server(base_url: str, api_key: str | None, native: str = 
 
     names: list[str] = []
     if native == "gemini":
-        # Native format: {"models": [{"name": "models/gemini-2.5-flash", "supportedGenerationMethods": [...]}, ...]}
+        # Gemini's native REST returns: {"models": [{"name": "models/gemini-2.5-flash", "supportedGenerationMethods": [...]}, ...]}
         for entry in payload.get("models") or []:
             if not isinstance(entry, dict):
                 continue
             name = entry.get("name") or ""
-            # Strip "models/" prefix to match how users specify models
             if name.startswith("models/"):
                 name = name[len("models/"):]
             if not name.startswith("gemini-"):
                 continue
-            # Only models that support text generation (generateContent)
+            # Skip non-chat methods (embeddings, tuning, etc.)
             methods = entry.get("supportedGenerationMethods") or []
             if methods and "generateContent" not in methods:
+                continue
+            # Skip image-gen / video-gen variants — they're not for chat
+            if "-image" in name or name.startswith("imagen") or name.startswith("veo"):
                 continue
             names.append(name)
     else:
@@ -596,7 +598,7 @@ def _convert_messages_to_gemini(messages: list[dict]) -> tuple[dict | None, list
 
 
 def _send_gemini_native(
-    base_url: str,
+    base_url: str,  # unused — SDK handles endpoints
     api_key: str,
     model: str,
     messages: list[dict],
@@ -605,133 +607,150 @@ def _send_gemini_native(
     stop_sequences: list[str],
     thinking_budget: int,
     cached_content_name: str | None,
-    timeout: float,
+    timeout: float,  # unused — SDK manages timeouts
 ) -> str:
-    """Send a chat request to Gemini's native generateContent endpoint.
+    """Send a chat request via google-genai SDK.
 
-    Full support for Gemini-specific features:
-      - thinkingConfig.thinkingBudget
-      - safetySettings (hardcoded BLOCK_NONE for all categories)
-      - cachedContent reference
-      - top_k (as topK, not silently dropped)
-      - responseMimeType for JSON mode
+    Mirrors Luna Core / Comfy Pilot's gemini.py pattern. The SDK handles
+    endpoints, message format conversion, retries, and protocol versioning.
     """
+    try:
+        from google import genai
+        from google.genai import types
+    except ImportError as e:
+        raise RuntimeError(
+            "google-genai SDK not installed. Run:\n"
+            "    pip install google-genai\n"
+            f"(import error: {e})"
+        ) from None
+
     if not api_key:
-        raise RuntimeError("Gemini native API requires an API key.")
+        raise RuntimeError("Gemini requires an API key — set GEMINI_API_KEY in env or .env")
     if not model or model.startswith("<"):
         raise RuntimeError(f"Invalid model: {model!r}.")
 
-    # Endpoint: POST /v1beta/models/{model}:generateContent?key={api_key}
-    url = f"{base_url.rstrip('/')}/models/{model}:generateContent?key={api_key}"
+    client = genai.Client(api_key=api_key)
 
-    system_instruction, contents = _convert_messages_to_gemini(messages)
+    # Convert messages: extract system, convert user content (including images)
+    system_text = None
+    contents = []
+    for msg in messages:
+        role = msg.get("role")
+        content = msg.get("content")
+        if role == "system":
+            if isinstance(content, str) and content:
+                system_text = content
+            continue
+        gemini_role = "model" if role == "assistant" else "user"
+        parts: list = []
+        if isinstance(content, str):
+            if content:
+                parts.append(types.Part(text=content))
+        elif isinstance(content, list):
+            import base64
+            for block in content:
+                if not isinstance(block, dict):
+                    continue
+                t = block.get("type")
+                if t == "text":
+                    text = block.get("text", "")
+                    if text:
+                        parts.append(types.Part(text=text))
+                elif t == "image_url":
+                    url = block.get("image_url", {}).get("url", "")
+                    if url.startswith("data:"):
+                        try:
+                            header, b64 = url.split(",", 1)
+                            mime = header.split(";")[0].replace("data:", "") or "image/png"
+                            parts.append(types.Part(inline_data=types.Blob(
+                                mime_type=mime,
+                                data=base64.b64decode(b64),
+                            )))
+                        except Exception:
+                            pass
+        if parts:
+            contents.append(types.Content(role=gemini_role, parts=parts))
 
-    generation_config: dict[str, Any] = {}
+    # Build the SDK config — match Luna Core's simple pattern
+    config_kwargs: dict[str, Any] = {}
+    if system_text:
+        config_kwargs["system_instruction"] = system_text
     if "temperature" in sampling:
-        generation_config["temperature"] = float(sampling["temperature"])
+        config_kwargs["temperature"] = float(sampling["temperature"])
     if "top_p" in sampling:
-        generation_config["topP"] = float(sampling["top_p"])
+        config_kwargs["top_p"] = float(sampling["top_p"])
     if sampling.get("top_k", 0):
-        generation_config["topK"] = int(sampling["top_k"])
+        config_kwargs["top_k"] = int(sampling["top_k"])
     if "max_tokens" in sampling:
-        generation_config["maxOutputTokens"] = int(sampling["max_tokens"])
+        config_kwargs["max_output_tokens"] = int(sampling["max_tokens"])
     if stop_sequences:
-        generation_config["stopSequences"] = list(stop_sequences)
+        config_kwargs["stop_sequences"] = list(stop_sequences)
     if output_format == "json":
-        generation_config["responseMimeType"] = "application/json"
+        config_kwargs["response_mime_type"] = "application/json"
+    # Thinking budget: 0 = disabled (recommended for prompt gen)
     if thinking_budget >= 0:
-        # 0 disables thinking entirely (recommended for prompt gen).
-        generation_config["thinkingConfig"] = {"thinkingBudget": int(thinking_budget)}
-
-    payload: dict[str, Any] = {
-        "contents": contents,
-        "generationConfig": generation_config,
-        "safetySettings": list(_GEMINI_SAFETY_BLOCK_NONE),
-    }
-    if system_instruction:
-        payload["systemInstruction"] = system_instruction
+        config_kwargs["thinking_config"] = types.ThinkingConfig(
+            thinking_budget=int(thinking_budget),
+        )
+    # Hardcoded BLOCK_NONE for all four configurable safety categories
+    config_kwargs["safety_settings"] = [
+        types.SafetySetting(
+            category="HARM_CATEGORY_HARASSMENT", threshold="BLOCK_NONE"
+        ),
+        types.SafetySetting(
+            category="HARM_CATEGORY_HATE_SPEECH", threshold="BLOCK_NONE"
+        ),
+        types.SafetySetting(
+            category="HARM_CATEGORY_SEXUALLY_EXPLICIT", threshold="BLOCK_NONE"
+        ),
+        types.SafetySetting(
+            category="HARM_CATEGORY_DANGEROUS_CONTENT", threshold="BLOCK_NONE"
+        ),
+    ]
     if cached_content_name:
-        payload["cachedContent"] = cached_content_name
+        config_kwargs["cached_content"] = cached_content_name
 
-    body = json.dumps(payload).encode("utf-8")
+    gen_config = types.GenerateContentConfig(**config_kwargs)
 
-    # Retry once on 429 / 503
-    last_err: Exception | None = None
-    for attempt in range(2):
-        req = urllib.request.Request(url, data=body, method="POST")
-        req.add_header("Content-Type", "application/json")
-        start = time.perf_counter()
-        try:
-            with urllib.request.urlopen(req, timeout=timeout) as resp:
-                raw = resp.read().decode("utf-8")
-            elapsed = max(time.perf_counter() - start, 1e-6)
-            break
-        except urllib.error.HTTPError as e:
-            if e.code in (429, 503) and attempt == 0:
-                print(f"[LLM_Prompt_API] Gemini HTTP {e.code}, retrying in 1.5s...")
-                time.sleep(1.5)
-                last_err = e
-                continue
-            try:
-                err_body = e.read().decode("utf-8", errors="replace")
-            except Exception:
-                err_body = ""
-            raise RuntimeError(
-                f"HTTP {e.code} from Gemini: {err_body[:500] or e.reason}"
-            ) from None
-        except urllib.error.URLError as e:
-            raise RuntimeError(f"Cannot reach Gemini: {e.reason}") from None
-        except TimeoutError:
-            if attempt == 0:
-                print("[LLM_Prompt_API] Gemini timeout, retrying...")
-                last_err = TimeoutError("first attempt timed out")
-                continue
-            raise RuntimeError(f"Gemini timed out after {timeout}s") from None
-    else:
-        raise RuntimeError(f"Both Gemini attempts failed: {last_err}") from None
-
+    start = time.perf_counter()
     try:
-        data = json.loads(raw)
-    except json.JSONDecodeError:
-        raise RuntimeError(f"Non-JSON response from Gemini: {raw[:500]}") from None
+        response = client.models.generate_content(
+            model=model,
+            contents=contents,
+            config=gen_config,
+        )
+    except Exception as e:
+        # SDK exception messages are usually descriptive enough
+        raise RuntimeError(f"Gemini SDK error: {e}") from None
+    elapsed = max(time.perf_counter() - start, 1e-6)
 
-    # Response: {"candidates": [{"content": {"parts": [{"text": "..."}]}, "finishReason": ...}], "usageMetadata": ...}
-    candidates = data.get("candidates")
-    if not isinstance(candidates, list) or not candidates:
-        err = data.get("error")
-        if isinstance(err, dict):
-            raise RuntimeError(f"Gemini API error: {err.get('message', err)}")
-        # Often this happens because the prompt was blocked by safety despite BLOCK_NONE
-        # for some hard-blocked categories (CSAM etc.)
-        prompt_feedback = data.get("promptFeedback")
-        if prompt_feedback:
-            raise RuntimeError(f"Gemini blocked the request: {prompt_feedback}")
-        raise RuntimeError(f"No candidates in Gemini response: {raw[:500]}")
+    # Extract text from response
+    result_text = ""
+    if response.text:
+        result_text = response.text
+    elif response.candidates:
+        for cand in response.candidates:
+            if cand.content and cand.content.parts:
+                for p in cand.content.parts:
+                    if hasattr(p, "text") and p.text:
+                        result_text += p.text
 
-    first = candidates[0] or {}
-    finish = first.get("finishReason", "")
-    content = first.get("content") or {}
-    parts = content.get("parts") or []
-    text_parts: list[str] = []
-    for p in parts:
-        if isinstance(p, dict):
-            t = p.get("text")
-            if isinstance(t, str):
-                text_parts.append(t)
-    result_text = "".join(text_parts)
-
-    usage = data.get("usageMetadata") or {}
-    pt = usage.get("promptTokenCount")
-    ct = usage.get("candidatesTokenCount")
-    cached = usage.get("cachedContentTokenCount")
-    tt = usage.get("thoughtsTokenCount")
-    cache_note = f", cached={cached}" if cached else ""
-    think_note = f", thoughts={tt}" if tt else ""
-    print(
-        f"[LLM_Prompt_API] Gemini | {model} | "
-        f"prompt={pt}, completion={ct}{cache_note}{think_note}, "
-        f"finish={finish}, time={elapsed:.2f}s"
-    )
+    # Log usage like Luna Core does
+    try:
+        usage = response.usage_metadata
+        pt = getattr(usage, "prompt_token_count", None)
+        ct = getattr(usage, "candidates_token_count", None)
+        cached = getattr(usage, "cached_content_token_count", None) or 0
+        tt = getattr(usage, "thoughts_token_count", None) or 0
+        cache_note = f", cached={cached}" if cached else ""
+        think_note = f", thoughts={tt}" if tt else ""
+        print(
+            f"[LLM_Prompt_API] Gemini | {model} | "
+            f"prompt={pt}, completion={ct}{cache_note}{think_note}, "
+            f"time={elapsed:.2f}s"
+        )
+    except Exception:
+        print(f"[LLM_Prompt_API] Gemini | {model} | time={elapsed:.2f}s")
 
     return result_text.strip()
 
