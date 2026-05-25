@@ -55,7 +55,8 @@ PROVIDERS = {
     },
     "Gemini": {
         "base_url": "https://generativelanguage.googleapis.com/v1beta/openai",
-        "env_var": "GEMINI_API_KEY",
+        # Accept multiple common names. First one found wins.
+        "env_var": ["GEMINI_API_KEY", "GOOGLE_API_KEY", "GOOGLE_GEMINI_API_KEY"],
         "needs_auth": True,
         "live_models": True,
         # Last-resort fallback when /models fails (e.g. no API key set yet).
@@ -77,7 +78,7 @@ PROVIDERS = {
     },
     "Grok (xAI)": {
         "base_url": "https://api.x.ai/v1",
-        "env_var": "XAI_API_KEY",
+        "env_var": ["XAI_API_KEY", "GROK_API_KEY"],
         "needs_auth": True,
         # No /models endpoint per xAI docs — always use the curated list
         "live_models": False,
@@ -277,27 +278,67 @@ def _load_env_file_keys() -> dict[str, str]:
 def _resolve_api_key(provider: str, override_key: str = "") -> str | None:
     """Resolve the API key, in priority order:
        1. Per-node `api_key` widget override
-       2. Process environment variable (os.environ)
+       2. Process environment variable (os.environ) — checks all accepted names
        3. .env file in the LLM_Prompt node folder
        4. .env file in the ComfyUI root
     """
     if override_key and override_key.strip():
         return override_key.strip()
     cfg = PROVIDERS.get(provider, {})
-    env_var = cfg.get("env_var")
-    if not env_var:
+    env_var_spec = cfg.get("env_var")
+    if not env_var_spec:
         return None
+    # Normalize to list (each provider can accept multiple env var names)
+    env_var_names = env_var_spec if isinstance(env_var_spec, list) else [env_var_spec]
 
-    # 2. Process env
-    v = os.environ.get(env_var)
-    if v and v.strip():
-        return v.strip()
+    # 2. Process env — try every accepted name
+    for name in env_var_names:
+        v = os.environ.get(name)
+        if v and v.strip():
+            return v.strip()
 
-    # 3 + 4. .env file fallback
+    # 3 + 4. .env file fallback — try every accepted name
     file_keys = _load_env_file_keys()
-    if env_var in file_keys:
-        return file_keys[env_var]
+    for name in env_var_names:
+        if name in file_keys and file_keys[name].strip():
+            return file_keys[name].strip()
     return None
+
+
+def _diagnose_env_keys() -> None:
+    """Print a one-time diagnostic showing which API key env vars ComfyUI sees.
+
+    Helps users debug why their system env var isn't being picked up — most
+    commonly because Easy-Install / embedded python doesn't inherit user-level
+    env vars, or the variable was set after Comfy started.
+    """
+    print("[LLM_Prompt_API] API key environment check:")
+    for prov_name, prov_cfg in PROVIDERS.items():
+        spec = prov_cfg.get("env_var")
+        if not spec:
+            continue
+        names = spec if isinstance(spec, list) else [spec]
+        found = []
+        for name in names:
+            v = os.environ.get(name)
+            if v:
+                # Show only first 8 chars + length — don't leak the full key
+                preview = f"{v[:8]}…({len(v)} chars)"
+                found.append(f"{name}={preview}")
+        # Check .env file too
+        file_keys = _load_env_file_keys()
+        for name in names:
+            if name in file_keys and name not in [f.split("=")[0] for f in found]:
+                preview = f"{file_keys[name][:8]}…(.env)"
+                found.append(f"{name}={preview}")
+        if found:
+            print(f"  {prov_name}: {', '.join(found)}")
+        else:
+            print(f"  {prov_name}: NOT FOUND in env or .env (tried: {names})")
+
+
+# Run the diagnostic once at module load
+_diagnose_env_keys()
 
 
 def _resolve_base_url(provider: str, custom_url: str = "") -> str:
@@ -893,15 +934,20 @@ class LLMPromptAPINode:
         base_url = _resolve_base_url(provider, server_url)
         resolved_key = _resolve_api_key(provider, api_key)
         if cfg.get("needs_auth") and not resolved_key:
-            env_var = cfg.get("env_var") or "<none>"
+            spec = cfg.get("env_var")
+            names = spec if isinstance(spec, list) else [spec or "<none>"]
+            primary = names[0]
+            alt_text = f" (or any of: {', '.join(names[1:])})" if len(names) > 1 else ""
             node_env_path = Path(__file__).parent / ".env"
             raise RuntimeError(
                 f"{provider} requires an API key. Three ways to set it:\n"
                 f"  1. Paste it into the 'api_key' field on this node, OR\n"
-                f"  2. Set the {env_var} environment variable BEFORE launching ComfyUI "
-                f"(env vars set after ComfyUI starts are NOT picked up), OR\n"
+                f"  2. Set the {primary} environment variable{alt_text} BEFORE launching ComfyUI "
+                f"(env vars set after ComfyUI starts are NOT picked up by Easy-Install builds), OR\n"
                 f"  3. Create a .env file at {node_env_path} with the line:\n"
-                f"     {env_var}=your_key_here"
+                f"     {primary}=your_key_here\n\n"
+                f"Check the ComfyUI startup log for '[LLM_Prompt_API] API key environment check:' "
+                f"to see exactly which keys this Python process sees."
             )
 
         # Resolve system prompt
