@@ -416,6 +416,13 @@ def _sanitize_payload_for_provider(provider: str, payload: dict) -> dict:
         # Grok uses max_completion_tokens, not max_tokens
         if "max_tokens" in p:
             p["max_completion_tokens"] = p.pop("max_tokens")
+        # Grok requires seed to fit in a signed 32-bit int (max 2,147,483,647).
+        # ComfyUI's randomize widget uses unsigned 32-bit range (up to 2^32-1),
+        # so clamp via modulo to stay within Grok's bounds without losing entropy.
+        if "seed" in p:
+            seed_val = int(p["seed"])
+            if seed_val > 2147483647:
+                p["seed"] = seed_val % 2147483647
 
     elif provider == "Gemini":
         # Gemini is handled by the NATIVE API path (_send_gemini_native), not
