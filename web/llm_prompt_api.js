@@ -200,17 +200,25 @@ function addHealthIndicator(node) {
 // Show/hide a widget by manipulating its computeSize / type. ComfyUI doesn't
 // have a first-class "hide" API for built-in widgets, but setting computeSize
 // to return [0, -4] effectively collapses the widget row.
+//
+// Critical: only stash/restore when state actually changes. A naive
+// "always restore on show" would set computeSize = null for widgets that
+// were never hidden, which silently breaks their rendering.
 function setWidgetVisible(widget, visible) {
     if (!widget) return;
-    if (visible) {
-        widget.computeSize = widget._origComputeSize || null;
-        widget.type = widget._origType || widget.type;
-    } else {
+    const isHidden = widget._origComputeSize !== undefined;
+    if (visible && isHidden) {
+        widget.computeSize = widget._origComputeSize;
+        widget.type = widget._origType;
+        delete widget._origComputeSize;
+        delete widget._origType;
+    } else if (!visible && !isHidden) {
         widget._origComputeSize = widget.computeSize;
         widget._origType = widget.type;
         widget.computeSize = () => [0, -4];
         widget.type = "hidden";
     }
+    // Otherwise: already in the desired state, do nothing
 }
 
 // Add a JS-side "Unload Now" button, only visible when LM Studio is the provider.
@@ -265,7 +273,9 @@ function updateProviderSpecificVisibility(node) {
     const unloadBtn = node.widgets?.find((w) => w._isUnloadButton);
     setWidgetVisible(unloadBtn, isLM);
 
-    // Show/hide the unload_after_run checkbox (LM Studio only)
+    // Show/hide LM-Studio-only widgets
+    const keepLoaded = node.widgets?.find((w) => w.name === "keep_model_loaded");
+    setWidgetVisible(keepLoaded, isLM);
     const unloadAfterRun = node.widgets?.find((w) => w.name === "unload_after_run");
     setWidgetVisible(unloadAfterRun, isLM);
 

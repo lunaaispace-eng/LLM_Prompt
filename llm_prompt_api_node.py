@@ -1126,9 +1126,13 @@ class LLMPromptAPINode:
                     "default": False,
                     "tooltip": "Gemini only. Caches the stable prefix (system + style + canvas) to cut cost when generating multiple variations of the same character/scene. Requires the prefix to be at least ~1024 tokens.",
                 }),
+                "keep_model_loaded": ("BOOLEAN", {
+                    "default": True,
+                    "tooltip": "LM Studio only. When TRUE, model stays loaded in LM Studio's VRAM between runs (faster subsequent runs). When FALSE, requests LM Studio's JIT TTL behavior (model may auto-unload after idle period). Silently ignored for cloud providers.",
+                }),
                 "unload_after_run": ("BOOLEAN", {
                     "default": False,
-                    "tooltip": "LM Studio only. POST an unload request after generation to free VRAM. Silently ignored for other providers.",
+                    "tooltip": "LM Studio only. After THIS generation finishes, send an explicit unload request to free VRAM immediately. Use when you're done with the model and want to load something else. Silently ignored for cloud providers.",
                 }),
                 "timeout_seconds": ("INT", {
                     "default": 120,
@@ -1176,6 +1180,7 @@ class LLMPromptAPINode:
         stop_sequences: str,
         gemini_thinking_budget: int,
         enable_caching: bool,
+        keep_model_loaded: bool,
         unload_after_run: bool,
         timeout_seconds: int,
         style: str = "",
