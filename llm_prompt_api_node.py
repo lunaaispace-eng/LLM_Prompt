@@ -57,12 +57,21 @@ PROVIDERS = {
         "env_var": "GEMINI_API_KEY",
         "needs_auth": True,
         "live_models": True,
-        # Last-resort fallback when /models fails (e.g. no API key set yet)
+        # Last-resort fallback when /models fails (e.g. no API key set yet).
+        # Current Gemini API models as of late 2025 / early 2026 — verified
+        # against https://ai.google.dev/gemini-api/docs/models. Once an API key
+        # is set, the live query returns the user's full account-accessible list.
         "fallback_models": [
+            # Gemini 3 series (current)
+            "gemini-3.1-pro-preview",
+            "gemini-3.5-flash",
+            "gemini-3-flash-preview",
+            "gemini-3.1-flash-lite",
+            "gemini-3.1-flash-lite-preview",
+            # Gemini 2.5 (legacy, still supported)
             "gemini-2.5-pro",
             "gemini-2.5-flash",
             "gemini-2.5-flash-lite",
-            "gemini-2.0-flash",
         ],
     },
     "Grok (xAI)": {
