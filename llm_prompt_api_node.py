@@ -617,7 +617,47 @@ class LLMPromptAPINode:
         prompt_names = ["None"] + sorted(prompts.keys())
         providers = list(PROVIDERS.keys())
         default_provider = providers[0]
-        model_options = _get_models_for_provider(default_provider) or ["<unavailable>"]
+
+        # CRITICAL: ComfyUI validates the model_name value against this list
+        # server-side. The JS extension changes the *visible* options when the
+        # user picks a provider, but the validator uses what's returned here.
+        # So we must return a SUPERSET of all possible model names across all
+        # providers — otherwise picking e.g. a Gemini model fails validation
+        # because Gemini models aren't in LM Studio's list.
+        all_models: list[str] = []
+        for prov_name, prov_cfg in PROVIDERS.items():
+            all_models.extend(prov_cfg.get("fallback_models") or [])
+        # Live-query each provider that supports it AND has credentials
+        # available at INPUT_TYPES time (env var or no auth needed). This is
+        # critical: the JS extension's browser-side live query may show models
+        # to the user that aren't in our hardcoded fallback, and those would
+        # fail server-side validation if we don't include them here too.
+        for prov_name, prov_cfg in PROVIDERS.items():
+            if not prov_cfg.get("live_models"):
+                continue
+            base = prov_cfg.get("base_url") or ""
+            if not base:
+                continue  # Custom — no URL until user fills in widget
+            env_var = prov_cfg.get("env_var")
+            key = None
+            if env_var:
+                key = os.environ.get(env_var)
+            if prov_cfg.get("needs_auth") and not key:
+                continue  # Skip auth-required providers without a key
+            try:
+                live = _fetch_models_from_server(base, key)
+                all_models.extend(live)
+            except Exception:
+                pass
+        # Dedupe while preserving order
+        seen: set[str] = set()
+        model_options: list[str] = []
+        for m in all_models:
+            if m and m not in seen:
+                seen.add(m)
+                model_options.append(m)
+        if not model_options:
+            model_options = ["<no models available>"]
 
         return {
             "required": {
