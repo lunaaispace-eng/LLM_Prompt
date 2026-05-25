@@ -28,6 +28,7 @@ import re
 import time
 import urllib.request
 import urllib.error
+from pathlib import Path
 from typing import Any
 
 # Reuse helpers from the sister GGUF node
@@ -235,15 +236,67 @@ def _get_models_for_provider(
     return deduped
 
 
+def _load_env_file_keys() -> dict[str, str]:
+    """Load API keys from .env files found alongside the node or in ComfyUI root.
+
+    Format: standard KEY=VALUE per line, lines starting with # are comments.
+    Search order:
+      1. <LLM_Prompt node folder>/.env       (per-node, recommended)
+      2. <ComfyUI root>/.env                 (global)
+    First match wins per key.
+
+    This fallback is important because Windows users often set env vars in
+    System Properties *after* ComfyUI is already running — the running process
+    only sees the env that existed at startup. A .env file sidesteps that.
+    """
+    keys: dict[str, str] = {}
+    candidates = [
+        Path(__file__).parent / ".env",
+        Path(__file__).parent.parent.parent.parent / ".env",  # ComfyUI/.env
+    ]
+    for path in candidates:
+        try:
+            if not path.is_file():
+                continue
+            for raw_line in path.read_text(encoding="utf-8").splitlines():
+                line = raw_line.strip()
+                if not line or line.startswith("#"):
+                    continue
+                if "=" not in line:
+                    continue
+                k, v = line.split("=", 1)
+                k = k.strip()
+                v = v.strip().strip('"').strip("'")
+                if k and v and k not in keys:
+                    keys[k] = v
+        except Exception:
+            continue
+    return keys
+
+
 def _resolve_api_key(provider: str, override_key: str = "") -> str | None:
+    """Resolve the API key, in priority order:
+       1. Per-node `api_key` widget override
+       2. Process environment variable (os.environ)
+       3. .env file in the LLM_Prompt node folder
+       4. .env file in the ComfyUI root
+    """
     if override_key and override_key.strip():
         return override_key.strip()
     cfg = PROVIDERS.get(provider, {})
     env_var = cfg.get("env_var")
-    if env_var:
-        v = os.environ.get(env_var)
-        if v:
-            return v.strip()
+    if not env_var:
+        return None
+
+    # 2. Process env
+    v = os.environ.get(env_var)
+    if v and v.strip():
+        return v.strip()
+
+    # 3 + 4. .env file fallback
+    file_keys = _load_env_file_keys()
+    if env_var in file_keys:
+        return file_keys[env_var]
     return None
 
 
@@ -638,10 +691,8 @@ class LLMPromptAPINode:
             base = prov_cfg.get("base_url") or ""
             if not base:
                 continue  # Custom — no URL until user fills in widget
-            env_var = prov_cfg.get("env_var")
-            key = None
-            if env_var:
-                key = os.environ.get(env_var)
+            # Use the full key resolver so .env files are honored at scan time too
+            key = _resolve_api_key(prov_name, "")
             if prov_cfg.get("needs_auth") and not key:
                 continue  # Skip auth-required providers without a key
             try:
@@ -843,10 +894,14 @@ class LLMPromptAPINode:
         resolved_key = _resolve_api_key(provider, api_key)
         if cfg.get("needs_auth") and not resolved_key:
             env_var = cfg.get("env_var") or "<none>"
+            node_env_path = Path(__file__).parent / ".env"
             raise RuntimeError(
-                f"{provider} requires an API key. Set the api_key field on the "
-                f"node, or export the {env_var} environment variable before "
-                f"starting ComfyUI."
+                f"{provider} requires an API key. Three ways to set it:\n"
+                f"  1. Paste it into the 'api_key' field on this node, OR\n"
+                f"  2. Set the {env_var} environment variable BEFORE launching ComfyUI "
+                f"(env vars set after ComfyUI starts are NOT picked up), OR\n"
+                f"  3. Create a .env file at {node_env_path} with the line:\n"
+                f"     {env_var}=your_key_here"
             )
 
         # Resolve system prompt
