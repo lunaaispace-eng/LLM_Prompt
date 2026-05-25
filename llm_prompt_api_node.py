@@ -237,23 +237,30 @@ def _get_models_for_provider(
     return deduped
 
 
+def _comfyui_root() -> Path:
+    """Walk up from this file to find ComfyUI root.
+
+    Expected layout: <ComfyUI>/custom_nodes/LLM_Prompt/llm_prompt_api_node.py
+    So __file__.parent (node) .parent (custom_nodes) .parent (ComfyUI) = root.
+    """
+    return Path(__file__).resolve().parent.parent.parent
+
+
 def _load_env_file_keys() -> dict[str, str]:
-    """Load API keys from .env files found alongside the node or in ComfyUI root.
+    """Load API keys from .env files. Standard KEY=VALUE per line, # for comments.
 
-    Format: standard KEY=VALUE per line, lines starting with # are comments.
-    Search order:
-      1. <LLM_Prompt node folder>/.env       (per-node, recommended)
-      2. <ComfyUI root>/.env                 (global)
-    First match wins per key.
+    Search order (first match wins per key):
+      1. <ComfyUI root>/.env          (PRIMARY — keys live with the install, not the git repo)
+      2. <LLM_Prompt node folder>/.env (fallback — only use if you must)
 
-    This fallback is important because Windows users often set env vars in
-    System Properties *after* ComfyUI is already running — the running process
-    only sees the env that existed at startup. A .env file sidesteps that.
+    The node folder is INSIDE the git repo, so don't put your keys there unless
+    you've gitignored it. The ComfyUI root is the right location — it's outside
+    every custom node's repo, easy to back up, and standard practice.
     """
     keys: dict[str, str] = {}
     candidates = [
-        Path(__file__).parent / ".env",
-        Path(__file__).parent.parent.parent.parent / ".env",  # ComfyUI/.env
+        _comfyui_root() / ".env",
+        Path(__file__).resolve().parent / ".env",
     ]
     for path in candidates:
         try:
@@ -938,13 +945,13 @@ class LLMPromptAPINode:
             names = spec if isinstance(spec, list) else [spec or "<none>"]
             primary = names[0]
             alt_text = f" (or any of: {', '.join(names[1:])})" if len(names) > 1 else ""
-            node_env_path = Path(__file__).parent / ".env"
+            env_path = _comfyui_root() / ".env"
             raise RuntimeError(
                 f"{provider} requires an API key. Three ways to set it:\n"
                 f"  1. Paste it into the 'api_key' field on this node, OR\n"
                 f"  2. Set the {primary} environment variable{alt_text} BEFORE launching ComfyUI "
                 f"(env vars set after ComfyUI starts are NOT picked up by Easy-Install builds), OR\n"
-                f"  3. Create a .env file at {node_env_path} with the line:\n"
+                f"  3. Create a .env file at {env_path} with the line:\n"
                 f"     {primary}=your_key_here\n\n"
                 f"Check the ComfyUI startup log for '[LLM_Prompt_API] API key environment check:' "
                 f"to see exactly which keys this Python process sees."
