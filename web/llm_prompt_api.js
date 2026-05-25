@@ -24,11 +24,21 @@ const PROVIDERS = {
         liveModels: true,
         needsAuth: true,
         envVar: "GEMINI_API_KEY",
+        // Current Gemini API models (late 2025 / early 2026) — verified at
+        // https://ai.google.dev/gemini-api/docs/models. The live /v1/models
+        // query returns the user's full account-accessible list once an API
+        // key is set.
         fallback: [
+            // Gemini 3 series (current)
+            "gemini-3.1-pro-preview",
+            "gemini-3.5-flash",
+            "gemini-3-flash-preview",
+            "gemini-3.1-flash-lite",
+            "gemini-3.1-flash-lite-preview",
+            // Gemini 2.5 (legacy, still supported)
             "gemini-2.5-pro",
             "gemini-2.5-flash",
             "gemini-2.5-flash-lite",
-            "gemini-2.0-flash",
         ],
     },
     "Grok (xAI)": {
@@ -135,11 +145,18 @@ async function refreshModels(node) {
     const filterMode = filterW?.value || "all";
 
     let all = [];
+    let source = "fallback";
     if (cfg.liveModels && baseUrl) {
         all = await fetchLiveModels(baseUrl, apiKey);
+        if (all.length > 0) source = "live /v1/models";
     }
     if (all.length === 0) {
         all = [...cfg.fallback];
+        if (cfg.needsAuth && !apiKey) {
+            source = `fallback (no ${cfg.envVar} set — paste API key to see real list)`;
+        } else {
+            source = "fallback (live query failed or returned empty)";
+        }
     }
 
     const filtered = all.filter((m) => shouldShow(m, filterMode));
@@ -147,7 +164,7 @@ async function refreshModels(node) {
 
     updateModelDropdown(node, final);
     console.log(
-        `[LLM_Prompt_API] ${provider}: ${final.length}/${all.length} models (filter: ${filterMode})`
+        `[LLM_Prompt_API] ${provider}: ${final.length}/${all.length} models | source: ${source} | filter: ${filterMode}`
     );
 }
 
