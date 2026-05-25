@@ -284,10 +284,12 @@ def _load_env_file_keys() -> dict[str, str]:
 
 def _resolve_api_key(provider: str, override_key: str = "") -> str | None:
     """Resolve the API key, in priority order:
-       1. Per-node `api_key` widget override
-       2. Process environment variable (os.environ) — checks all accepted names
+       1. Process environment variable (os.environ) — checks all accepted names
+       2. .env file in the ComfyUI root
        3. .env file in the LLM_Prompt node folder
-       4. .env file in the ComfyUI root
+
+    The `override_key` parameter exists for backward compatibility but is no
+    longer wired to any node widget. Keys are NEVER stored in workflow JSON.
     """
     if override_key and override_key.strip():
         return override_key.strip()
@@ -772,11 +774,10 @@ class LLMPromptAPINode:
                     "multiline": False,
                     "tooltip": "Override the provider's default URL. Required for Custom provider. Leave empty to use the provider default (e.g. http://localhost:1234/v1 for LM Studio).",
                 }),
-                "api_key": ("STRING", {
-                    "default": "",
-                    "multiline": False,
-                    "tooltip": "API key override. Leave empty to use the provider's env var (GEMINI_API_KEY, XAI_API_KEY).",
-                }),
+                # NO api_key widget by design. Widget values are saved to
+                # workflow JSON, which means any shared/exported workflow would
+                # leak the key. Keys are read ONLY from os.environ or .env at
+                # ComfyUI root — both stay out of workflows and out of git.
                 "model_filter": (["all", "text only", "vision", "multimodal"], {
                     "default": "all",
                     "tooltip": "Filter the model dropdown by capability. 'vision' shows models that accept images. 'multimodal' shows models accepting multiple input types (image+video+audio).",
@@ -908,7 +909,6 @@ class LLMPromptAPINode:
         provider: str,
         model_name: str,
         server_url: str,
-        api_key: str,
         model_filter: str,
         system_prompt: str,
         custom_system_prompt: str,
@@ -939,7 +939,8 @@ class LLMPromptAPINode:
             raise RuntimeError(f"Unknown provider: {provider!r}")
 
         base_url = _resolve_base_url(provider, server_url)
-        resolved_key = _resolve_api_key(provider, api_key)
+        # Keys are NEVER passed via node widgets — read only from env / .env
+        resolved_key = _resolve_api_key(provider)
         if cfg.get("needs_auth") and not resolved_key:
             spec = cfg.get("env_var")
             names = spec if isinstance(spec, list) else [spec or "<none>"]
@@ -947,12 +948,13 @@ class LLMPromptAPINode:
             alt_text = f" (or any of: {', '.join(names[1:])})" if len(names) > 1 else ""
             env_path = _comfyui_root() / ".env"
             raise RuntimeError(
-                f"{provider} requires an API key. Three ways to set it:\n"
-                f"  1. Paste it into the 'api_key' field on this node, OR\n"
-                f"  2. Set the {primary} environment variable{alt_text} BEFORE launching ComfyUI "
+                f"{provider} requires an API key. Two ways to set it:\n"
+                f"  1. Set the {primary} environment variable{alt_text} BEFORE launching ComfyUI "
                 f"(env vars set after ComfyUI starts are NOT picked up by Easy-Install builds), OR\n"
-                f"  3. Create a .env file at {env_path} with the line:\n"
+                f"  2. Create a .env file at {env_path} with the line:\n"
                 f"     {primary}=your_key_here\n\n"
+                f"The node intentionally has NO api_key widget — widget values are saved to "
+                f"workflow JSON and would leak the key if you shared the workflow.\n\n"
                 f"Check the ComfyUI startup log for '[LLM_Prompt_API] API key environment check:' "
                 f"to see exactly which keys this Python process sees."
             )
