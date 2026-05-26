@@ -47,6 +47,15 @@ _THINKING_LINE_RE = re.compile(
     r"ready\s+to\s+output\.?"
     r").*$"
 )
+_NEGATIVE_SECTION_RE = re.compile(
+    r"\n+\s*(?:\*{0,2}\s*)?(?:negative\s+prompt|negative\s+prompts?)\s*(?:\*{0,2}\s*)?[:\-]\s*",
+    re.IGNORECASE,
+)
+_POSITIVE_LABEL_STRIP_RE = re.compile(
+    r"^(?:\*{0,2}\s*)?(?:positive\s+prompt|positive\s+prompts?)\s*(?:\*{0,2}\s*)?[:\-]\s*",
+    re.IGNORECASE,
+)
+
 _PLANNING_RE = re.compile(
     r"(?is)\b("
     # First-person planning intent â€” "I should", "I need to", "I will", etc.
@@ -155,6 +164,33 @@ def _drop_preamble(text: str) -> str:
         if re.search(r"(?i)\bhere(?:'s| is)\b", ln) and i < 6:
             keep_from = max(keep_from, i + 1)
     return "\n".join(lines[keep_from:]).strip()
+
+
+def normalize_prompt_separator(text: str) -> str:
+    """Normalize labeled positive/negative sections to pipe-separated format.
+
+    Some models (e.g. Grok) output labeled sections like:
+        Positive prompt: beautiful woman...
+        Negative prompt: lowres, worst quality...
+    instead of the pipe format required by Prompt Splitter nodes:
+        beautiful woman...|lowres, worst quality...
+
+    Detects labeled format and converts it. No-op if | is already present
+    or if no recognizable negative section label is found.
+    """
+    if "|" in text:
+        return text
+
+    parts = _NEGATIVE_SECTION_RE.split(text, maxsplit=1)
+    if len(parts) != 2:
+        return text
+
+    positive = _POSITIVE_LABEL_STRIP_RE.sub("", parts[0]).strip()
+    negative = parts[1].strip()
+    if not positive or not negative:
+        return text
+
+    return f"{positive}|{negative}"
 
 
 def _strip_planning_paragraphs(text: str) -> str:

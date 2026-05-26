@@ -38,7 +38,7 @@ from .llm_prompt_node import (
     _tensor_to_base64_png,
     _sample_video_frames,
 )
-from .output_cleaner import OutputCleanConfig, clean_model_output
+from .output_cleaner import OutputCleanConfig, clean_model_output, normalize_prompt_separator
 
 
 # ---------------------------------------------------------------------------
@@ -1355,6 +1355,7 @@ class LLMPromptAPINode:
 
         if output_format == "text":
             cleaned = clean_model_output(raw, OutputCleanConfig(mode="prompt")) or raw
+            cleaned = normalize_prompt_separator(cleaned)
         else:
             cleaned = raw
 
