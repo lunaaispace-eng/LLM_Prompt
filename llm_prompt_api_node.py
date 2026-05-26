@@ -1236,19 +1236,21 @@ class LLMPromptAPINode:
                 "Keep every item on its own numbered line."
             )
         elif sys_prompt:
-            sys_prompt += (
-                "\n\nReturn only the final prompt text. "
-                "No preface, no explanations, no JSON, no markdown fences."
-            )
-
-        # Grok reliably ignores pipe-separator instructions — reinforce with a
-        # concrete example immediately before the request is sent.
-        if provider == "Grok (xAI)" and sys_prompt:
-            sys_prompt += (
-                "\n\nOUTPUT FORMAT (mandatory): one single line, positive and negative "
-                "separated by exactly one | character, nothing else.\n"
-                "Example: beautiful woman, blue eyes, soft lighting|lowres, bad anatomy, blurry"
-            )
+            if provider == "Grok (xAI)":
+                # "Return only the final prompt text" misleads Grok into outputting
+                # only the positive half. Use a concrete one-liner example instead
+                # so it sees exactly what the output should look like.
+                sys_prompt += (
+                    "\n\nOUTPUT FORMAT (mandatory): output one single line with the positive "
+                    "and negative separated by exactly one | character and nothing else — "
+                    "no labels, no newlines, no markdown.\n"
+                    "Example: beautiful woman, blue eyes, soft lighting|lowres, bad anatomy, blurry"
+                )
+            else:
+                sys_prompt += (
+                    "\n\nReturn only the final prompt text. "
+                    "No preface, no explanations, no JSON, no markdown fences."
+                )
 
         # Build user prompt — STABLE FIRST, VARIABLE LAST for cache friendliness.
         # Order: STYLE (rarely changes) -> CANVAS (rarely changes) -> USER REQUEST (varies)
