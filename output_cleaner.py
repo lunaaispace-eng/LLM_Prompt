@@ -55,6 +55,15 @@ _POSITIVE_LABEL_STRIP_RE = re.compile(
     r"^(?:\*{0,2}\s*)?(?:positive\s+prompt|positive\s+prompts?)\s*(?:\*{0,2}\s*)?[:\-]\s*",
     re.IGNORECASE,
 )
+# Tokens that reliably signal the start of an SDXL/SD negative prompt block.
+# Used as a heuristic fallback when the model omits labels and pipes entirely.
+_NEGATIVE_STARTER_RE = re.compile(
+    r"^(?:lowres|worst[\s_]quality|low[\s_]quality|bad[\s_]anatomy|bad[\s_]hands|"
+    r"ugly[,\s]|blurry[,\s]|deformed[,\s]|mutated?[,\s]|poorly[\s_]drawn|"
+    r"extra[\s_](?:limbs|fingers|digit)|missing[\s_]fingers|"
+    r"jpeg[\s_]artifacts|watermark[,\s]|signature[,\s]|text[,\s]|error[,\s])",
+    re.IGNORECASE,
+)
 
 _PLANNING_RE = re.compile(
     r"(?is)\b("
@@ -167,30 +176,49 @@ def _drop_preamble(text: str) -> str:
 
 
 def normalize_prompt_separator(text: str) -> str:
-    """Normalize labeled positive/negative sections to pipe-separated format.
+    """Normalize positive/negative prompt output to pipe-separated format.
 
-    Some models (e.g. Grok) output labeled sections like:
-        Positive prompt: beautiful woman...
-        Negative prompt: lowres, worst quality...
-    instead of the pipe format required by Prompt Splitter nodes:
-        beautiful woman...|lowres, worst quality...
+    Models like Grok often ignore the pipe instruction and instead output:
+      - Labeled sections:  "Positive prompt: ...\nNegative prompt: ..."
+      - Plain paragraphs:  "beautiful woman...\n\nlowres, bad quality..."
+      - Single newline:    "beautiful woman...\nlowres, bad quality..."
 
-    Detects labeled format and converts it. No-op if | is already present
-    or if no recognizable negative section label is found.
+    Strategy (tried in order, stops at first match):
+      1. Pipe already present → no-op.
+      2. Labeled negative section ("Negative prompt:", "**Negative:**", etc.)
+      3. Double-newline split where the second paragraph starts with a
+         well-known negative-prompt keyword (lowres, bad anatomy, etc.).
+      4. Single-newline split with the same keyword heuristic.
     """
     if "|" in text:
         return text
 
+    # --- Strategy 2: labeled sections ---
     parts = _NEGATIVE_SECTION_RE.split(text, maxsplit=1)
-    if len(parts) != 2:
-        return text
+    if len(parts) == 2:
+        positive = _POSITIVE_LABEL_STRIP_RE.sub("", parts[0]).strip()
+        negative = parts[1].strip()
+        if positive and negative:
+            return f"{positive}|{negative}"
 
-    positive = _POSITIVE_LABEL_STRIP_RE.sub("", parts[0]).strip()
-    negative = parts[1].strip()
-    if not positive or not negative:
-        return text
+    # --- Strategy 3: double-newline split + keyword heuristic ---
+    paras = re.split(r"\n\s*\n", text.strip(), maxsplit=1)
+    if len(paras) == 2:
+        pos, neg = paras[0].strip(), paras[1].strip()
+        # Strip any remaining positive label from the first paragraph
+        pos = _POSITIVE_LABEL_STRIP_RE.sub("", pos).strip()
+        if pos and neg and _NEGATIVE_STARTER_RE.match(neg):
+            return f"{pos}|{neg}"
 
-    return f"{positive}|{negative}"
+    # --- Strategy 4: single-newline split + keyword heuristic ---
+    lines = text.strip().splitlines()
+    if len(lines) == 2:
+        pos, neg = lines[0].strip(), lines[1].strip()
+        pos = _POSITIVE_LABEL_STRIP_RE.sub("", pos).strip()
+        if pos and neg and _NEGATIVE_STARTER_RE.match(neg):
+            return f"{pos}|{neg}"
+
+    return text
 
 
 def _strip_planning_paragraphs(text: str) -> str:
