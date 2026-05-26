@@ -1233,7 +1233,13 @@ class LLMPromptAPINode:
         # split — text format instructions are unreliable with Grok.
         # Detected here (before tails are appended) so we can choose the right tail.
         grok_pair_schema: dict | None = None
-        if provider == "Grok (xAI)" and output_format == "text" and sys_prompt and "|" in sys_prompt:
+        if (
+            provider == "Grok (xAI)"
+            and output_format == "text"
+            and sys_prompt
+            and "|" in sys_prompt
+            and "negative" in sys_prompt.lower()
+        ):
             grok_pair_schema = {
                 "type": "json_schema",
                 "json_schema": {
