@@ -777,11 +777,15 @@ def _send_chat_completion(
     stop_sequences: list[str],
     timeout: float,
     extra_body: dict | None = None,
+    response_format_override: dict | None = None,
 ) -> str:
     """POST to /v1/chat/completions with per-provider sanitization + retry.
 
     sampling dict can contain: temperature, top_p, top_k, min_p,
     repetition_penalty, presence_penalty, frequency_penalty, max_tokens, seed.
+
+    response_format_override: if set, used as-is for response_format (e.g. a
+    json_schema dict). Takes priority over the output_format-derived default.
     """
     if not base_url:
         raise RuntimeError("Empty server URL. Set a provider or fill in server_url.")
@@ -799,7 +803,9 @@ def _send_chat_completion(
     if stop_sequences:
         payload["stop"] = stop_sequences
 
-    if output_format == "json":
+    if response_format_override:
+        payload["response_format"] = response_format_override
+    elif output_format == "json":
         # Forced JSON at the API level — more reliable than instructions
         payload["response_format"] = {"type": "json_object"}
 
@@ -1223,6 +1229,34 @@ class LLMPromptAPINode:
         else:
             sys_prompt = ""
 
+        # Grok: use json_schema with strict=true to guarantee positive/negative
+        # split — text format instructions are unreliable with Grok.
+        # Detected here (before tails are appended) so we can choose the right tail.
+        grok_pair_schema: dict | None = None
+        if provider == "Grok (xAI)" and output_format == "text" and sys_prompt and "|" in sys_prompt:
+            grok_pair_schema = {
+                "type": "json_schema",
+                "json_schema": {
+                    "name": "prompt_pair",
+                    "strict": True,
+                    "schema": {
+                        "type": "object",
+                        "properties": {
+                            "positive": {
+                                "type": "string",
+                                "description": "The positive image generation prompt",
+                            },
+                            "negative": {
+                                "type": "string",
+                                "description": "The negative image generation prompt",
+                            },
+                        },
+                        "required": ["positive", "negative"],
+                        "additionalProperties": False,
+                    },
+                },
+            }
+
         # Output-format directive (light hint; JSON is also forced at API level via response_format)
         if output_format == "json":
             sys_prompt += (
@@ -1236,15 +1270,12 @@ class LLMPromptAPINode:
                 "Keep every item on its own numbered line."
             )
         elif sys_prompt:
-            if provider == "Grok (xAI)":
-                # "Return only the final prompt text" misleads Grok into outputting
-                # only the positive half. Use a concrete one-liner example instead
-                # so it sees exactly what the output should look like.
+            if grok_pair_schema:
+                # Tell Grok to fill JSON fields — "no JSON" would contradict the schema
                 sys_prompt += (
-                    "\n\nOUTPUT FORMAT (mandatory): output one single line with the positive "
-                    "and negative separated by exactly one | character and nothing else — "
-                    "no labels, no newlines, no markdown.\n"
-                    "Example: beautiful woman, blue eyes, soft lighting|lowres, bad anatomy, blurry"
+                    "\n\nOutput the positive prompt in the \"positive\" field "
+                    "and the negative prompt in the \"negative\" field. "
+                    "No extra text outside the JSON."
                 )
             else:
                 sys_prompt += (
@@ -1355,6 +1386,7 @@ class LLMPromptAPINode:
                     stop_sequences=stops,
                     timeout=float(timeout_seconds),
                     extra_body=None,
+                    response_format_override=grok_pair_schema,
                 )
         finally:
             if unload_after_run and provider == "LM Studio (local)":
@@ -1364,7 +1396,19 @@ class LLMPromptAPINode:
                 else:
                     print(f"[LLM_Prompt_API] Unload-after-run failed: {msg}")
 
-        if output_format == "text":
+        if grok_pair_schema:
+            # Grok returned a guaranteed JSON object — assemble positive|negative directly.
+            # No text cleaning needed; the schema enforces clean string fields.
+            try:
+                pair = json.loads(raw)
+                positive = str(pair.get("positive") or "").strip()
+                negative = str(pair.get("negative") or "").strip()
+                cleaned = f"{positive}|{negative}" if negative else positive
+            except Exception as e:
+                print(f"[LLM_Prompt_API] Grok JSON parse failed ({e}), falling back to text cleaning")
+                cleaned = clean_model_output(raw, OutputCleanConfig(mode="prompt")) or raw
+                cleaned = normalize_prompt_separator(cleaned)
+        elif output_format == "text":
             cleaned = clean_model_output(raw, OutputCleanConfig(mode="prompt")) or raw
             cleaned = normalize_prompt_separator(cleaned)
         else:
