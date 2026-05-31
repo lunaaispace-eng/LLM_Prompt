@@ -84,8 +84,17 @@ def clean_model_output(text: str, config: OutputCleanConfig | None = None) -> st
     cleaned = _IM_TOKEN_RE.sub("", cleaned).strip()
 
     if cfg.strip_think:
+        # 1. Remove complete <think>...</think> blocks (opening + closing present).
         cleaned = _THINK_BLOCK_RE.sub("", cleaned)
-        cleaned = _THINK_CLOSE_RE.sub("", cleaned)
+        # 2. Orphan closing </think>: the opening tag was pre-filled into the
+        #    PROMPT (LM Studio / the chat template injects "<think>" right before
+        #    generation when thinking is on), so the model's response looks like
+        #    "[reasoning]</think>[answer]" — no opening tag in the output. Keep
+        #    only the text AFTER the last </think>; everything before is reasoning.
+        if _THINK_CLOSE_RE.search(cleaned):
+            cleaned = _THINK_CLOSE_RE.split(cleaned)[-1]
+        # 3. Orphan opening <think> with no close (reasoning got truncated, e.g.
+        #    max_tokens ran out mid-think). Drop the tag and any leading reasoning.
         if _THINK_OPEN_RE.search(cleaned):
             cleaned = _THINK_OPEN_RE.sub("", cleaned)
             parts = re.split(r"\n\s*\n", cleaned, maxsplit=1)

@@ -810,7 +810,12 @@ def _send_chat_completion(
         payload["response_format"] = {"type": "json_object"}
 
     if extra_body:
-        payload["extra_body"] = extra_body
+        # The OpenAI SDK flattens extra_body into the top-level request body; it
+        # does NOT send a literal "extra_body" field. Since this node POSTs raw
+        # JSON (not via the SDK), we replicate that flattening here so params like
+        # chat_template_kwargs land at the top level where LM Studio reads them.
+        for k, v in extra_body.items():
+            payload[k] = v
 
     # Per-provider sanitization
     payload = _sanitize_payload_for_provider(provider, payload)
@@ -1132,6 +1137,10 @@ class LLMPromptAPINode:
                     "default": False,
                     "tooltip": "Gemini only. Caches the stable prefix (system + style + canvas) to cut cost when generating multiple variations of the same character/scene. Requires the prefix to be at least ~1024 tokens.",
                 }),
+                "disable_thinking": ("BOOLEAN", {
+                    "default": True,
+                    "tooltip": "LM Studio only. Sends chat_template_kwargs.enable_thinking=false so the model does NOT generate a <think> reasoning block before the prompt. Saves tokens and time — thinking is pointless for prompt generation. Works for Qwen 3/3.5/3.6 and Gemma. Ignored by cloud providers (Gemini uses gemini_thinking_budget). Output is also stripped of any stray thinking as a safety net.",
+                }),
                 "keep_model_loaded": ("BOOLEAN", {
                     "default": True,
                     "tooltip": "LM Studio only. When TRUE, model stays loaded in LM Studio's VRAM between runs (faster subsequent runs). When FALSE, requests LM Studio's JIT TTL behavior (model may auto-unload after idle period). Silently ignored for cloud providers.",
@@ -1186,6 +1195,7 @@ class LLMPromptAPINode:
         stop_sequences: str,
         gemini_thinking_budget: int,
         enable_caching: bool,
+        disable_thinking: bool,
         keep_model_loaded: bool,
         unload_after_run: bool,
         timeout_seconds: int,
@@ -1351,6 +1361,15 @@ class LLMPromptAPINode:
         if stop_sequences and stop_sequences.strip():
             stops = [s.strip() for s in stop_sequences.split(",") if s.strip()]
 
+        # Disable thinking at the SOURCE for LM Studio (Qwen 3/3.5/3.6, Gemma).
+        # This stops the model from generating a <think> block at all — saving
+        # tokens and time — rather than just stripping it after the fact.
+        # chat_template_kwargs is flattened into the top-level request body by
+        # _send_chat_completion (see extra_body handling there).
+        lm_extra_body: dict | None = None
+        if provider == "LM Studio (local)" and disable_thinking:
+            lm_extra_body = {"chat_template_kwargs": {"enable_thinking": False}}
+
         # Send the request — route Gemini through its native API for full
         # feature support (thinking_budget, safety, top_k, caching). Other
         # providers go through the OpenAI-compatible /v1/chat/completions path.
@@ -1391,7 +1410,7 @@ class LLMPromptAPINode:
                     output_format=output_format,
                     stop_sequences=stops,
                     timeout=float(timeout_seconds),
-                    extra_body=None,
+                    extra_body=lm_extra_body,
                     response_format_override=grok_pair_schema,
                 )
         finally:
