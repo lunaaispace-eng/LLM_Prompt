@@ -337,7 +337,7 @@ class GrokVideoReferenceAPINode:
             "reference_images": ("IMAGE",),
             "resolution": (["480p", "720p"],),
             "aspect_ratio": (_VIDEO_AR[1:],),  # no "auto"
-            "duration": ("INT", {"default": 6, "min": 2, "max": 10}),
+            "duration": ("INT", {"default": 6, "min": 2, "max": 15}),
             "seed": _SEED,
             "timeout_seconds": ("INT", {"default": 120, "min": 10, "max": 600}),
         }}
@@ -397,7 +397,7 @@ class GrokVideoExtendAPINode:
             "model": (["grok-imagine-video"],),
             "prompt": _PROMPT,
             "video": ("VIDEO",),
-            "duration": ("INT", {"default": 8, "min": 2, "max": 10}),
+            "duration": ("INT", {"default": 8, "min": 2, "max": 15}),
             "seed": _SEED,
             "timeout_seconds": ("INT", {"default": 120, "min": 10, "max": 600}),
         }}
