@@ -28,7 +28,7 @@ from PIL import Image
 import folder_paths
 
 # Bundled output cleaner â€” no external dependencies
-from .output_cleaner import OutputCleanConfig, clean_model_output
+from .output_cleaner import OutputCleanConfig, clean_model_output, normalize_prompt_separator
 
 # ---------------------------------------------------------------------------
 # Constants
@@ -735,6 +735,10 @@ class LLMPromptNode:
                     "default": "auto",
                     "tooltip": "Device for inference. auto = GPU if available.",
                 }),
+                "disable_thinking": ("BOOLEAN", {
+                    "default": True,
+                    "tooltip": "Stop thinking-capable models (Qwen 3/3.5/3.6, Gemma 4) from generating a reasoning block before the prompt. Sends enable_thinking=false to the chat template AND appends /no_think for Qwen — disabling thinking at the SOURCE saves tokens and time (thinking is pointless for prompt generation). Output is also stripped of any stray thinking as a safety net. Turn OFF only if you specifically want the model to reason.",
+                }),
                 "keep_model_loaded": ("BOOLEAN", {
                     "default": True,
                     "tooltip": "Keep model in VRAM between runs.",
@@ -1014,6 +1018,7 @@ class LLMPromptNode:
         seed: int,
         top_k: int = 30,
         min_p: float = 0.05,
+        disable_thinking: bool = True,
     ) -> str:
         """Run inference â€” same call signature as QwenVL-Mod GGUF."""
         if images_b64 and self.chat_handler is not None:
@@ -1045,13 +1050,21 @@ class LLMPromptNode:
             "repeat_penalty": float(repetition_penalty),
             "seed": int(seed),
         }
-        # Qwen 3.x thinking-mode kill switch via chat template. The /no_think
-        # control token in the user prompt only works on some Qwen GGUF builds —
-        # passing enable_thinking=False at the chat-template level is more
-        # reliable because it bypasses the model's training entirely and renders
-        # the chat template WITHOUT the thinking infrastructure.
+        # Thinking-mode kill switch via chat template. The /no_think control
+        # token in the user prompt only works on some Qwen GGUF builds — passing
+        # enable_thinking=False at the chat-template level is more reliable
+        # because it bypasses the model's training entirely and renders the chat
+        # template WITHOUT the thinking infrastructure.
         # (Approach borrowed from lihaoyun6/ComfyUI-llama-cpp_vlm.)
-        if "qwen" in (self.loaded_model_name_lower or ""):
+        #
+        # Applies to Qwen 3/3.5/3.6 AND Gemma 4 — both expose an `enable_thinking`
+        # Jinja variable (confirmed via LM Studio model.yaml customFields). When
+        # the active path uses a hardcoded chat_format handler instead of the
+        # embedded Jinja template (e.g. Gemma with chat_format="gemma3"), the
+        # kwarg is simply ignored — harmless. Stray thinking is still stripped
+        # from the output by _strip_think_blocks() as the safety net.
+        name_lower = self.loaded_model_name_lower or ""
+        if disable_thinking and ("qwen" in name_lower or "gemma" in name_lower):
             completion_kwargs["chat_template_kwargs"] = {"enable_thinking": False}
 
         completion_kwargs = _filter_kwargs_for_callable(
@@ -1225,6 +1238,7 @@ class LLMPromptNode:
         min_p: float,
         repetition_penalty: float,
         device: str,
+        disable_thinking: bool,
         keep_model_loaded: bool,
         seed: int,
         n_ctx: int = 32768,
@@ -1277,7 +1291,7 @@ class LLMPromptNode:
             or "qwen3-5" in m_name_lower
             or "qwen35" in m_name_lower
         )
-        if is_qwen35:
+        if is_qwen35 and disable_thinking:
             sys_prompt = "/no_think\n" + sys_prompt + "\n/no_think"
 
         # Build user prompt with labeled sections
@@ -1296,7 +1310,8 @@ class LLMPromptNode:
         # Qwen 3.x native control token: tells thinking models to skip the
         # thinking phase entirely and output the answer directly. Massive speed
         # win (~3x). Ignored silently by non-Qwen models, so safe to always append.
-        if "qwen" in (model_name or "").lower() and "/no_think" not in final_user_prompt:
+        # Gated on disable_thinking so users who want reasoning can get it.
+        if disable_thinking and "qwen" in (model_name or "").lower() and "/no_think" not in final_user_prompt:
             final_user_prompt = f"{final_user_prompt}\n\n/no_think"
 
 
@@ -1340,7 +1355,15 @@ class LLMPromptNode:
                 min_p=min_p,
                 repetition_penalty=repetition_penalty,
                 seed=seed,
+                disable_thinking=disable_thinking,
             )
+
+            # Normalize labeled positive/negative output to pipe format for the
+            # Prompt Splitter (no-op when | already present or no negative label).
+            # Local models usually follow the pipe instruction, but this is a
+            # cheap safety net matching the API node's behavior.
+            if output_format == "text":
+                result = normalize_prompt_separator(result)
 
             # NOTE: Qwen 3.5 cache-clear was tried here but caused mixed output
             # when the _ctx.memory_clear() call silently failed on some
