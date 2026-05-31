@@ -888,7 +888,7 @@ class LLMPromptNode:
     # Model loading (same as QwenVL-Mod GGUF)
     # ------------------------------------------------------------------
 
-    def _load_model(self, model_name: str, device: str, n_ctx: int = 32768, n_gpu_layers: int = -1, disable_thinking: bool = True):
+    def _load_model(self, model_name: str, device: str, n_ctx: int = 32768, n_gpu_layers: int = -1, disable_thinking: bool = True, want_vision: bool = True):
         # Resolve paths directly from the scanned folder list â€” no JSON catalog needed
         model_path, mmproj_path = _resolve_model_paths(model_name)
 
@@ -896,6 +896,15 @@ class LLMPromptNode:
             raise FileNotFoundError(f"[LLM_Prompt] Model file missing: {model_path}")
         if mmproj_path and not mmproj_path.exists():
             print(f"[LLM_Prompt] Warning: mmproj not found at {mmproj_path}, running text-only.")
+            mmproj_path = None
+
+        # Skip the vision handler when no image/video is actually connected this
+        # run. Loading the vision handler (e.g. Qwen35ChatHandler) when we only
+        # need text wastes VRAM AND blocks the text-only no-think template path
+        # â€” which is the reliable way to disable Qwen thinking. For text prompt
+        # generation (the common case) this routes through the no-think template.
+        if not want_vision and mmproj_path is not None:
+            print("[LLM_Prompt] No image/video input â€” loading text-only (skipping vision handler).")
             mmproj_path = None
 
         device_kind = _pick_device(device)
@@ -917,6 +926,7 @@ class LLMPromptNode:
             "n_gpu_layers": effective_gpu_layers,
             "n_ctx": n_ctx,
             "device_kind": device_kind,
+            "want_vision": bool(want_vision and mmproj_path is not None),
             # Changing the no-think template requires a reload, so it's part of
             # the load signature.
             "qwen_no_think": use_qwen_no_think,
@@ -1499,9 +1509,12 @@ class LLMPromptNode:
                 if img:
                     images_b64.append(img)
 
-        # Load model and generate
+        # Load model and generate. want_vision drives whether we load the vision
+        # handler at all â€” only when an image/video is actually connected. With
+        # no visual input, Qwen loads text-only so the no-think template engages.
+        want_vision = bool(images_b64)
         try:
-            self._load_model(model_name, device, n_ctx=n_ctx, n_gpu_layers=n_gpu_layers, disable_thinking=disable_thinking)
+            self._load_model(model_name, device, n_ctx=n_ctx, n_gpu_layers=n_gpu_layers, disable_thinking=disable_thinking, want_vision=want_vision)
 
             if images_b64 and self.chat_handler is None:
                 print("[LLM_Prompt] Warning: images provided but no vision projector. Images will be ignored.")
