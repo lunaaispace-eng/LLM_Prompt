@@ -1196,21 +1196,9 @@ class LLMPromptNode:
         if disable_thinking and ("qwen" in name_lower or "gemma" in name_lower):
             completion_kwargs["chat_template_kwargs"] = {"enable_thinking": False}
 
-        wanted_ctk = "chat_template_kwargs" in completion_kwargs
         completion_kwargs = _filter_kwargs_for_callable(
             self.llm.create_chat_completion, completion_kwargs
         )
-        # If the installed llama-cpp-python's create_chat_completion doesn't
-        # expose chat_template_kwargs, the filter silently drops it and thinking
-        # can't be disabled at the template level. Surface this — it explains
-        # "model thinks despite disable_thinking" and why we rely on /no_think +
-        # output salvage instead.
-        if wanted_ctk and "chat_template_kwargs" not in completion_kwargs:
-            print(
-                "[LLM_Prompt] âš  chat_template_kwargs not supported by this "
-                "llama-cpp-python build â€” enable_thinking=false could not be sent. "
-                "Relying on /no_think + reasoning salvage. Consider updating llama-cpp-python."
-            )
         # Gemma-family models lose their natural EOS (</s>) at load time because
         # llama.cpp's EOG-list logic conflicts with <|tool_response>. Without an
         # explicit stop list they generate until max_tokens. Add Gemma stops back.
