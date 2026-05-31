@@ -463,6 +463,52 @@ def _resolve_model_paths(model_name: str) -> tuple[Path, Path | None]:
     return model_path, mmproj_path
 
 
+def _resolve_model_settings(name_lower: str) -> dict | None:
+    """Return the correct sampling settings for a known model family, or None.
+
+    Source of truth: the official LM Studio model.yaml recommendations
+    (hub/models/.../model.yaml -> config.operation.fields). Values target
+    NON-thinking prompt generation (thinking is disabled separately, since it
+    is never useful for prompt writing and wastes tokens).
+
+    This is applied SERVER-SIDE in generate() so the right values reach the
+    model regardless of the frontend JS preset's timing (which only fires on
+    manual dropdown clicks, not on workflow load / node creation / refresh).
+
+    Detection is by the model's display name (filename), which is reliable and
+    available before load — unlike self.loaded_model_name_lower which lags one
+    run behind on a model switch.
+    """
+    n = name_lower or ""
+
+    # Gemma 3 / 4 (all sizes incl. e2b/e4b/26b-a4b/31b):
+    #   YAML: temperature 1.0, top_k 64, top_p 0.95. No min_p / presence / rep.
+    if "gemma" in n:
+        return {
+            "temperature": 1.0, "top_p": 0.95, "top_k": 64,
+            "min_p": 0.0, "presence_penalty": 0.0, "repetition_penalty": 1.0,
+        }
+
+    # Qwen 3.6 MoE "a3b" variant: YAML uses a lower temperature (0.6).
+    if "qwen" in n and "a3b" in n:
+        return {
+            "temperature": 0.6, "top_p": 0.95, "top_k": 20,
+            "min_p": 0.0, "presence_penalty": 0.0, "repetition_penalty": 1.0,
+        }
+
+    # Qwen 3.0 / 3.5 / 3.6 (dense) and Qwen3-VL:
+    #   Unsloth non-thinking recommendation — temp 0.7, top_p 0.8, top_k 20,
+    #   min_p 0, presence_penalty 1.5 (critical to stop repetition/looping in
+    #   no-think mode). Matches the Qwen 3.0 VL config that works well in practice.
+    if "qwen" in n:
+        return {
+            "temperature": 0.7, "top_p": 0.8, "top_k": 20,
+            "min_p": 0.0, "presence_penalty": 1.5, "repetition_penalty": 1.0,
+        }
+
+    return None
+
+
 def _looks_like_reasoning(text: str) -> bool:
     """Detect if model output is reasoning/planning instead of a final prompt.
 
@@ -735,9 +781,13 @@ class LLMPromptNode:
                     "default": "auto",
                     "tooltip": "Device for inference. auto = GPU if available.",
                 }),
+                "auto_settings": ("BOOLEAN", {
+                    "default": True,
+                    "tooltip": "When ON, the node applies the OFFICIAL recommended sampling settings for the detected model family (Qwen 3/3.5/3.6, Gemma 4) and forces thinking OFF — overriding the sliders below. This is reliable regardless of UI timing (unlike the frontend auto-fill). Turn OFF to control every setting manually with the sliders.",
+                }),
                 "disable_thinking": ("BOOLEAN", {
                     "default": True,
-                    "tooltip": "Stop thinking-capable models (Qwen 3/3.5/3.6, Gemma 4) from generating a reasoning block before the prompt. Sends enable_thinking=false to the chat template AND appends /no_think for Qwen — disabling thinking at the SOURCE saves tokens and time (thinking is pointless for prompt generation). Output is also stripped of any stray thinking as a safety net. Turn OFF only if you specifically want the model to reason.",
+                    "tooltip": "Stop thinking-capable models (Qwen 3/3.5/3.6, Gemma 4) from generating a reasoning block before the prompt. Sends enable_thinking=false to the chat template AND appends /no_think for Qwen — disabling thinking at the SOURCE saves tokens and time (thinking is pointless for prompt generation). Output is also stripped of any stray thinking as a safety net. Forced ON when auto_settings is on. Turn OFF (with auto_settings off) only if you specifically want the model to reason.",
                 }),
                 "keep_model_loaded": ("BOOLEAN", {
                     "default": True,
@@ -1019,6 +1069,7 @@ class LLMPromptNode:
         top_k: int = 30,
         min_p: float = 0.05,
         disable_thinking: bool = True,
+        presence_penalty: float = 0.0,
     ) -> str:
         """Run inference â€” same call signature as QwenVL-Mod GGUF."""
         if images_b64 and self.chat_handler is not None:
@@ -1050,6 +1101,11 @@ class LLMPromptNode:
             "repeat_penalty": float(repetition_penalty),
             "seed": int(seed),
         }
+        # presence_penalty is the key Qwen non-thinking setting (Unsloth: 1.5)
+        # to stop repetition/looping. Only send when non-zero so we don't
+        # disturb models that don't want it.
+        if abs(float(presence_penalty)) > 1e-6:
+            completion_kwargs["presence_penalty"] = float(presence_penalty)
         # Thinking-mode kill switch via chat template. The /no_think control
         # token in the user prompt only works on some Qwen GGUF builds — passing
         # enable_thinking=False at the chat-template level is more reliable
@@ -1067,9 +1123,21 @@ class LLMPromptNode:
         if disable_thinking and ("qwen" in name_lower or "gemma" in name_lower):
             completion_kwargs["chat_template_kwargs"] = {"enable_thinking": False}
 
+        wanted_ctk = "chat_template_kwargs" in completion_kwargs
         completion_kwargs = _filter_kwargs_for_callable(
             self.llm.create_chat_completion, completion_kwargs
         )
+        # If the installed llama-cpp-python's create_chat_completion doesn't
+        # expose chat_template_kwargs, the filter silently drops it and thinking
+        # can't be disabled at the template level. Surface this — it explains
+        # "model thinks despite disable_thinking" and why we rely on /no_think +
+        # output salvage instead.
+        if wanted_ctk and "chat_template_kwargs" not in completion_kwargs:
+            print(
+                "[LLM_Prompt] âš  chat_template_kwargs not supported by this "
+                "llama-cpp-python build â€” enable_thinking=false could not be sent. "
+                "Relying on /no_think + reasoning salvage. Consider updating llama-cpp-python."
+            )
         # Gemma-family models lose their natural EOS (</s>) at load time because
         # llama.cpp's EOG-list logic conflicts with <|tool_response>. Without an
         # explicit stop list they generate until max_tokens. Add Gemma stops back.
@@ -1104,10 +1172,28 @@ class LLMPromptNode:
                 f"Increase max_tokens to get complete output."
             )
 
-        raw = (result.get("choices") or [{}])[0].get("message", {}).get("content", "")
+        raw = str((result.get("choices") or [{}])[0].get("message", {}).get("content", "") or "")
         # Strip think blocks here, before any caller sees the output.
         # This covers both JSON and text paths â€” no downstream path needs to handle it.
-        return _strip_think_blocks(str(raw or ""))
+        stripped = _strip_think_blocks(raw)
+
+        # SALVAGE: aggressive uncensored fine-tunes (e.g. *-HauhauCS-Aggressive)
+        # routinely ignore enable_thinking AND /no_think, generating a huge
+        # reasoning block and then stopping â€” leaving NOTHING after </think>.
+        # _strip_think_blocks then returns empty -> "NO PROMPT OUTPUT".
+        # When that happens, try to recover the actual prompt draft buried in the
+        # reasoning blob instead of silently returning empty.
+        if not stripped.strip() and raw.strip():
+            salvaged = self._extract_draft_from_reasoning(raw)
+            if salvaged and salvaged.strip():
+                print("[LLM_Prompt] Output was all reasoning â€” salvaged the prompt draft from it.")
+                return salvaged.strip()
+            print(
+                "[LLM_Prompt] âš  Model produced ONLY reasoning, no usable prompt "
+                f"({len(raw)} chars of think). This model ignores no-think controls "
+                "â€” try a non-'reasoning'/non-aggressive build, or a different model."
+            )
+        return stripped
 
     def _extract_draft_from_reasoning(self, text: str) -> str:
         """Try to pull the final draft paragraph out of a raw reasoning blob.
@@ -1238,6 +1324,7 @@ class LLMPromptNode:
         min_p: float,
         repetition_penalty: float,
         device: str,
+        auto_settings: bool,
         disable_thinking: bool,
         keep_model_loaded: bool,
         seed: int,
@@ -1249,6 +1336,35 @@ class LLMPromptNode:
         image=None,
         video=None,
     ):
+        # ---- Server-side model-specific settings ----------------------------
+        # The frontend JS preset only fires on a manual dropdown click, so on
+        # workflow load / node creation / refresh the sliders keep stale or wrong
+        # values (e.g. Gemma running at temp 0.6 / min_p 0.05 instead of 1.0 / 0).
+        # When auto_settings is ON we resolve the OFFICIAL settings for the model
+        # family here and override the widgets — guaranteed correct every run.
+        # We also force thinking OFF (never useful for prompt generation).
+        presence_penalty = 0.0
+        if auto_settings:
+            resolved = _resolve_model_settings((model_name or "").lower())
+            if resolved:
+                temperature = resolved["temperature"]
+                top_p = resolved["top_p"]
+                top_k = resolved["top_k"]
+                min_p = resolved["min_p"]
+                repetition_penalty = resolved["repetition_penalty"]
+                presence_penalty = resolved["presence_penalty"]
+                disable_thinking = True
+                print(
+                    f"[LLM_Prompt] auto_settings ON -> temp={temperature}, top_p={top_p}, "
+                    f"top_k={top_k}, min_p={min_p}, presence_penalty={presence_penalty}, "
+                    f"rep={repetition_penalty}, thinking=OFF"
+                )
+            else:
+                print(
+                    f"[LLM_Prompt] auto_settings ON but no known preset for "
+                    f"'{model_name}' â€” using the slider values as-is."
+                )
+
         # Resolve system prompt
         if custom_system_prompt and custom_system_prompt.strip():
             sys_prompt = custom_system_prompt.strip()
@@ -1356,6 +1472,7 @@ class LLMPromptNode:
                 repetition_penalty=repetition_penalty,
                 seed=seed,
                 disable_thinking=disable_thinking,
+                presence_penalty=presence_penalty,
             )
 
             # Normalize labeled positive/negative output to pipe format for the
