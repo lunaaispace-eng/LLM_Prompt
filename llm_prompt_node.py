@@ -506,21 +506,33 @@ def _resolve_model_settings(name_lower: str) -> dict | None:
             "min_p": 0.0, "presence_penalty": 0.0, "repetition_penalty": 1.0,
         }
 
+    # Qwen 3-VL / 2.5-VL (vision): these run through llama-cpp's vision handler,
+    # which does NOT reliably apply presence_penalty — so the aggressive Qwen
+    # text preset (min_p 0, presence 1.5) left nothing to stop repetition and
+    # abliterated VL builds spiralled into endless "no X, no Y" loops. Use a
+    # loop-resistant profile instead: a min_p floor plus a real repeat_penalty
+    # (the lever that actually works on the vision path), and no presence_penalty.
+    if "qwen" in n and "vl" in n:
+        return {
+            "temperature": 0.7, "top_p": 0.9, "top_k": 20,
+            "min_p": 0.05, "presence_penalty": 0.0, "repetition_penalty": 1.1,
+        }
+
     # Qwen 3.6 MoE "a3b" variant: YAML uses a lower temperature (0.6).
     if "qwen" in n and "a3b" in n:
         return {
             "temperature": 0.6, "top_p": 0.95, "top_k": 20,
-            "min_p": 0.0, "presence_penalty": 0.0, "repetition_penalty": 1.0,
+            "min_p": 0.0, "presence_penalty": 0.0, "repetition_penalty": 1.05,
         }
 
-    # Qwen 3.0 / 3.5 / 3.6 (dense) and Qwen3-VL:
+    # Qwen 3.0 / 3.5 / 3.6 (dense, text):
     #   Unsloth non-thinking recommendation — temp 0.7, top_p 0.8, top_k 20,
-    #   min_p 0, presence_penalty 1.5 (critical to stop repetition/looping in
-    #   no-think mode). Matches the Qwen 3.0 VL config that works well in practice.
+    #   min_p 0, presence_penalty 1.5. Add a mild repeat_penalty (1.05) as a
+    #   loop guard since presence_penalty is not always honored by the build.
     if "qwen" in n:
         return {
             "temperature": 0.7, "top_p": 0.8, "top_k": 20,
-            "min_p": 0.0, "presence_penalty": 1.5, "repetition_penalty": 1.0,
+            "min_p": 0.0, "presence_penalty": 1.5, "repetition_penalty": 1.05,
         }
 
     return None
