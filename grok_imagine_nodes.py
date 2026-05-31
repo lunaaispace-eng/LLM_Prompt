@@ -120,10 +120,24 @@ def _get(path: str, key: str, timeout: float = 60.0) -> dict:
     return _request("GET", path, key, None, timeout)
 
 
-def _download_bytes(url: str, timeout: float = 300.0) -> bytes:
-    req = urllib.request.Request(url, method="GET")
-    with urllib.request.urlopen(req, timeout=timeout) as resp:
-        return resp.read()
+def _download_bytes(url: str, key: str | None = None, timeout: float = 300.0) -> bytes:
+    """Download an asset URL. xAI's CDN 403s the default urllib User-Agent, so
+    send a browser-like UA; if still forbidden, retry with the Bearer key."""
+    def _attempt(with_auth: bool) -> bytes:
+        req = urllib.request.Request(url, method="GET")
+        req.add_header("User-Agent", "Mozilla/5.0 (ComfyUI LLM_Prompt Grok node)")
+        req.add_header("Accept", "*/*")
+        if with_auth and key:
+            req.add_header("Authorization", f"Bearer {key}")
+        with urllib.request.urlopen(req, timeout=timeout) as resp:
+            return resp.read()
+
+    try:
+        return _attempt(False)
+    except urllib.error.HTTPError as e:
+        if e.code in (401, 403) and key:
+            return _attempt(True)
+        raise
 
 
 # ---------------------------------------------------------------------------
@@ -168,7 +182,7 @@ def _images_from_response(payload: dict, key: str) -> torch.Tensor:
         if item.get("b64_json"):
             frames.append(_bytes_to_image_tensor(base64.b64decode(item["b64_json"])))
         elif item.get("url"):
-            frames.append(_bytes_to_image_tensor(_download_bytes(item["url"])))
+            frames.append(_bytes_to_image_tensor(_download_bytes(item["url"], key)))
     if not frames:
         raise RuntimeError("xAI response contained no usable image url/b64.")
     return torch.cat(frames, dim=0)
@@ -204,9 +218,9 @@ def _poll_video(request_id: str, key: str, poll_timeout: float, max_wait: float 
         time.sleep(5.0)
 
 
-def _video_output(url: str):
+def _video_output(url: str, key: str | None = None):
     from comfy_api.latest import InputImpl
-    return InputImpl.VideoFromFile(io.BytesIO(_download_bytes(url)))
+    return InputImpl.VideoFromFile(io.BytesIO(_download_bytes(url, key)))
 
 
 # ---------------------------------------------------------------------------
@@ -242,7 +256,7 @@ class GrokImageAPINode:
         resp = _post("/images/generations", key, {
             "model": model, "prompt": prompt, "aspect_ratio": aspect_ratio,
             "n": int(number_of_images), "seed": int(seed),
-            "response_format": "url", "resolution": resolution.lower(),
+            "response_format": "b64_json", "resolution": resolution.lower(),
         }, timeout=float(timeout_seconds))
         return (_images_from_response(resp, key),)
 
@@ -282,7 +296,7 @@ class GrokImageEditAPINode:
             "images": [{"url": _tensor_to_data_uri(f)} for f in frames],
             "prompt": prompt, "resolution": resolution.lower(),
             "n": int(number_of_images), "seed": int(seed),
-            "response_format": "url",
+            "response_format": "b64_json",
             "aspect_ratio": None if aspect_ratio == "auto" else aspect_ratio,
         }, timeout=float(timeout_seconds))
         return (_images_from_response(resp, key),)
@@ -321,7 +335,7 @@ class GrokVideoAPINode:
             body["image"] = {"url": _tensor_to_data_uri(frames[0])}
         init = _post("/videos/generations", key, body, timeout=float(timeout_seconds))
         url = _poll_video(init["request_id"], key, poll_timeout=float(timeout_seconds))
-        return (_video_output(url),)
+        return (_video_output(url, key),)
 
 
 class GrokVideoReferenceAPINode:
@@ -356,7 +370,7 @@ class GrokVideoReferenceAPINode:
             "aspect_ratio": aspect_ratio, "seed": int(seed),
         }, timeout=float(timeout_seconds))
         url = _poll_video(init["request_id"], key, poll_timeout=float(timeout_seconds))
-        return (_video_output(url),)
+        return (_video_output(url, key),)
 
 
 class GrokVideoEditAPINode:
@@ -383,7 +397,7 @@ class GrokVideoEditAPINode:
             "video": {"url": _video_to_data_uri(video)}, "seed": int(seed),
         }, timeout=float(timeout_seconds))
         url = _poll_video(init["request_id"], key, poll_timeout=float(timeout_seconds))
-        return (_video_output(url),)
+        return (_video_output(url, key),)
 
 
 class GrokVideoExtendAPINode:
@@ -411,7 +425,7 @@ class GrokVideoExtendAPINode:
             "video": {"url": _video_to_data_uri(video)}, "duration": int(duration),
         }, timeout=float(timeout_seconds))
         url = _poll_video(init["request_id"], key, poll_timeout=float(timeout_seconds))
-        return (_video_output(url),)
+        return (_video_output(url, key),)
 
 
 NODE_CLASS_MAPPINGS = {
