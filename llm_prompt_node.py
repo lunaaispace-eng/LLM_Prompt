@@ -36,6 +36,23 @@ from .output_cleaner import OutputCleanConfig, clean_model_output, normalize_pro
 
 NODE_DIR = Path(__file__).parent
 PROMPTS_DIR = NODE_DIR / "prompts"
+
+# No-think ChatML template for Qwen (text-only). This replicates the manual
+# LM Studio template edit that reliably disables thinking: it pre-fills an EMPTY
+# <think></think> block on the assistant turn, so the model continues straight
+# to the answer with no reasoning. We pass this to llama-cpp ourselves when
+# disable_thinking is on, so thinking-off works regardless of whether the GGUF's
+# embedded template exposes `enable_thinking` or whether chat_template_kwargs is
+# supported by the installed llama-cpp-python build. Qwen uses ChatML tokens
+# (<|im_start|> / <|im_end|>); content is plain text on this path (no vision).
+_QWEN_NO_THINK_CHATML = (
+    "{%- for message in messages %}"
+    "{{- '<|im_start|>' + message['role'] + '\\n' + message['content'] + '<|im_end|>\\n' }}"
+    "{%- endfor %}"
+    "{%- if add_generation_prompt %}"
+    "{{- '<|im_start|>assistant\\n<think>\\n\\n</think>\\n\\n' }}"
+    "{%- endif %}"
+)
 # Aspect ratio mapping: (w_ratio, h_ratio) -> label
 _ASPECT_LABELS = {
     (1, 1):   "1:1 square",
@@ -871,7 +888,7 @@ class LLMPromptNode:
     # Model loading (same as QwenVL-Mod GGUF)
     # ------------------------------------------------------------------
 
-    def _load_model(self, model_name: str, device: str, n_ctx: int = 32768, n_gpu_layers: int = -1):
+    def _load_model(self, model_name: str, device: str, n_ctx: int = 32768, n_gpu_layers: int = -1, disable_thinking: bool = True):
         # Resolve paths directly from the scanned folder list â€” no JSON catalog needed
         model_path, mmproj_path = _resolve_model_paths(model_name)
 
@@ -886,12 +903,23 @@ class LLMPromptNode:
         effective_gpu_layers = 0 if device_kind == "cpu" else n_gpu_layers
         has_mmproj = mmproj_path is not None
 
+        # Force-no-think only applies to TEXT-ONLY Qwen (vision uses its own
+        # handler; Gemma uses a different format). When active we install a
+        # custom ChatML template that hard-disables thinking.
+        m_name_lower_sig = model_path.name.lower()
+        use_qwen_no_think = (
+            disable_thinking and not has_mmproj and "qwen" in m_name_lower_sig
+        )
+
         signature = {
             "model_path": str(model_path),
             "mmproj_path": str(mmproj_path) if has_mmproj else "",
             "n_gpu_layers": effective_gpu_layers,
             "n_ctx": n_ctx,
             "device_kind": device_kind,
+            # Changing the no-think template requires a reload, so it's part of
+            # the load signature.
+            "qwen_no_think": use_qwen_no_think,
         }
         if self.llm is not None and self.current_signature == signature:
             return
@@ -1031,9 +1059,30 @@ class LLMPromptNode:
             elif "llama-3" in m_name_lower:
                 llm_kwargs["chat_format"] = "llama-3"
             elif "qwen" in m_name_lower:
-                # Let GGUF embedded template handle all Qwen variants (2.5, 3, 3.5, 3.6).
-                # Do not override with chatml â€” it breaks enable_thinking support.
-                pass
+                # Qwen text-only. When disable_thinking is on, install our custom
+                # no-think ChatML template (pre-fills an empty <think></think>),
+                # which forces thinking off regardless of what the embedded
+                # template does or whether chat_template_kwargs is supported.
+                # This replicates the manual LM Studio template edit that works
+                # reliably. Fail-safe: any error falls back to the embedded
+                # template (current behavior).
+                if use_qwen_no_think:
+                    try:
+                        from llama_cpp.llama_chat_format import Jinja2ChatFormatter
+                        formatter = Jinja2ChatFormatter(
+                            template=_QWEN_NO_THINK_CHATML,
+                            eos_token="<|im_end|>",
+                            bos_token="",
+                        )
+                        self.chat_handler = formatter.to_chat_handler()
+                        llm_kwargs["chat_handler"] = self.chat_handler
+                        print("[LLM_Prompt] Qwen: using custom NO-THINK ChatML template (thinking hard-disabled).")
+                    except Exception as e:
+                        print(
+                            f"[LLM_Prompt] Could not install no-think template ({e}); "
+                            "falling back to embedded template + enable_thinking flag."
+                        )
+                # else: embedded template (thinking allowed, or controlled via kwargs)
 
         print(
             f"[LLM_Prompt] Loading: {model_path.name} "
@@ -1452,7 +1501,7 @@ class LLMPromptNode:
 
         # Load model and generate
         try:
-            self._load_model(model_name, device, n_ctx=n_ctx, n_gpu_layers=n_gpu_layers)
+            self._load_model(model_name, device, n_ctx=n_ctx, n_gpu_layers=n_gpu_layers, disable_thinking=disable_thinking)
 
             if images_b64 and self.chat_handler is None:
                 print("[LLM_Prompt] Warning: images provided but no vision projector. Images will be ignored.")
