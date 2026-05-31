@@ -898,13 +898,23 @@ class LLMPromptNode:
             print(f"[LLM_Prompt] Warning: mmproj not found at {mmproj_path}, running text-only.")
             mmproj_path = None
 
-        # Skip the vision handler when no image/video is actually connected this
-        # run. Loading the vision handler (e.g. Qwen35ChatHandler) when we only
-        # need text wastes VRAM AND blocks the text-only no-think template path
-        # â€” which is the reliable way to disable Qwen thinking. For text prompt
-        # generation (the common case) this routes through the no-think template.
-        if not want_vision and mmproj_path is not None:
-            print("[LLM_Prompt] No image/video input â€” loading text-only (skipping vision handler).")
+        # Identify Qwen 3.5/3.6 (the models that use the <think> format our
+        # no-think template was built and verified against). Explicitly EXCLUDE
+        # VL — Qwen3-VL / Qwen2.5-VL have a different structure and disable
+        # thinking via force_reasoning=False on their vision handler; they worked
+        # perfectly as-is, so we must not touch them.
+        m_name_lower_sig = model_path.name.lower()
+        is_qwen_35_36 = bool(
+            re.search(r"qwen3\.?5|qwen3-5|qwen35|qwen3\.?6|qwen3-6|qwen36", m_name_lower_sig)
+        ) and "vl" not in m_name_lower_sig
+
+        # Force text-only ONLY for Qwen 3.5/3.6 when no image is connected — so
+        # the no-think template can engage (their vision handler, Qwen35ChatHandler,
+        # does NOT suppress thinking, unlike the VL handlers). VL models keep their
+        # vision handler even without an image: that handler applies
+        # force_reasoning=False, which is how they (correctly) avoid thinking.
+        if not want_vision and is_qwen_35_36 and mmproj_path is not None:
+            print("[LLM_Prompt] Qwen 3.5/3.6 text prompt â€” loading text-only so the no-think template engages.")
             mmproj_path = None
 
         device_kind = _pick_device(device)
@@ -912,13 +922,7 @@ class LLMPromptNode:
         effective_gpu_layers = 0 if device_kind == "cpu" else n_gpu_layers
         has_mmproj = mmproj_path is not None
 
-        # Force-no-think only applies to TEXT-ONLY Qwen (vision uses its own
-        # handler; Gemma uses a different format). When active we install a
-        # custom ChatML template that hard-disables thinking.
-        m_name_lower_sig = model_path.name.lower()
-        use_qwen_no_think = (
-            disable_thinking and not has_mmproj and "qwen" in m_name_lower_sig
-        )
+        use_qwen_no_think = disable_thinking and not has_mmproj and is_qwen_35_36
 
         signature = {
             "model_path": str(model_path),
