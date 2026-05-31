@@ -273,11 +273,16 @@ function updateProviderSpecificVisibility(node) {
     const unloadBtn = node.widgets?.find((w) => w._isUnloadButton);
     setWidgetVisible(unloadBtn, isLM);
 
-    // Show/hide LM-Studio-only widgets
+    // LM-Studio-relevant toggles: ALWAYS visible. Previously these were hidden
+    // for non-LM providers, but the collapse/restore dance in setWidgetVisible
+    // could leave them stuck hidden even on LM Studio (the bug: "Unload Now"
+    // button showed but unload_after_run / keep_model_loaded toggles vanished).
+    // They're harmless on cloud providers — the backend ignores them — so just
+    // keep them shown rather than relying on fragile show/hide state.
     const keepLoaded = node.widgets?.find((w) => w.name === "keep_model_loaded");
-    setWidgetVisible(keepLoaded, isLM);
+    setWidgetVisible(keepLoaded, true);
     const unloadAfterRun = node.widgets?.find((w) => w.name === "unload_after_run");
-    setWidgetVisible(unloadAfterRun, isLM);
+    setWidgetVisible(unloadAfterRun, true);
 
     // Show/hide Gemini-only widgets
     const thinkingBudget = node.widgets?.find((w) => w.name === "gemini_thinking_budget");
