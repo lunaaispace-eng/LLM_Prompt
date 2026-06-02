@@ -1139,7 +1139,7 @@ class LLMPromptAPINode:
                 }),
                 "disable_thinking": ("BOOLEAN", {
                     "default": True,
-                    "tooltip": "LM Studio only. Sends chat_template_kwargs.enable_thinking=false so the model does NOT generate a <think> reasoning block before the prompt. Saves tokens and time — thinking is pointless for prompt generation. Works for Qwen 3/3.5/3.6 and Gemma. Ignored by cloud providers (Gemini uses gemini_thinking_budget). Output is also stripped of any stray thinking as a safety net.",
+                    "tooltip": "Strips any <think> reasoning from the OUTPUT as a safety net. NOTE: for LM Studio, disable thinking in LM STUDIO itself (edit the model's jinja template to force no-think, or use its reasoning toggle) — the node deliberately does NOT send chat_template_kwargs, because that makes LM Studio ignore your template edit and re-enable thinking. Gemini uses gemini_thinking_budget instead.",
                 }),
                 "keep_model_loaded": ("BOOLEAN", {
                     "default": True,
@@ -1361,14 +1361,14 @@ class LLMPromptAPINode:
         if stop_sequences and stop_sequences.strip():
             stops = [s.strip() for s in stop_sequences.split(",") if s.strip()]
 
-        # Disable thinking at the SOURCE for LM Studio (Qwen 3/3.5/3.6, Gemma).
-        # This stops the model from generating a <think> block at all — saving
-        # tokens and time — rather than just stripping it after the fact.
-        # chat_template_kwargs is flattened into the top-level request body by
-        # _send_chat_completion (see extra_body handling there).
+        # NOTE: we intentionally do NOT send chat_template_kwargs to LM Studio.
+        # When LM Studio receives that param it re-renders from the model's
+        # ORIGINAL embedded template — discarding any no-think edit you made to
+        # the template in LM Studio — which silently re-enables thinking. The
+        # reliable way to disable thinking for LM Studio is the template edit (or
+        # reasoning toggle) inside LM Studio itself; the node must not overwrite
+        # it. Stray thinking that slips through is still stripped from the output.
         lm_extra_body: dict | None = None
-        if provider == "LM Studio (local)" and disable_thinking:
-            lm_extra_body = {"chat_template_kwargs": {"enable_thinking": False}}
 
         # Send the request — route Gemini through its native API for full
         # feature support (thinking_budget, safety, top_k, caching). Other
