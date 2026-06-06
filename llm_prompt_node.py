@@ -297,9 +297,12 @@ def _scan_llm_folder() -> dict[str, dict]:
     """Scan all registered LLM folders recursively and return a dict of display_name -> model info.
 
     For each .gguf found that is NOT an mmproj file:
-      - display_name = filename (e.g. "Qwen3-VL-8B-Q8_0.gguf")
+      - display_name = "<top-level-folder>/<filename>" so ComfyUI groups models
+        into one collapsible folder per source (bare filename if in the LLM root)
       - full_path    = absolute path to the model file
       - mmproj_path  = absolute path to companion mmproj if found in same folder, else None
+
+    Files inside hidden / .cache directories are skipped.
 
     mmproj detection rules (in order):
       1. Any .gguf in the same folder whose name contains "mmproj" (case-insensitive)
@@ -315,16 +318,28 @@ def _scan_llm_folder() -> dict[str, dict]:
     models: dict[str, dict] = {}
     seen_names: set[str] = set()
 
-    # Walk all registered folders
-    all_ggufs = []
+    # Walk all registered folders, keeping each file's root so we can derive its
+    # top-level subfolder for clean display grouping.
+    all_ggufs: list[tuple[Path, Path]] = []
     for llm_folder in existing:
-        all_ggufs.extend(sorted(llm_folder.rglob("*.gguf")))
+        for gguf_file in sorted(llm_folder.rglob("*.gguf")):
+            all_ggufs.append((llm_folder, gguf_file))
 
-    for gguf_file in all_ggufs:
+    for llm_root, gguf_file in all_ggufs:
         name_lower = gguf_file.name.lower()
 
         # Skip mmproj files â€” they are companions, not models
         if "mmproj" in name_lower:
+            continue
+
+        # Path relative to the LLM root. Skip anything inside hidden / .cache
+        # directories (HuggingFace download caches, etc.) so they don't pollute
+        # the dropdown.
+        try:
+            rel = gguf_file.relative_to(llm_root)
+        except ValueError:
+            rel = Path(gguf_file.name)
+        if any(part.startswith(".") for part in rel.parts):
             continue
 
         # Find mmproj companions in the same folder
@@ -366,10 +381,22 @@ def _scan_llm_folder() -> dict[str, dict]:
                 )
                 mmproj_path = best
 
-        # Build display name â€” use filename, suffix with parent folder if duplicate
-        display = gguf_file.name
+        # Build display name: group by the TOP-LEVEL subfolder under the LLM root
+        # so ComfyUI renders one clean, collapsible folder per source. Deep HF
+        # nesting (e.g. mradermacher/Repo-GGUF/model.gguf) collapses to the top
+        # folder (mradermacher/model.gguf). Files directly in the LLM root show
+        # as a bare filename.
+        if len(rel.parts) > 1:
+            top = rel.parts[0]
+            display = f"{top}/{gguf_file.name}"
+        else:
+            top = ""
+            display = gguf_file.name
+        # Rare collision (same filename within the same top folder): also fold in
+        # the immediate parent dir to keep the key unique.
         if display in seen_names:
-            display = f"{gguf_file.parent.name}/{gguf_file.name}"
+            disamb = f"{gguf_file.parent.name}/{gguf_file.name}"
+            display = f"{top}/{disamb}" if top else disamb
         seen_names.add(display)
 
         models[display] = {
@@ -470,6 +497,15 @@ def _pick_device(device_choice: str) -> str:
 def _resolve_model_paths(model_name: str) -> tuple[Path, Path | None]:
     """Return (model_path, mmproj_path | None) for a display name from the scanned list."""
     entry = _SCANNED_MODELS.get(model_name)
+    # Backward-compat: older workflows saved the bare filename (before the
+    # top-folder grouping). If the exact display key isn't found, fall back to
+    # matching by basename so those workflows still resolve.
+    if not entry:
+        base = model_name.split("/")[-1]
+        for disp, info in _SCANNED_MODELS.items():
+            if disp.split("/")[-1] == base or Path(info["full_path"]).name == base:
+                entry = info
+                break
     if not entry:
         raise FileNotFoundError(
             f"[LLM_Prompt] Model not found in scan: {model_name}. "
