@@ -998,6 +998,15 @@ class _LLMRunner:
         self.chat_handler = None
         self.current_signature = None
         self.loaded_model_name_lower = ""
+        # Set per-run from the verbose_logging widget. Gates the chatty status
+        # prints (handler choice, load lines, token/speed); warnings and errors
+        # are always printed regardless.
+        self._verbose = False
+
+    def _vprint(self, msg: str) -> None:
+        """Print only when verbose_logging is on. Use for routine status lines."""
+        if self._verbose:
+            print(msg)
 
     # ------------------------------------------------------------------
     # VRAM cleanup (same as QwenVL-Mod)
@@ -1068,7 +1077,7 @@ class _LLMRunner:
         # loading â€” crucially, VL models keep their vision handler even with no
         # image connected (that's how Qwen-VL works fast and without thinking).
         if not want_vision and is_qwen_35_36 and mmproj_path is not None:
-            print("[LLM_Prompt] Qwen 3.5/3.6 text prompt â€” loading text-only so the no-think template engages.")
+            self._vprint("[LLM_Prompt] Qwen 3.5/3.6 text prompt â€” loading text-only so the no-think template engages.")
             mmproj_path = None
 
         device_kind = _pick_device(device)
@@ -1121,7 +1130,7 @@ class _LLMRunner:
                 )
                 if handler is not None:
                     self.chat_handler = handler
-                    print(
+                    self._vprint(
                         f"[LLM_Prompt] Vision handler: {cand} (family={adapter.family}, "
                         f"thinking={'on' if not disable_thinking else 'off'}, "
                         f"img_tokens={image_min_tokens}-{image_max_tokens})"
@@ -1209,7 +1218,7 @@ class _LLMRunner:
                         )
                         self.chat_handler = formatter.to_chat_handler()
                         llm_kwargs["chat_handler"] = self.chat_handler
-                        print("[LLM_Prompt] Qwen: using custom NO-THINK ChatML template (thinking hard-disabled).")
+                        self._vprint("[LLM_Prompt] Qwen: using custom NO-THINK ChatML template (thinking hard-disabled).")
                     except Exception as e:
                         print(
                             f"[LLM_Prompt] Could not install no-think template ({e}); "
@@ -1217,7 +1226,7 @@ class _LLMRunner:
                         )
                 # else: embedded template (thinking allowed, or controlled via kwargs)
 
-        print(
+        self._vprint(
             f"[LLM_Prompt] Loading: {model_path.name} "
             f"(device={device_kind}, gpu_layers={effective_gpu_layers}, ctx={n_ctx})"
         )
@@ -1232,7 +1241,7 @@ class _LLMRunner:
         self.llm = Llama(**llm_kwargs_filtered)
         self.current_signature = signature
         self.loaded_model_name_lower = model_path.name.lower()
-        print(f"[LLM_Prompt] Model loaded: {model_path.name}")
+        self._vprint(f"[LLM_Prompt] Model loaded: {model_path.name}")
 
     # ------------------------------------------------------------------
     # Inference (same create_chat_completion as QwenVL-Mod)
@@ -1253,9 +1262,6 @@ class _LLMRunner:
         disable_thinking: bool = True,
         presence_penalty: float = 0.0,
         frequency_penalty: float = 0.0,
-        mirostat_mode: int = 0,
-        mirostat_tau: float = 5.0,
-        mirostat_eta: float = 0.1,
     ) -> str:
         """Run inference.
 
@@ -1294,12 +1300,6 @@ class _LLMRunner:
         # frequency_penalty: only send when set, same reasoning as presence_penalty.
         if abs(float(frequency_penalty)) > 1e-6:
             completion_kwargs["frequency_penalty"] = float(frequency_penalty)
-        # Mirostat: only engage when a mode is selected (0 = off). When on it
-        # overrides top_k/top_p sampling with adaptive perplexity targeting.
-        if int(mirostat_mode) != 0:
-            completion_kwargs["mirostat_mode"] = int(mirostat_mode)
-            completion_kwargs["mirostat_tau"] = float(mirostat_tau)
-            completion_kwargs["mirostat_eta"] = float(mirostat_eta)
         # Thinking-mode kill switch via chat template. The /no_think control
         # token in the user prompt only works on some Qwen GGUF builds — passing
         # enable_thinking=False at the chat-template level is more reliable
@@ -1342,7 +1342,7 @@ class _LLMRunner:
         finish_reason = (result.get("choices") or [{}])[0].get("finish_reason", "unknown")
         if isinstance(completion_tokens, int) and completion_tokens > 0:
             tok_s = completion_tokens / elapsed
-            print(
+            self._vprint(
                 f"[LLM_Prompt] Tokens: prompt={prompt_tokens}, "
                 f"completion={completion_tokens}, "
                 f"time={elapsed:.2f}s, speed={tok_s:.2f} tok/s, "
@@ -1515,13 +1515,11 @@ class _LLMRunner:
         n_gpu_layers: int = -1,
         presence_penalty: float = 0.0,
         frequency_penalty: float = 0.0,
-        mirostat_mode: int = 0,
-        mirostat_tau: float = 5.0,
-        mirostat_eta: float = 0.1,
         preserve_thinking: bool = False,
         image_min_tokens: int = 1024,
         image_max_tokens: int = 4096,
         video_fps: float = 1.0,
+        verbose_logging: bool = False,
         style: str = "",
         width: int = 0,
         height: int = 0,
@@ -1530,6 +1528,8 @@ class _LLMRunner:
         video=None,
         audio=None,
     ):
+        # Gate the chatty status prints for this run (warnings/errors still show).
+        self._verbose = bool(verbose_logging)
         # ---- Server-side model-specific settings ----------------------------
         # The frontend JS preset only fires on a manual dropdown click, so on
         # workflow load / node creation / refresh the sliders keep stale or wrong
@@ -1548,13 +1548,13 @@ class _LLMRunner:
                 repetition_penalty = resolved["repetition_penalty"]
                 presence_penalty = resolved["presence_penalty"]
                 disable_thinking = True
-                print(
+                self._vprint(
                     f"[LLM_Prompt] auto_settings ON -> temp={temperature}, top_p={top_p}, "
                     f"top_k={top_k}, min_p={min_p}, presence_penalty={presence_penalty}, "
                     f"rep={repetition_penalty}, thinking=OFF"
                 )
             else:
-                print(
+                self._vprint(
                     f"[LLM_Prompt] auto_settings ON but no known preset for "
                     f"'{model_name}' â€” using the slider values as-is."
                 )
@@ -1690,9 +1690,6 @@ class _LLMRunner:
                 disable_thinking=disable_thinking,
                 presence_penalty=presence_penalty,
                 frequency_penalty=frequency_penalty,
-                mirostat_mode=mirostat_mode,
-                mirostat_tau=mirostat_tau,
-                mirostat_eta=mirostat_eta,
             )
 
             # Normalize labeled positive/negative output to pipe format for the
@@ -1754,76 +1751,98 @@ class LLMPromptNode(io.ComfyNode):
                 "handler-level thinking control, and image/video/audio inputs."
             ),
             inputs=[
-                # ----- Core -----
+                # ===== BASIC (always visible) =====
                 io.Combo.Input("model_name", options=model_keys, default=model_keys[0],
-                               tooltip="GGUF model from the models/LLM folder. Rescans on each load."),
+                               tooltip="Which local model to use - pick a Qwen or Gemma file from models/LLM. "
+                                       "Vision needs a matching mmproj in the same folder."),
                 io.Combo.Input("system_prompt", options=prompt_presets, default=prompt_presets[0],
-                               tooltip="System prompt preset loaded from prompts/*.md files."),
+                               tooltip="Prompt-style preset from your prompts folder "
+                                       "(Reverse Engineered, Style Transfer, SDXL...)."),
                 io.String.Input("custom_system_prompt", multiline=True, default="",
-                                tooltip="Custom system prompt. Overrides the preset if not empty."),
+                                tooltip="Optional - your own instructions; overrides the preset above. "
+                                        "Leave empty to use the preset."),
                 io.String.Input("user_prompt", multiline=True, default="",
-                                tooltip="Your prompt text. Combined with the style input if connected."),
+                                tooltip="Your idea or subject. This is what the model turns into a finished prompt."),
                 io.Combo.Input("output_format", options=["text", "json", "list"], default="text",
-                               tooltip="text = single prompt with reasoning cleanup. json = structured JSON. "
-                                       "list = numbered multi-scene output (for LTX video tracks)."),
+                               tooltip="text = one finished prompt (normal). json = structured data. "
+                                       "list = numbered scenes for multi-shot video."),
                 io.Boolean.Input("split_output", default=True,
-                                 tooltip="Split the model's 'positive|negative' output into the two node outputs. "
-                                         "OFF = full text on positive, negative empty."),
-                io.Boolean.Input("disable_thinking", default=True,
-                                 tooltip="Stop thinking-capable models from emitting a reasoning block. Controlled at "
-                                         "the chat handler when a vision model is loaded, plus /no_think + output "
-                                         "stripping as fallbacks. Forced ON when auto_settings is on."),
+                                 tooltip="ON splits a 'positive | negative' result into the two outputs. "
+                                         "Leave ON for SDXL; harmless for Flux/Chroma (no negative)."),
                 io.Boolean.Input("auto_settings", default=True,
-                                 tooltip="Apply the OFFICIAL recommended sampling settings for the detected model "
-                                         "family and force thinking OFF, overriding the sliders. Turn OFF to control "
-                                         "every setting manually."),
+                                 tooltip="Recommended ON. Auto-applies the best sampling for your model family "
+                                         "(Qwen / Gemma) and skips reasoning. OFF = control sampling yourself "
+                                         "in Advanced."),
+                io.Boolean.Input("disable_thinking", default=True,
+                                 tooltip="Skip the model's reasoning block (recommended, faster). Only takes effect "
+                                         "when auto_settings is OFF - auto already forces it off."),
+                io.Float.Input("temperature", default=0.7, min=0.1, max=2.0, step=0.05,
+                               tooltip="Creativity/randomness. Ref: Qwen ~0.7, Gemma ~1.0. Lower = focused, "
+                                       "higher = varied. Range 0.1-2.0. Only used when auto_settings is OFF."),
                 io.Int.Input("max_tokens", default=2048, min=64, max=32000,
-                             tooltip="Maximum tokens to generate. Raise for large models like Gemma 4 26B."),
-                io.Float.Input("temperature", default=0.7, min=0.1, max=2.0, step=0.05),
-                io.Float.Input("top_p", default=0.9, min=0.0, max=1.0, step=0.05),
-                io.Int.Input("top_k", default=30, min=0, max=200,
-                             tooltip="Top-K sampling. 0 = disabled. 30 quality floor for Qwen, 64 for Gemma 4."),
-                io.Float.Input("min_p", default=0.05, min=0.0, max=1.0, step=0.01,
-                               tooltip="Min-P sampling quality floor. 0.05 is a safe default."),
-                io.Float.Input("repetition_penalty", default=1.0, min=0.5, max=2.0, step=0.05,
-                               tooltip="1.0 = disabled (Gemma 4 recommendation). Raise only if you see repetition."),
-                io.Int.Input("seed", default=1, min=1, max=2**32 - 1),
-                io.Boolean.Input("keep_model_loaded", default=True,
-                                 tooltip="Keep the model in VRAM between runs."),
-                io.Combo.Input("device", options=device_options, default="auto",
-                               tooltip="Device for inference. auto = GPU if available."),
-
-                # ----- Advanced (kept at the bottom; auto_settings stays authoritative) -----
-                io.Float.Input("presence_penalty", default=0.0, min=-2.0, max=2.0, step=0.1,
-                               tooltip="Advanced: discourages repeating any token. auto_settings overrides this."),
-                io.Float.Input("frequency_penalty", default=0.0, min=-2.0, max=2.0, step=0.1,
-                               tooltip="Advanced: penalizes frequent tokens. 0 = off."),
-                io.Int.Input("mirostat_mode", default=0, min=0, max=2,
-                             tooltip="Advanced: 0 = off. 1/2 enable Mirostat adaptive sampling (overrides top_k/top_p)."),
-                io.Float.Input("mirostat_tau", default=5.0, min=0.0, max=20.0, step=0.1,
-                               tooltip="Advanced: Mirostat target entropy (only when mirostat_mode != 0)."),
-                io.Float.Input("mirostat_eta", default=0.1, min=0.0, max=1.0, step=0.01,
-                               tooltip="Advanced: Mirostat learning rate (only when mirostat_mode != 0)."),
-                io.Boolean.Input("preserve_thinking", default=False,
-                                 tooltip="Advanced (Qwen 3.5/3.6 vision): keep <think> traces for ALL prior turns."),
-                io.Int.Input("image_min_tokens", default=1024, min=256, max=4096, step=64,
-                             tooltip="Advanced: min visual tokens per image (Qwen VL handlers). Higher = finer detail."),
-                io.Int.Input("image_max_tokens", default=4096, min=1024, max=16384, step=64,
-                             tooltip="Advanced: max visual tokens per image. Caps VRAM on large images."),
-                io.Float.Input("video_fps", default=1.0, min=0.1, max=5.0, step=0.1,
-                               tooltip="Advanced: temporal sampling rate for the video input (frames per second)."),
+                             tooltip="Max length of the result. Ref: ~512 short, 2048 a full prompt, "
+                                     "4096+ for multi-scene lists. Raise if output gets cut off."),
                 io.Int.Input("n_ctx", default=32768, min=2048, max=262144, step=256,
-                             tooltip="Advanced: context window size. Higher uses more VRAM."),
-                io.Int.Input("n_gpu_layers", default=-1, min=-1, max=200, step=1,
-                             tooltip="Advanced: -1 = offload all layers to GPU. Reduce if VRAM runs out."),
+                             tooltip="How much text the model reads at once (input + output). Ref: 8192 low-VRAM, "
+                                     "32768 default, 131072 Gemma-4, up to 262144 Qwen. Higher = more VRAM."),
+                io.Int.Input("seed", default=1, min=1, max=2**32 - 1,
+                             tooltip="Change for a different result; same seed = same output. "
+                                     "Set 'control after generate' to randomize for variety."),
+                io.Boolean.Input("keep_model_loaded", default=True,
+                                 tooltip="ON keeps the model in VRAM (instant next run). "
+                                         "OFF frees VRAM after each run."),
 
-                # ----- Optional connections -----
+                # ===== ADVANCED (collapsed by default via advanced=True) =====
+                # --- Manual sampling: only used when auto_settings is OFF ---
+                io.Float.Input("top_p", default=0.9, min=0.0, max=1.0, step=0.05, advanced=True,
+                               tooltip="Nucleus sampling. Ref: Qwen ~0.8, Gemma ~0.95. Lower = safer wording. "
+                                       "Range 0-1. Only when auto_settings is OFF."),
+                io.Int.Input("top_k", default=30, min=0, max=200, advanced=True,
+                             tooltip="Limit choices to the top K tokens. Ref: Qwen 20, Gemma 64, 0 = off. "
+                                     "Only when auto_settings is OFF."),
+                io.Float.Input("min_p", default=0.05, min=0.0, max=1.0, step=0.01, advanced=True,
+                               tooltip="Quality floor - drops low-probability tokens. Ref: 0.0-0.05. "
+                                       "Only when auto_settings is OFF."),
+                io.Float.Input("repetition_penalty", default=1.0, min=0.5, max=2.0, step=0.05, advanced=True,
+                               tooltip="Discourages repeating words. Ref: 1.0 = off (Gemma), 1.05-1.1 if it loops. "
+                                       "Only when auto_settings is OFF."),
+                io.Float.Input("presence_penalty", default=0.0, min=-2.0, max=2.0, step=0.1, advanced=True,
+                               tooltip="Discourages reusing any seen token. Ref: 0.0 default, 1.5 for Qwen anti-loop. "
+                                       "Only when auto_settings is OFF."),
+                io.Float.Input("frequency_penalty", default=0.0, min=-2.0, max=2.0, step=0.1, advanced=True,
+                               tooltip="Penalizes frequent tokens. Ref: 0.0 default, 0.1-0.5 to reduce repetition. "
+                                       "Only when auto_settings is OFF."),
+                io.Boolean.Input("preserve_thinking", default=False, advanced=True,
+                                 tooltip="Qwen 3.5/3.6 only: keep <think> traces for all prior turns. "
+                                         "Leave OFF for single-shot prompts."),
+                # --- Hardware / VRAM ---
+                io.Combo.Input("device", options=device_options, default="auto", advanced=True,
+                               tooltip="Where to run. 'auto' = GPU if available (recommended). Use cpu only if forced."),
+                io.Int.Input("n_gpu_layers", default=-1, min=-1, max=200, step=1, advanced=True,
+                             tooltip="Model layers on GPU. Ref: -1 = all (best). Lower (20-40) only if a big model "
+                                     "runs out of VRAM. CPU forces 0."),
+                # --- Vision / video ---
+                io.Int.Input("image_min_tokens", default=1024, min=256, max=4096, step=64, advanced=True,
+                             tooltip="Min visual tokens per image (Qwen VL). Ref: 256 light, 1024 default, "
+                                     "up to 4096 fine detail. Higher = more VRAM."),
+                io.Int.Input("image_max_tokens", default=4096, min=1024, max=16384, step=64, advanced=True,
+                             tooltip="Max visual tokens per image. Ref: 1024-4096 typical, up to 16384. "
+                                     "Must be >= image_min_tokens."),
+                io.Float.Input("video_fps", default=1.0, min=0.1, max=5.0, step=0.1, advanced=True,
+                               tooltip="Frames/sec sampled from connected video. Ref: 1.0 default, 0.5 long clips, "
+                                       "2-5 fast motion. Only with the video input."),
+                # --- Debug ---
+                io.Boolean.Input("verbose_logging", default=False, advanced=True,
+                                 tooltip="Print detailed step-by-step info to the console. OFF = quiet log; "
+                                         "ON to troubleshoot. (Does not affect generation.)"),
+
+                # ===== Optional connections (input sockets) =====
                 io.String.Input("style", optional=True, force_input=True,
                                 tooltip="Style description from an external node."),
                 io.Int.Input("width", optional=True, force_input=True,
-                             tooltip="Image width — auto-detected as an aspect-ratio composition profile."),
+                             tooltip="Image width - auto-detected as an aspect-ratio composition profile."),
                 io.Int.Input("height", optional=True, force_input=True,
-                             tooltip="Image height — auto-detected as an aspect-ratio composition profile."),
+                             tooltip="Image height - auto-detected as an aspect-ratio composition profile."),
                 io.Image.Input("image", optional=True, tooltip="Input image for vision analysis."),
                 io.Image.Input("reference_image", optional=True,
                                tooltip="Reference image for style-transfer prompts (the style source)."),
