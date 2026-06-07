@@ -75,8 +75,10 @@ function setupNode(node) {
     if (node.__advSetup) return;
     node.__advSetup = true;
 
-    // V2 Vue frontend has its own native advanced collapse — leave it alone.
-    if (isV2Frontend()) return;
+    // NOTE: previous attempt to skip the button on V2 (via app.extensionManager)
+    // false-positived in Node 1.0 visual mode of the same modern frontend, killing
+    // the button in BOTH modes. Always add the button — in V2 visual mode it is
+    // harmless next to the native "Show advanced inputs" toggle.
 
     node.properties = node.properties || {};
     if (typeof node.properties.advancedShown !== "boolean") {
