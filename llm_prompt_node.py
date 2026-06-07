@@ -28,7 +28,7 @@ from PIL import Image
 import folder_paths
 
 # Bundled output cleaner â€” no external dependencies
-from .output_cleaner import OutputCleanConfig, clean_model_output, normalize_prompt_separator
+from .output_cleaner import OutputCleanConfig, clean_model_output, normalize_prompt_separator, split_positive_negative
 
 # ---------------------------------------------------------------------------
 # Constants
@@ -756,8 +756,8 @@ class LLMPromptNode:
     presets from .md files, user prompt, style, and aspect ratio inputs.
     """
 
-    RETURN_TYPES = ("STRING",)
-    RETURN_NAMES = ("PROMPT",)
+    RETURN_TYPES = ("STRING", "STRING")
+    RETURN_NAMES = ("positive", "negative")
     FUNCTION = "generate"
     CATEGORY = "LLM Prompt"
     OUTPUT_NODE = False
@@ -803,6 +803,10 @@ class LLMPromptNode:
                 "output_format": (["text", "json", "list"], {
                     "default": "text",
                     "tooltip": "text = single prompt with reasoning cleanup. json = structured JSON. list = numbered multi-scene output (bypasses reasoning detection â€” use for LTX video track generation).",
+                }),
+                "split_output": ("BOOLEAN", {
+                    "default": True,
+                    "tooltip": "When ON, splits the model's 'positive|negative' output on the | into the two outputs (positive / negative) â€” no external splitter needed. When OFF, the full text goes to 'positive' and 'negative' is empty. For prompts with no negative (Flux/Chroma), positive gets the whole prompt either way.",
                 }),
                 "max_tokens": ("INT", {
                     "default": 2048,
@@ -1416,6 +1420,7 @@ class LLMPromptNode:
         custom_system_prompt: str,
         user_prompt: str,
         output_format: str,
+        split_output: bool,
         max_tokens: int,
         temperature: float,
         top_p: float,
@@ -1590,7 +1595,10 @@ class LLMPromptNode:
             # If the "works twice then stops" issue returns, the right fix is to
             # toggle keep_model_loaded=False, not to manipulate cache internals.
 
-            return (result,)
+            # Split 'positive|negative' into the two outputs (or full text on
+            # positive + empty negative when split_output is off / no pipe).
+            positive, negative = split_positive_negative(result, split_output)
+            return (positive, negative)
 
         finally:
             if not keep_model_loaded:
