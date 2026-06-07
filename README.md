@@ -12,7 +12,7 @@ Local GGUF and cloud-API prompt-writing nodes for ComfyUI, with model-family aut
 | **LLM Prompt (API)** | Cloud prompt generation via OpenAI-compatible endpoints. LM Studio, Google Gemini (native), xAI Grok, OpenRouter, or any custom endpoint. |
 | **Grok Imagine (API Key)** | Image and video generation via xAI's Grok Imagine using your own `XAI_API_KEY` (no ComfyUI credits, no proxy). |
 
-All three share the same `prompts/*.md` preset library and the same `positive | negative` output split.
+All three share the same `prompts/*.md` preset library and the same bulletproof positive/negative output split.
 
 ---
 
@@ -86,7 +86,7 @@ That's it. The node loads the model, generates the prompt, splits positive/negat
 | `custom_system_prompt` | Override the preset with your own instructions (leave empty to use preset). |
 | `user_prompt` | Your idea/subject. |
 | `output_format` | `text` (default), `json`, or `list` (numbered scenes). |
-| `split_output` | Split `positive | negative` into the two outputs. |
+| `split_output` | Split the model's positive and negative into the two node outputs. When ON, injects the `[POSITIVE]`/`[NEGATIVE]` marker contract for clean parsing. Turn OFF for single-output presets (Qwen-Image, Z-Image, Flux). |
 | `auto_settings` | Apply officially-recommended sampling for the detected family. **Recommended ON.** |
 | `disable_thinking` | Skip the model's reasoning block (faster, recommended for prompt writing). |
 | `temperature`, `max_tokens`, `n_ctx`, `seed`, `keep_model_loaded` | Standard controls. |
