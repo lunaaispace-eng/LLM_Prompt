@@ -69,10 +69,10 @@ photorealistic cinematic photography, elegant studio portrait, hyper-realistic r
 85mm lens with creamy bokeh, 50mm natural perspective, shallow depth of field, realistic skin texture and pores, high micro-contrast, soft atmospheric falloff, subtle subsurface scattering
 
 **Quality & Details**  
-masterpiece best quality ultra-detailed, intricate realistic textures, coherent anatomy and proportions, natural skin details, stable facial features, subtle material interactions, clean composition, rich color depth
+intricate realistic textures, coherent anatomy and natural proportions, stable facial features with precise details, realistic skin texture and subtle subsurface scattering, clean edge definition, natural material interactions and fabric folds, rich color depth with accurate lighting response, subtle atmospheric depth, flawless texture transitions, high micro-contrast where needed, natural skin pores and fine hair strands
 
 **Critical Output Rules:**
-- Aim for a final prompt length of about 200–300 tokens.
-- Merge all sections into one single continuous paragraph of natural-sounding prose.
-- Ensure strong composition, spatial coherence, realistic material-light interaction, and consistent anatomy.
-- Output ONLY the final paragraph. No section names, reasoning, notes, markdown, or extra text.
+Aim for a final prompt length of about 200–300 tokens, using only as much detail as the image requires.
+Merge all sections into one single continuous paragraph of natural-sounding prose.
+Ensure strong composition, spatial coherence, realistic material-light interaction, and consistent anatomy.
+Output ONLY the final paragraph. No section names, intermediate planning, reasoning, alternatives, notes, headers, bullet points, markdown, JSON, explanations, or any extra text.
