@@ -31,9 +31,32 @@ const ADVANCED = [
 const ADVANCED_SET = new Set(ADVANCED);
 const GHOST = "llmprompt_ghost_";
 
-// V2 Vue frontend exposes app.extensionManager; legacy LiteGraph does not.
-function isV2Frontend() {
-    return typeof app?.extensionManager !== "undefined";
+// Detect the *visual mode* (not the frontend version).
+//
+// app.extensionManager exists in BOTH Node 1.0 and Node 2.0 visual modes of the
+// modern Vue frontend, so it isn't a useful discriminator.
+//
+// The actual difference: in Node 2.0 visual mode, every widget renders as a real
+// HTMLElement (Vue components — `widget.element` is set to a div/input/etc.).
+// In Node 1.0 visual mode the same widgets are drawn directly on the LiteGraph
+// canvas as plain JS objects — no DOM element.
+//
+// We also accept a couple of fallback signals (Vue-internal markers, V2-style
+// `advancedWidgets` collection) so the check is robust if a future ComfyUI
+// build changes the widget shape.
+function isV2VisualMode(node) {
+    try {
+        if (!node || !Array.isArray(node.widgets)) return false;
+        for (const w of node.widgets) {
+            if (!w) continue;
+            // Primary: V2 widgets have an HTMLElement rendered for them
+            if (w.element && typeof HTMLElement !== "undefined" && w.element instanceof HTMLElement) return true;
+            // Fallbacks: Vue reactivity markers, or V2-style node collections
+            if (w.__v_isRef !== undefined || w.__v_isShallow !== undefined) return true;
+        }
+        if (node.advancedWidgets || node.collapsedAdvancedInputs) return true;
+    } catch (_) { /* swallow — default to V1 (add the button) */ }
+    return false;
 }
 
 function isAdvancedWidget(w) {
@@ -71,14 +94,8 @@ function applyAdvanced(node, show) {
     node.setDirtyCanvas(true, true);
 }
 
-function setupNode(node) {
-    if (node.__advSetup) return;
-    node.__advSetup = true;
-
-    // NOTE: previous attempt to skip the button on V2 (via app.extensionManager)
-    // false-positived in Node 1.0 visual mode of the same modern frontend, killing
-    // the button in BOTH modes. Always add the button — in V2 visual mode it is
-    // harmless next to the native "Show advanced inputs" toggle.
+function attachButton(node) {
+    if (node.__advBtn) return; // already attached
 
     node.properties = node.properties || {};
     if (typeof node.properties.advancedShown !== "boolean") {
@@ -104,6 +121,24 @@ function setupNode(node) {
     applyAdvanced(node, node.properties.advancedShown);
 }
 
+function setupNode(node) {
+    if (node.__advSetup) return;
+    node.__advSetup = true;
+
+    // Defer one frame so V2 visual mode has time to attach the HTMLElements on
+    // its widgets — that's the signal isV2VisualMode() checks for. Without the
+    // defer, V2 widgets may not yet have .element set at onNodeCreated time and
+    // we'd false-detect V1 and add a redundant button.
+    requestAnimationFrame(() => {
+        if (isV2VisualMode(node)) {
+            // Node 2.0 visual mode renders advanced widgets via the native
+            // "Show advanced inputs" toggle — we have nothing to add.
+            return;
+        }
+        attachButton(node);
+    });
+}
+
 app.registerExtension({
     name: "LLM_Prompt.AdvancedToggle",
     async beforeRegisterNodeDef(nodeType, nodeData) {
@@ -116,11 +151,15 @@ app.registerExtension({
             return r;
         };
 
-        // Re-apply after a saved workflow restores node.properties.
+        // Re-apply after a saved workflow restores node.properties. The button
+        // may not exist yet (setupNode is deferred), so retry on the next frame.
         const onConfigure = nodeType.prototype.onConfigure;
         nodeType.prototype.onConfigure = function (info) {
             const r = onConfigure?.apply(this, arguments);
-            if (this.__advBtn) applyAdvanced(this, !!this.properties?.advancedShown);
+            const node = this;
+            requestAnimationFrame(() => {
+                if (node.__advBtn) applyAdvanced(node, !!node.properties?.advancedShown);
+            });
             return r;
         };
     },
