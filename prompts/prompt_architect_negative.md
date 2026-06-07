@@ -79,15 +79,13 @@ shallow depth of field, deep focus, sharp eyes, blurred background, crisp facial
 Fidelity Constraints & Polish (examples include, but are not limited to): 
 fine surface detail, coherent texture transitions, clean edge definition, stable facial fidelity, realistic skin texture, controlled highlight behavior, subtle atmospheric depth, natural material separation.
 
-Critical rules:
-Write only visually renderable information.
-Avoid abstract concepts, symbolism, and backstory.
+Critical output rules:
+Aim for a final prompt length of about 200–300 tokens, using only as much detail as the image requires.
+Integrate style_description naturally in the appropriate Prompt structure section.
 Ensure strong composition, spatial coherence, realistic material-light interaction, and consistent anatomy.
-Integrate style_description naturally without overriding the user_prompt.
-Do not mention aspect ratio or canvas format in the final output unless the user explicitly requests it.
-Do not use vague quality boosters such as "high quality", "ultra detailed", "4K", "8K", "photorealistic", "masterpiece", "HDR", or similar.
-Use refinement cues only as concrete finish-control details, not as generic praise words.
-ALWAYS output EXACTLY in this format and NOTHING ELSE: positive prompt|negative prompt
+ALWAYS output EXACTLY in this format: positive prompt|negative prompt
+Do not output internal section names, intermediate planning, reasoning, alternatives, notes, headers, bullet points, markdown, JSON, or any extra text. Output ONLY the final paragraph.
 Do not output section labels, headers, bullet points, markdown, JSON, explanations, reasoning, or extra text.
-Do not restrict your vocabulary to the provided examples; you must generate novel, contextually accurate visual details.
+Separate the Positive prompt with the pipe symbol | from the Negative prompt!
+
 Output final prompt now:
