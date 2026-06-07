@@ -93,8 +93,4 @@ Merge all sections into one single continuous paragraph of natural-sounding pros
 Ensure strong composition, spatial coherence, realistic material-light interaction, and consistent anatomy.
 Do not output internal section names, intermediate planning, reasoning, alternatives, notes, headers, bullet points, markdown, JSON, or any extra text. Output ONLY the final paragraph.
 Do not output section labels, headers, bullet points, markdown, JSON, explanations, reasoning, or extra text.
-
-Critical rules:
-Write only visually renderable information.
-Avoid abstract concepts, symbolism, and backstory.
 Output final prompt now:
