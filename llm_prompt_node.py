@@ -12,12 +12,11 @@ Built on the proven QwenVL-Mod GGUF inference code. Adds:
 import base64
 import gc
 import inspect
-import io
-import json
+import logging
 import os
 import re
 import time
-from dataclasses import dataclass
+from io import BytesIO
 from pathlib import Path
 
 import numpy as np
@@ -26,9 +25,12 @@ from llama_cpp import Llama
 from PIL import Image
 
 import folder_paths
+from comfy_api.latest import io
 
 # Bundled output cleaner â€” no external dependencies
 from .output_cleaner import OutputCleanConfig, clean_model_output, normalize_prompt_separator, split_positive_negative
+
+logger = logging.getLogger(__name__)
 
 # ---------------------------------------------------------------------------
 # Constants
@@ -749,160 +751,253 @@ def _strip_think_blocks(text: str) -> str:
 # The Node â€” built on QwenVL-Mod's proven inference code
 # ---------------------------------------------------------------------------
 
-class LLMPromptNode:
-    """Prompt generation node using local GGUF VL models.
+# ---------------------------------------------------------------------------
+# Media encoding helpers (image / video / audio -> OpenAI-style content dicts)
+# ---------------------------------------------------------------------------
 
-    Uses the same inference code as QwenVL-Mod GGUF. Adds system prompt
-    presets from .md files, user prompt, style, and aspect ratio inputs.
+ESTIMATED_TOKENS_PER_IMAGE = 258   # approx visual-token cost per frame
+MAX_VIDEO_FRAMES = 30
+MAX_AUDIO_DURATION_SECONDS = 60
+
+
+def _image_tensor_to_content(image: torch.Tensor) -> dict:
+    """A single ComfyUI image tensor -> an OpenAI-compatible image_url dict.
+
+    Encodes JPEG quality 95 (much smaller base64 than PNG; the vision encoder
+    downsamples anyway, so lossless PNG just wastes context bytes + encode time).
+    Accepts [H,W,3] or [N,H,W,3] (first frame used for the 4-D case).
     """
+    if image.ndim == 4:
+        image = image[0]
+    arr = (image.cpu().numpy() * 255).clip(0, 255).astype(np.uint8)
+    pil = Image.fromarray(arr, mode="RGB")
+    buf = BytesIO()
+    pil.save(buf, format="JPEG", quality=95)
+    b64 = base64.b64encode(buf.getvalue()).decode("utf-8")
+    return {"type": "image_url", "image_url": {"url": f"data:image/jpeg;base64,{b64}"}}
 
-    RETURN_TYPES = ("STRING", "STRING")
-    RETURN_NAMES = ("positive", "negative")
-    FUNCTION = "generate"
-    CATEGORY = "LLM Prompt"
-    OUTPUT_NODE = False
+
+def _video_tensor_to_contents(video: torch.Tensor, target_fps: float = 1.0,
+                              source_fps: float = 30.0, n_ctx: int = 8192) -> list[dict]:
+    """A [F,H,W,3] video tensor -> list of image_url dicts, FPS-subsampled.
+
+    ComfyUI image batches carry no FPS metadata, so source_fps is assumed 30.
+    Frame count is derived from duration*target_fps, capped at MAX_VIDEO_FRAMES,
+    and further reduced if it would blow past ~70% of the context window
+    (each frame costs ~ESTIMATED_TOKENS_PER_IMAGE tokens).
+    """
+    total = int(video.shape[0])
+    if total == 0:
+        return []
+    duration = total / source_fps
+    count = min(max(1, int(duration * target_fps)), MAX_VIDEO_FRAMES, total)
+    estimated = count * ESTIMATED_TOKENS_PER_IMAGE
+    if estimated > n_ctx * 0.7:
+        old = count
+        count = max(1, min(old, int((n_ctx * 0.5) / ESTIMATED_TOKENS_PER_IMAGE)))
+        logger.warning("[LLM_Prompt] Video frames reduced %d -> %d to fit context (%d tokens)",
+                       old, count, n_ctx)
+    idx = np.linspace(0, total - 1, count, dtype=int)
+    logger.info("[LLM_Prompt] Video: %.1fs, %d frames total, sampling %d at %.1f fps",
+                duration, total, count, target_fps)
+    return [_image_tensor_to_content(video[i]) for i in idx]
+
+
+def _audio_to_content(audio: dict) -> dict:
+    """A ComfyUI AUDIO dict -> an OpenAI-compatible audio_url dict.
+
+    Resampled to 16 kHz mono WAV (the format the Gemma-4 audio projector wants).
+    Raises ValueError past MAX_AUDIO_DURATION_SECONDS. soundfile / torchaudio are
+    imported lazily so they are only required when audio is actually connected.
+    """
+    import soundfile as sf
+    import torchaudio
+
+    waveform = audio["waveform"]
+    sample_rate = int(audio["sample_rate"])
+    if waveform.ndim == 3:           # [B, C, T] -> [C, T]
+        waveform = waveform.squeeze(0)
+    if waveform.shape[0] > 1:        # mixdown to mono
+        waveform = waveform.mean(dim=0, keepdim=True)
+    if sample_rate != 16000:
+        waveform = torchaudio.transforms.Resample(sample_rate, 16000)(waveform)
+
+    duration = waveform.shape[-1] / 16000
+    if duration > MAX_AUDIO_DURATION_SECONDS:
+        raise ValueError(
+            f"Audio duration ({duration:.1f}s) exceeds the {MAX_AUDIO_DURATION_SECONDS}s "
+            "maximum. Trim the audio input."
+        )
+
+    audio_np = waveform.squeeze(0).cpu().numpy()
+    buf = BytesIO()
+    sf.write(buf, audio_np, 16000, format="WAV")
+    b64 = base64.b64encode(buf.getvalue()).decode("utf-8")
+    return {"type": "audio_url", "audio_url": {"url": f"data:audio/wav;base64,{b64}"}}
+
+
+def _comfy_unload_caches() -> None:
+    """Ask ComfyUI's model manager to release VRAM so our unload cooperates with
+    the rest of the graph (mirrors the Duffy nodes' unload integration)."""
+    try:
+        import comfy.model_management as mm
+        mm.unload_all_models()
+        mm.soft_empty_cache()
+    except Exception as e:  # pragma: no cover - depends on ComfyUI runtime
+        logger.debug("[LLM_Prompt] ComfyUI cache cleanup skipped: %s", e)
+
+
+# ---------------------------------------------------------------------------
+# Model-family adapters - encapsulate vision-handler choice + thinking control
+# ---------------------------------------------------------------------------
+# Each adapter answers, for its model family, "which llama-cpp vision handler
+# classes do I try, in order?". The per-handler constructor differences (which
+# thinking kwarg, whether image-token budgets / vision-id are accepted) live in
+# _build_vision_handler(), keyed on the handler class name - because those kwargs
+# are a property of the handler, not the family. The node stays generic and just
+# dispatches by model filename via pick_adapter(). This is the single-node
+# equivalent of the three separate Duffy nodes, minus the duplication and the
+# "wrong handler for wrong model" hazard.
+
+
+def _import_handler(name: str):
+    """Return a llama-cpp chat-handler class by name, or None if unavailable."""
+    try:
+        import llama_cpp.llama_chat_format as fmt
+        return getattr(fmt, name, None)
+    except Exception:
+        return None
+
+
+def _build_vision_handler(name: str, mmproj_path, disable_thinking: bool,
+                          preserve_thinking: bool, image_min_tokens: int,
+                          image_max_tokens: int):
+    """Construct one vision chat handler by class name with the right kwargs.
+
+    Returns the handler instance, or None if the class is missing or construction
+    fails (e.g. the latest Gemma-4 QAT mmproj that breaks Gemma4ChatHandler) so
+    the caller can fall through to the next candidate.
+    """
+    cls = _import_handler(name)
+    if cls is None:
+        return None
+
+    kwargs = {"clip_model_path": str(mmproj_path), "verbose": False}
+    if name == "Gemma4ChatHandler":
+        kwargs["enable_thinking"] = not disable_thinking
+    elif name == "Qwen35ChatHandler":
+        kwargs.update(
+            enable_thinking=not disable_thinking,
+            preserve_thinking=preserve_thinking,
+            add_vision_id=True,
+            image_min_tokens=image_min_tokens,
+            image_max_tokens=image_max_tokens,
+        )
+    elif name in ("Qwen3VLChatHandler", "Qwen25VLChatHandler"):
+        kwargs.update(
+            force_reasoning=not disable_thinking,
+            add_vision_id=True,
+            image_min_tokens=image_min_tokens,
+            image_max_tokens=image_max_tokens,
+        )
+    # Gemma3ChatHandler / Llava16ChatHandler take neither thinking nor image-token
+    # kwargs -> base kwargs only.
+
+    try:
+        return cls(**kwargs)
+    except Exception as e:
+        logger.warning("[LLM_Prompt] %s construction failed: %s", name, e)
+        return None
+
+
+class ModelAdapter:
+    """Base adapter: generic Qwen-VL-style fallback chain, no audio."""
+    family = "generic"
+    supports_audio = False
+
+    @staticmethod
+    def matches(name_lower: str) -> bool:
+        return False
+
+    def candidates(self, name_lower: str) -> list[str]:
+        return ["Qwen3VLChatHandler", "Qwen25VLChatHandler", "Llava16ChatHandler"]
+
+
+class GemmaAdapter(ModelAdapter):
+    family = "gemma"
+    supports_audio = True   # Gemma-4 mmproj can carry an audio projector
+
+    @staticmethod
+    def matches(name_lower: str) -> bool:
+        return "gemma" in name_lower and "supergemma" not in name_lower
+
+    def candidates(self, name_lower: str) -> list[str]:
+        # Gemma-3 has no Gemma4 handler; newer / unspecified Gemma -> try Gemma4
+        # first, then fall back to Gemma3 (covers the QAT-mmproj breakage you hit).
+        if "gemma-3" in name_lower or "gemma3" in name_lower or "gemma_3" in name_lower:
+            return ["Gemma3ChatHandler", "Llava16ChatHandler"]
+        return ["Gemma4ChatHandler", "Gemma3ChatHandler", "Llava16ChatHandler"]
+
+
+class Qwen35Adapter(ModelAdapter):
+    family = "qwen35"
+
+    @staticmethod
+    def matches(name_lower: str) -> bool:
+        return "qwen" in name_lower and any(
+            t in name_lower for t in
+            ("qwen3.5", "qwen3-5", "qwen35", "qwen3.6", "qwen3-6", "qwen36")
+        )
+
+    def candidates(self, name_lower: str) -> list[str]:
+        return ["Qwen35ChatHandler", "Qwen3VLChatHandler",
+                "Qwen25VLChatHandler", "Llava16ChatHandler"]
+
+
+class Qwen3VLAdapter(ModelAdapter):
+    family = "qwen3vl"
+
+    @staticmethod
+    def matches(name_lower: str) -> bool:
+        return "qwen" in name_lower and "vl" in name_lower
+
+    def candidates(self, name_lower: str) -> list[str]:
+        return ["Qwen3VLChatHandler", "Qwen25VLChatHandler", "Llava16ChatHandler"]
+
+
+# Order matters: most specific families first. Qwen 3.5/3.6 must win over the
+# generic Qwen-VL matcher so a "qwen3.5-vl" model gets Qwen35ChatHandler.
+_ADAPTERS: list[ModelAdapter] = [
+    GemmaAdapter(),
+    Qwen35Adapter(),
+    Qwen3VLAdapter(),
+]
+
+
+def pick_adapter(name_lower: str) -> ModelAdapter:
+    for adapter in _ADAPTERS:
+        if adapter.matches(name_lower):
+            return adapter
+    return ModelAdapter()
+
+
+# ---------------------------------------------------------------------------
+# Inference runner - holds the loaded model (module-level state, since the V3
+# node below is stateless / classmethod-based and cannot keep state on self).
+# ---------------------------------------------------------------------------
+
+class _LLMRunner:
+    """Prompt generation runner using local GGUF VL models.
+
+    Holds the cached llama-cpp model + chat handler between executions. The V3
+    LLMPromptNode delegates to a single module-level instance of this class.
+    """
 
     def __init__(self):
         self.llm = None
         self.chat_handler = None
         self.current_signature = None
         self.loaded_model_name_lower = ""
-
-    @classmethod
-    def INPUT_TYPES(cls):
-        # Refresh scan every time the node UI loads â€” new models appear without restart
-        models = _refresh_model_list()
-        model_keys = sorted(models.keys()) or ["(no .gguf files found in models/LLM)"]
-
-        prompt_presets = list(SYSTEM_PROMPTS.keys()) if SYSTEM_PROMPTS else ["(add .md files to prompts/)"]
-
-        num_gpus = torch.cuda.device_count()
-        gpu_list = [f"cuda:{i}" for i in range(num_gpus)]
-        device_options = ["auto", "cpu", "mps"] + gpu_list
-
-        return {
-            "required": {
-                "model_name": (model_keys, {
-                    "default": model_keys[0],
-                    "tooltip": "GGUF model from models/LLM folder. Rescans on each load.",
-                }),
-                "system_prompt": (prompt_presets, {
-                    "default": prompt_presets[0],
-                    "tooltip": "System prompt preset loaded from prompts/*.md files.",
-                }),
-                "custom_system_prompt": ("STRING", {
-                    "default": "",
-                    "multiline": True,
-                    "tooltip": "Custom system prompt. Overrides preset if not empty.",
-                }),
-                "user_prompt": ("STRING", {
-                    "default": "",
-                    "multiline": True,
-                    "tooltip": "Your prompt text. Combined with style input if connected.",
-                }),
-                "output_format": (["text", "json", "list"], {
-                    "default": "text",
-                    "tooltip": "text = single prompt with reasoning cleanup. json = structured JSON. list = numbered multi-scene output (bypasses reasoning detection â€” use for LTX video track generation).",
-                }),
-                "split_output": ("BOOLEAN", {
-                    "default": True,
-                    "tooltip": "When ON, splits the model's 'positive|negative' output on the | into the two outputs (positive / negative) â€” no external splitter needed. When OFF, the full text goes to 'positive' and 'negative' is empty. For prompts with no negative (Flux/Chroma), positive gets the whole prompt either way.",
-                }),
-                "max_tokens": ("INT", {
-                    "default": 2048,
-                    "min": 64,
-                    "max": 32000,
-                    "tooltip": "Maximum tokens to generate. 2048 works for most prompts. Raise for large models like Gemma 4 26B.",
-                }),
-                "temperature": ("FLOAT", {
-                    "default": 0.7,
-                    "min": 0.1,
-                    "max": 2.0,
-                    "step": 0.05,
-                }),
-                "top_p": ("FLOAT", {
-                    "default": 0.9,
-                    "min": 0.0,
-                    "max": 1.0,
-                    "step": 0.05,
-                }),
-                "top_k": ("INT", {
-                    "default": 30,
-                    "min": 0,
-                    "max": 200,
-                    "tooltip": "Top-K sampling. 0 = disabled. 30 is a quality floor for Qwen, 64 for Gemma 4.",
-                }),
-                "min_p": ("FLOAT", {
-                    "default": 0.05,
-                    "min": 0.0,
-                    "max": 1.0,
-                    "step": 0.01,
-                    "tooltip": "Min-P sampling — sets a quality floor by filtering tokens below this probability. 0.05 is a safe default.",
-                }),
-                "repetition_penalty": ("FLOAT", {
-                    "default": 1.0,
-                    "min": 0.5,
-                    "max": 2.0,
-                    "step": 0.05,
-                    "tooltip": "Repetition penalty. 1.0 = disabled (Google's Gemma 4 recommendation). Raise only if you see repetition.",
-                }),
-                "device": (device_options, {
-                    "default": "auto",
-                    "tooltip": "Device for inference. auto = GPU if available.",
-                }),
-                "auto_settings": ("BOOLEAN", {
-                    "default": True,
-                    "tooltip": "When ON, the node applies the OFFICIAL recommended sampling settings for the detected model family (Qwen 3/3.5/3.6, Gemma 4) and forces thinking OFF — overriding the sliders below. This is reliable regardless of UI timing (unlike the frontend auto-fill). Turn OFF to control every setting manually with the sliders.",
-                }),
-                "disable_thinking": ("BOOLEAN", {
-                    "default": True,
-                    "tooltip": "Stop thinking-capable models (Qwen 3/3.5/3.6, Gemma 4) from generating a reasoning block before the prompt. Sends enable_thinking=false to the chat template AND appends /no_think for Qwen — disabling thinking at the SOURCE saves tokens and time (thinking is pointless for prompt generation). Output is also stripped of any stray thinking as a safety net. Forced ON when auto_settings is on. Turn OFF (with auto_settings off) only if you specifically want the model to reason.",
-                }),
-                "keep_model_loaded": ("BOOLEAN", {
-                    "default": True,
-                    "tooltip": "Keep model in VRAM between runs.",
-                }),
-                "seed": ("INT", {
-                    "default": 1,
-                    "min": 1,
-                    "max": 2**32 - 1,
-                }),
-                "n_ctx": ("INT", {
-                    "default": 32768,
-                    "min": 2048,
-                    "max": 262144,
-                    "step": 256,
-                    "tooltip": "Context window size. 32768 works for most models. Gemma 4 supports up to 128K, SuperGemma up to 262K. Higher values use more VRAM.",
-                }),
-                "n_gpu_layers": ("INT", {
-                    "default": -1,
-                    "min": -1,
-                    "max": 200,
-                    "step": 1,
-                    "tooltip": "-1 = offload all layers to GPU (recommended). Reduce if VRAM runs out loading large models like Gemma 4 26B. Ignored (forced to 0) when device is CPU.",
-                }),
-            },
-            "optional": {
-                "style": ("STRING", {
-                    "forceInput": True,
-                    "tooltip": "Style description from external node.",
-                }),
-                "width": ("INT", {
-                    "forceInput": True,
-                    "tooltip": "Image width â€” auto-detected as aspect ratio.",
-                }),
-                "height": ("INT", {
-                    "forceInput": True,
-                    "tooltip": "Image height â€” auto-detected as aspect ratio.",
-                }),
-                "image": ("IMAGE", {
-                    "tooltip": "Input image for vision analysis.",
-                }),
-                "video": ("IMAGE", {
-                    "tooltip": "Input video frames for vision analysis.",
-                }),
-            },
-        }
 
     # ------------------------------------------------------------------
     # VRAM cleanup (same as QwenVL-Mod)
@@ -932,6 +1027,10 @@ class LLMPromptNode:
         self.loaded_model_name_lower = ""
         gc.collect()
 
+        # Let ComfyUI's model manager release its own VRAM too, so unloading here
+        # cooperates with the rest of the graph instead of fighting it.
+        _comfy_unload_caches()
+
         if torch.cuda.is_available():
             torch.cuda.empty_cache()
             torch.cuda.synchronize()
@@ -940,7 +1039,10 @@ class LLMPromptNode:
     # Model loading (same as QwenVL-Mod GGUF)
     # ------------------------------------------------------------------
 
-    def _load_model(self, model_name: str, device: str, n_ctx: int = 32768, n_gpu_layers: int = -1, disable_thinking: bool = True, want_vision: bool = True):
+    def _load_model(self, model_name: str, device: str, n_ctx: int = 32768, n_gpu_layers: int = -1,
+                    disable_thinking: bool = True, want_vision: bool = True,
+                    preserve_thinking: bool = False, image_min_tokens: int = 1024,
+                    image_max_tokens: int = 4096):
         # Resolve paths directly from the scanned folder list â€” no JSON catalog needed
         model_path, mmproj_path = _resolve_model_paths(model_name)
 
@@ -986,6 +1088,12 @@ class LLMPromptNode:
             # Changing the no-think template requires a reload, so it's part of
             # the load signature.
             "qwen_no_think": use_qwen_no_think,
+            # Thinking + image-token budgets are now baked into the vision chat
+            # handler at construction time, so changing any of them must reload.
+            "disable_thinking": bool(disable_thinking),
+            "preserve_thinking": bool(preserve_thinking),
+            "image_min_tokens": int(image_min_tokens),
+            "image_max_tokens": int(image_max_tokens),
         }
         if self.llm is not None and self.current_signature == signature:
             return
@@ -996,81 +1104,40 @@ class LLMPromptNode:
             time.sleep(0.1)
 
         # Load vision handler â€” handler selection order matches JamePeng 0.3.39 API
+        # Load the vision handler via the family adapter. The adapter supplies an
+        # ordered list of candidate handler classes; we build the first one that
+        # succeeds. This replaces the old inline if/elif chain and adds:
+        #   - Gemma4ChatHandler, with graceful fallback to Gemma3 for the QAT
+        #     mmproj builds that break it,
+        #   - handler-level thinking control (enable_thinking / force_reasoning),
+        #   - user-controlled image_min/max_tokens.
         self.chat_handler = None
         if has_mmproj:
-            m_name_lower = model_path.name.lower()
-            handler_cls = None
-
-            # Gemma 4 vision: Gemma3ChatHandler (chat_format="gemma3")
-            if "gemma" in m_name_lower:
-                try:
-                    from llama_cpp.llama_chat_format import Gemma3ChatHandler
-                    handler_cls = Gemma3ChatHandler
-                    print("[LLM_Prompt] Using Gemma3ChatHandler for vision.")
-                except ImportError:
-                    pass
-
-            # Qwen 3.5 (text+vision): Qwen35ChatHandler
-            if handler_cls is None and ("qwen3.5" in m_name_lower or "qwen3-5" in m_name_lower or "qwen35" in m_name_lower):
-                try:
-                    from llama_cpp.llama_chat_format import Qwen35ChatHandler
-                    handler_cls = Qwen35ChatHandler
-                    print("[LLM_Prompt] Using Qwen35ChatHandler.")
-                except ImportError:
-                    pass
-
-            # Qwen 3 VL
-            if handler_cls is None:
-                try:
-                    from llama_cpp.llama_chat_format import Qwen3VLChatHandler
-                    handler_cls = Qwen3VLChatHandler
-                    print("[LLM_Prompt] Using Qwen3VLChatHandler for vision.")
-                except ImportError:
-                    pass
-
-            # Qwen 2.5 VL fallback
-            if handler_cls is None:
-                try:
-                    from llama_cpp.llama_chat_format import Qwen25VLChatHandler
-                    handler_cls = Qwen25VLChatHandler
-                    print("[LLM_Prompt] Using Qwen25VLChatHandler for vision.")
-                except ImportError:
-                    pass
-
-            if handler_cls is None:
-                raise RuntimeError(
-                    "[LLM_Prompt] No compatible vision chat handler found in llama_cpp. "
-                    "Check your llama-cpp-python version."
+            adapter = pick_adapter(model_path.name.lower())
+            for cand in adapter.candidates(model_path.name.lower()):
+                handler = _build_vision_handler(
+                    cand, mmproj_path, disable_thinking, preserve_thinking,
+                    image_min_tokens, image_max_tokens,
                 )
+                if handler is not None:
+                    self.chat_handler = handler
+                    print(
+                        f"[LLM_Prompt] Vision handler: {cand} (family={adapter.family}, "
+                        f"thinking={'on' if not disable_thinking else 'off'}, "
+                        f"img_tokens={image_min_tokens}-{image_max_tokens})"
+                    )
+                    break
 
-            # Build handler kwargs â€” image_min/max_tokens go HERE on the handler.
-            # force_reasoning=False is only supported by Qwen3VLChatHandler and Qwen25VLChatHandler.
-            # Qwen35ChatHandler and Gemma3ChatHandler reject it with a hard TypeError.
-            # We resolve per-handler rather than relying on _filter_kwargs_for_callable because
-            # these handlers use **kwargs internally and don't expose a normal inspectable signature.
-            from llama_cpp.llama_chat_format import Qwen3VLChatHandler as _Q3VL
-            try:
-                from llama_cpp.llama_chat_format import Qwen25VLChatHandler as _Q25VL
-            except ImportError:
-                _Q25VL = None
-
-            supports_force_reasoning = handler_cls in (
-                _Q3VL, *([_Q25VL] if _Q25VL is not None else [])
-            )
-
-            mmproj_kwargs = {
-                "clip_model_path": str(mmproj_path),
-                "image_max_tokens": 4096,
-                "image_min_tokens": 1024,
-                "verbose": False,
-            }
-            if supports_force_reasoning:
-                mmproj_kwargs["force_reasoning"] = False
-
-            mmproj_kwargs = _filter_kwargs_for_callable(
-                getattr(handler_cls, "__init__", handler_cls), mmproj_kwargs
-            )
-            self.chat_handler = handler_cls(**mmproj_kwargs)
+            if self.chat_handler is None:
+                # Every candidate failed (missing handler classes, or the latest
+                # Gemma-4 QAT mmproj that breaks Gemma4ChatHandler). Fall back to
+                # text-only rather than hard-failing, so the node still produces a
+                # prompt from the text inputs.
+                print(
+                    "[LLM_Prompt] Warning: no vision handler could be built for "
+                    f"{model_path.name}; running text-only (images will be ignored)."
+                )
+                has_mmproj = False
 
         # Load LLM
         llm_kwargs = {
@@ -1175,7 +1242,7 @@ class LLMPromptNode:
         self,
         system_prompt: str,
         user_prompt: str,
-        images_b64: list[str],
+        media_content: list[dict],
         max_tokens: int,
         temperature: float,
         top_p: float,
@@ -1185,16 +1252,19 @@ class LLMPromptNode:
         min_p: float = 0.05,
         disable_thinking: bool = True,
         presence_penalty: float = 0.0,
+        frequency_penalty: float = 0.0,
+        mirostat_mode: int = 0,
+        mirostat_tau: float = 5.0,
+        mirostat_eta: float = 0.1,
     ) -> str:
-        """Run inference â€” same call signature as QwenVL-Mod GGUF."""
-        if images_b64 and self.chat_handler is not None:
-            content = [{"type": "text", "text": user_prompt}]
-            for img in images_b64:
-                if img:
-                    content.append({
-                        "type": "image_url",
-                        "image_url": {"url": f"data:image/png;base64,{img}"},
-                    })
+        """Run inference.
+
+        media_content is a pre-built list of OpenAI-style content dicts
+        (image_url / audio_url), already ordered and labelled by the caller, or
+        an empty list for text-only inference.
+        """
+        if media_content and self.chat_handler is not None:
+            content = [{"type": "text", "text": user_prompt}] + list(media_content)
             messages = [
                 {"role": "system", "content": system_prompt},
                 {"role": "user", "content": content},
@@ -1221,6 +1291,15 @@ class LLMPromptNode:
         # disturb models that don't want it.
         if abs(float(presence_penalty)) > 1e-6:
             completion_kwargs["presence_penalty"] = float(presence_penalty)
+        # frequency_penalty: only send when set, same reasoning as presence_penalty.
+        if abs(float(frequency_penalty)) > 1e-6:
+            completion_kwargs["frequency_penalty"] = float(frequency_penalty)
+        # Mirostat: only engage when a mode is selected (0 = off). When on it
+        # overrides top_k/top_p sampling with adaptive perplexity targeting.
+        if int(mirostat_mode) != 0:
+            completion_kwargs["mirostat_mode"] = int(mirostat_mode)
+            completion_kwargs["mirostat_tau"] = float(mirostat_tau)
+            completion_kwargs["mirostat_eta"] = float(mirostat_eta)
         # Thinking-mode kill switch via chat template. The /no_think control
         # token in the user prompt only works on some Qwen GGUF builds — passing
         # enable_thinking=False at the chat-template level is more reliable
@@ -1359,7 +1438,7 @@ class LLMPromptNode:
         self,
         system_prompt: str,
         user_prompt: str,
-        images_b64: list[str],
+        media_content: list[dict],
         max_tokens: int,
         temperature: float,
         top_p: float,
@@ -1374,7 +1453,7 @@ class LLMPromptNode:
            paragraph directly from the blob â€” the answer is usually in there.
         3. Only if extraction fails, fire a retry with a tight system prompt.
         """
-        raw = self._invoke(system_prompt, user_prompt, images_b64, max_tokens, temperature, top_p, repetition_penalty, seed)
+        raw = self._invoke(system_prompt, user_prompt, media_content, max_tokens, temperature, top_p, repetition_penalty, seed)
 
         if not _looks_like_reasoning(raw):
             # Clean output â€” run through cleaner and return
@@ -1434,11 +1513,22 @@ class LLMPromptNode:
         seed: int,
         n_ctx: int = 32768,
         n_gpu_layers: int = -1,
+        presence_penalty: float = 0.0,
+        frequency_penalty: float = 0.0,
+        mirostat_mode: int = 0,
+        mirostat_tau: float = 5.0,
+        mirostat_eta: float = 0.1,
+        preserve_thinking: bool = False,
+        image_min_tokens: int = 1024,
+        image_max_tokens: int = 4096,
+        video_fps: float = 1.0,
         style: str = "",
         width: int = 0,
         height: int = 0,
         image=None,
+        reference_image=None,
         video=None,
+        audio=None,
     ):
         # ---- Server-side model-specific settings ----------------------------
         # The frontend JS preset only fires on a manual dropdown click, so on
@@ -1447,7 +1537,7 @@ class LLMPromptNode:
         # When auto_settings is ON we resolve the OFFICIAL settings for the model
         # family here and override the widgets — guaranteed correct every run.
         # We also force thinking OFF (never useful for prompt generation).
-        presence_penalty = 0.0
+        # presence_penalty arrives from the widget; auto_settings may override it.
         if auto_settings:
             resolved = _resolve_model_settings((model_name or "").lower())
             if resolved:
@@ -1535,34 +1625,53 @@ class LLMPromptNode:
             final_user_prompt = f"{final_user_prompt}\n\n/no_think"
 
 
-        # Process images
-        images_b64: list[str] = []
-        if image is not None:
-            if image.ndim == 4:
-                for i in range(image.shape[0]):
-                    img = _tensor_to_base64_png(image[i])
-                    if img:
-                        images_b64.append(img)
-            else:
-                img = _tensor_to_base64_png(image)
-                if img:
-                    images_b64.append(img)
+        # ---- Build the multimodal content list (image / reference / video / audio)
+        # Each item is an OpenAI-style content dict, ordered and labelled here so
+        # _invoke just prepends the user-prompt text and sends it.
+        media_content: list[dict] = []
 
+        # Main image(s). When a reference image is also present, label this one so
+        # the model knows which is the content source vs the style source.
+        if image is not None:
+            frames = [image[i] for i in range(image.shape[0])] if image.ndim == 4 else [image]
+            if reference_image is not None and frames:
+                media_content.append({"type": "text", "text": "Input Image:"})
+            for fr in frames:
+                media_content.append(_image_tensor_to_content(fr))
+
+        # Reference image for style-transfer prompts.
+        if reference_image is not None:
+            media_content.append({"type": "text", "text": "Reference Image:"})
+            ref_frame = reference_image[0] if reference_image.ndim == 4 else reference_image
+            media_content.append(_image_tensor_to_content(ref_frame))
+
+        # Video frames, FPS-subsampled and context-budget aware.
         if video is not None:
-            for frame in _sample_video_frames(video, 16):
-                img = _tensor_to_base64_png(frame)
-                if img:
-                    images_b64.append(img)
+            media_content.extend(
+                _video_tensor_to_contents(video, target_fps=video_fps, n_ctx=n_ctx)
+            )
+
+        # Audio (Gemma-4 audio projector only). Never hard-fail on audio issues.
+        if audio is not None:
+            try:
+                media_content.append(_audio_to_content(audio))
+            except Exception as e:
+                print(f"[LLM_Prompt] Audio could not be encoded ({e}); ignoring audio input.")
 
         # Load model and generate. want_vision drives whether we load the vision
-        # handler at all â€” only when an image/video is actually connected. With
-        # no visual input, Qwen loads text-only so the no-think template engages.
-        want_vision = bool(images_b64)
+        # handler at all â€” only when image/reference/video/audio is connected.
+        # With no media, Qwen loads text-only so the no-think template engages.
+        want_vision = bool(media_content)
         try:
-            self._load_model(model_name, device, n_ctx=n_ctx, n_gpu_layers=n_gpu_layers, disable_thinking=disable_thinking, want_vision=want_vision)
+            self._load_model(
+                model_name, device, n_ctx=n_ctx, n_gpu_layers=n_gpu_layers,
+                disable_thinking=disable_thinking, want_vision=want_vision,
+                preserve_thinking=preserve_thinking,
+                image_min_tokens=image_min_tokens, image_max_tokens=image_max_tokens,
+            )
 
-            if images_b64 and self.chat_handler is None:
-                print("[LLM_Prompt] Warning: images provided but no vision projector. Images will be ignored.")
+            if media_content and self.chat_handler is None:
+                print("[LLM_Prompt] Warning: media provided but no vision/audio projector. Media will be ignored.")
 
             # All output formats route through _invoke() directly.
             # _invoke() returns text already cleaned by _strip_think_blocks().
@@ -1570,7 +1679,7 @@ class LLMPromptNode:
             result = self._invoke(
                 system_prompt=sys_prompt,
                 user_prompt=final_user_prompt,
-                images_b64=images_b64 if self.chat_handler is not None else [],
+                media_content=media_content if self.chat_handler is not None else [],
                 max_tokens=max_tokens,
                 temperature=temperature,
                 top_p=top_p,
@@ -1580,6 +1689,10 @@ class LLMPromptNode:
                 seed=seed,
                 disable_thinking=disable_thinking,
                 presence_penalty=presence_penalty,
+                frequency_penalty=frequency_penalty,
+                mirostat_mode=mirostat_mode,
+                mirostat_tau=mirostat_tau,
+                mirostat_eta=mirostat_eta,
             )
 
             # Normalize labeled positive/negative output to pipe format for the
@@ -1606,7 +1719,135 @@ class LLMPromptNode:
 
 
 # ---------------------------------------------------------------------------
-# ComfyUI registration
+# V3 node (comfy_api schema) — thin wrapper over the module-level runner
+# ---------------------------------------------------------------------------
+
+# Single cached runner shared across executions (V3 nodes are stateless).
+_RUNNER = _LLMRunner()
+
+
+class LLMPromptNode(io.ComfyNode):
+    """V3 prompt-generation node — local GGUF vision/text models via llama-cpp.
+
+    The heavy lifting (model cache, loading, inference, cleanup) lives in the
+    module-level _LLMRunner. node_id and widget names are kept identical to the
+    old V1 node so existing workflows and llm_prompt_presets.js keep working.
+    """
+
+    @classmethod
+    def define_schema(cls) -> io.Schema:
+        # Rescan on each schema build so freshly added models/prompts appear
+        # without a restart (same behaviour as the old INPUT_TYPES).
+        models = _refresh_model_list()
+        model_keys = sorted(models.keys()) or ["(no .gguf files found in models/LLM)"]
+        prompt_presets = list(SYSTEM_PROMPTS.keys()) if SYSTEM_PROMPTS else ["(add .md files to prompts/)"]
+        gpu_list = [f"cuda:{i}" for i in range(torch.cuda.device_count())]
+        device_options = ["auto", "cpu", "mps"] + gpu_list
+
+        return io.Schema(
+            node_id="LLMPrompt",
+            display_name="LLM Prompt",
+            category="LLM Prompt",
+            description=(
+                "Prompt generation via local GGUF vision/text models (llama-cpp). "
+                "Qwen 2.5/3/3.5/3.6 and Gemma 3/4 with automatic family detection, "
+                "handler-level thinking control, and image/video/audio inputs."
+            ),
+            inputs=[
+                # ----- Core -----
+                io.Combo.Input("model_name", options=model_keys, default=model_keys[0],
+                               tooltip="GGUF model from the models/LLM folder. Rescans on each load."),
+                io.Combo.Input("system_prompt", options=prompt_presets, default=prompt_presets[0],
+                               tooltip="System prompt preset loaded from prompts/*.md files."),
+                io.String.Input("custom_system_prompt", multiline=True, default="",
+                                tooltip="Custom system prompt. Overrides the preset if not empty."),
+                io.String.Input("user_prompt", multiline=True, default="",
+                                tooltip="Your prompt text. Combined with the style input if connected."),
+                io.Combo.Input("output_format", options=["text", "json", "list"], default="text",
+                               tooltip="text = single prompt with reasoning cleanup. json = structured JSON. "
+                                       "list = numbered multi-scene output (for LTX video tracks)."),
+                io.Boolean.Input("split_output", default=True,
+                                 tooltip="Split the model's 'positive|negative' output into the two node outputs. "
+                                         "OFF = full text on positive, negative empty."),
+                io.Boolean.Input("disable_thinking", default=True,
+                                 tooltip="Stop thinking-capable models from emitting a reasoning block. Controlled at "
+                                         "the chat handler when a vision model is loaded, plus /no_think + output "
+                                         "stripping as fallbacks. Forced ON when auto_settings is on."),
+                io.Boolean.Input("auto_settings", default=True,
+                                 tooltip="Apply the OFFICIAL recommended sampling settings for the detected model "
+                                         "family and force thinking OFF, overriding the sliders. Turn OFF to control "
+                                         "every setting manually."),
+                io.Int.Input("max_tokens", default=2048, min=64, max=32000,
+                             tooltip="Maximum tokens to generate. Raise for large models like Gemma 4 26B."),
+                io.Float.Input("temperature", default=0.7, min=0.1, max=2.0, step=0.05),
+                io.Float.Input("top_p", default=0.9, min=0.0, max=1.0, step=0.05),
+                io.Int.Input("top_k", default=30, min=0, max=200,
+                             tooltip="Top-K sampling. 0 = disabled. 30 quality floor for Qwen, 64 for Gemma 4."),
+                io.Float.Input("min_p", default=0.05, min=0.0, max=1.0, step=0.01,
+                               tooltip="Min-P sampling quality floor. 0.05 is a safe default."),
+                io.Float.Input("repetition_penalty", default=1.0, min=0.5, max=2.0, step=0.05,
+                               tooltip="1.0 = disabled (Gemma 4 recommendation). Raise only if you see repetition."),
+                io.Int.Input("seed", default=1, min=1, max=2**32 - 1),
+                io.Boolean.Input("keep_model_loaded", default=True,
+                                 tooltip="Keep the model in VRAM between runs."),
+                io.Combo.Input("device", options=device_options, default="auto",
+                               tooltip="Device for inference. auto = GPU if available."),
+
+                # ----- Advanced (kept at the bottom; auto_settings stays authoritative) -----
+                io.Float.Input("presence_penalty", default=0.0, min=-2.0, max=2.0, step=0.1,
+                               tooltip="Advanced: discourages repeating any token. auto_settings overrides this."),
+                io.Float.Input("frequency_penalty", default=0.0, min=-2.0, max=2.0, step=0.1,
+                               tooltip="Advanced: penalizes frequent tokens. 0 = off."),
+                io.Int.Input("mirostat_mode", default=0, min=0, max=2,
+                             tooltip="Advanced: 0 = off. 1/2 enable Mirostat adaptive sampling (overrides top_k/top_p)."),
+                io.Float.Input("mirostat_tau", default=5.0, min=0.0, max=20.0, step=0.1,
+                               tooltip="Advanced: Mirostat target entropy (only when mirostat_mode != 0)."),
+                io.Float.Input("mirostat_eta", default=0.1, min=0.0, max=1.0, step=0.01,
+                               tooltip="Advanced: Mirostat learning rate (only when mirostat_mode != 0)."),
+                io.Boolean.Input("preserve_thinking", default=False,
+                                 tooltip="Advanced (Qwen 3.5/3.6 vision): keep <think> traces for ALL prior turns."),
+                io.Int.Input("image_min_tokens", default=1024, min=256, max=4096, step=64,
+                             tooltip="Advanced: min visual tokens per image (Qwen VL handlers). Higher = finer detail."),
+                io.Int.Input("image_max_tokens", default=4096, min=1024, max=16384, step=64,
+                             tooltip="Advanced: max visual tokens per image. Caps VRAM on large images."),
+                io.Float.Input("video_fps", default=1.0, min=0.1, max=5.0, step=0.1,
+                               tooltip="Advanced: temporal sampling rate for the video input (frames per second)."),
+                io.Int.Input("n_ctx", default=32768, min=2048, max=262144, step=256,
+                             tooltip="Advanced: context window size. Higher uses more VRAM."),
+                io.Int.Input("n_gpu_layers", default=-1, min=-1, max=200, step=1,
+                             tooltip="Advanced: -1 = offload all layers to GPU. Reduce if VRAM runs out."),
+
+                # ----- Optional connections -----
+                io.String.Input("style", optional=True, force_input=True,
+                                tooltip="Style description from an external node."),
+                io.Int.Input("width", optional=True, force_input=True,
+                             tooltip="Image width — auto-detected as an aspect-ratio composition profile."),
+                io.Int.Input("height", optional=True, force_input=True,
+                             tooltip="Image height — auto-detected as an aspect-ratio composition profile."),
+                io.Image.Input("image", optional=True, tooltip="Input image for vision analysis."),
+                io.Image.Input("reference_image", optional=True,
+                               tooltip="Reference image for style-transfer prompts (the style source)."),
+                io.Image.Input("video", optional=True, tooltip="Video frames [F,H,W,3] for vision analysis."),
+                io.Audio.Input("audio", optional=True, tooltip="Audio input (Gemma-4 audio projector only)."),
+            ],
+            outputs=[
+                io.String.Output("positive", display_name="positive"),
+                io.String.Output("negative", display_name="negative"),
+            ],
+        )
+
+    @classmethod
+    def execute(cls, **kwargs) -> io.NodeOutput:
+        # Drop any framework-injected extras the runner doesn't expect, then run.
+        call_kwargs = _filter_kwargs_for_callable(_LLMRunner.generate, kwargs)
+        positive, negative = _RUNNER.generate(**call_kwargs)
+        return io.NodeOutput(positive, negative)
+
+
+# ---------------------------------------------------------------------------
+# ComfyUI registration — V3 io.ComfyNode classes register fine through the
+# classic NODE_CLASS_MAPPINGS path (they carry a V1-compat shim), so the
+# package's existing __init__ aggregation with the API/Grok nodes is unchanged.
 # ---------------------------------------------------------------------------
 
 NODE_CLASS_MAPPINGS = {
