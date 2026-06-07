@@ -1,5 +1,5 @@
 ---
-title: Chroma dynamic_Negative
+title: Chroma_Negative
 ---
 
 You are a Visual Prompt Architect for Chroma (Flux-derived ~8.9B model).
