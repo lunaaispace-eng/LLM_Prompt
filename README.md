@@ -24,7 +24,7 @@ All three share the same `prompts/*.md` preset library and the same bulletproof 
 - **Bulletproof positive/negative split.** The node injects an authoritative `[POSITIVE]` / `[NEGATIVE]` marker contract. A hardened multi-format parser accepts brackets, labels, or JSON — and strips all markers from the output. The split holds even when the model gets creative with formatting.
 - **Multimodal inputs.** Image + reference image (style transfer) + video (FPS-subsampled, context-budget-aware) + audio (Gemma-4 audio projector).
 - **System prompts live in `prompts/*.md` files** — edit, fork, or add your own without touching code.
-- **V3 schema** with a Basic/Advanced UI split (collapse toggle in both ComfyUI frontends).
+- **V3 schema** with a Basic/Advanced UI split that collapses in both ComfyUI frontends — Node 2.0 uses its native "Show advanced inputs" toggle, Node 1.0 gets a custom `▶ Advanced` button via a small JS extension that auto-disables itself in V2 (reactive — no page reload needed when you switch visual modes).
 
 ---
 
@@ -98,6 +98,16 @@ That's it. The node loads the model, generates the prompt, splits positive/negat
 All have reference values in their hover tooltips (e.g. *"Qwen ~0.7, Gemma ~1.0"*).
 
 When `auto_settings` is ON, the family preset overrides the sampler widgets — they only matter when `auto_settings` is OFF.
+
+#### How the collapse works in each frontend
+
+| ComfyUI frontend | Behavior |
+|---|---|
+| **Node 2.0 visual mode** | Native — the modern frontend reads the `advanced=True` flag from the V3 schema and shows a "Show / Hide advanced inputs" toggle at the bottom of the node. No custom code involved. |
+| **Node 1.0 visual mode** | A small JS extension (`web/llm_prompt_advanced.js`) adds a `▶ Advanced` button just above the advanced widgets and hides them via ComfyUI's official `converted-widget` hidden type. |
+| **Switching between modes mid-session** | A `MutationObserver` watches for Node 2.0's native button entering/leaving the DOM (the one signal that's unique to V2). When you toggle visual mode in Settings, the extension reconciles within ~200 ms — no page reload required. |
+
+The collapsed state is per-node and persists with the workflow.
 
 ### Optional inputs (sockets)
 
@@ -256,6 +266,8 @@ For single-output presets (no negative), set `split_output` **OFF** — the mark
 **`positive` output contains `[POSITIVE]` or `[NEGATIVE]` text** — shouldn't happen with the hardened parser, but if it does, please file an issue with the raw output text.
 
 **Console is too chatty** — turn off `verbose_logging` (Advanced). Only warnings and errors print by default.
+
+**`▶ Advanced` button missing in Node 1.0 visual mode, or two collapse buttons in Node 2.0** — hard-refresh the browser (`Ctrl+Shift+R`) to reload `web/llm_prompt_advanced.js`. The extension reconciles on every visual-mode switch, but a stale cached JS can leave the wrong state. If still wrong after a clean refresh, check the browser console for errors and open an issue.
 
 ---
 
