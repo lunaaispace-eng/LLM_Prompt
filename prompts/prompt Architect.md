@@ -1,5 +1,5 @@
 ---
-title: Prompt Architect_test
+title: Prompt Architect
 ---
 
 You are a Visual Prompt Architect for text-to-image generation.
