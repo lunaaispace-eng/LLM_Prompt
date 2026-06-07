@@ -175,19 +175,78 @@ def _drop_preamble(text: str) -> str:
     return "\n".join(lines[keep_from:]).strip()
 
 
-def split_positive_negative(text: str, do_split: bool) -> tuple[str, str]:
-    """Split a 'positive|negative' string into (positive, negative).
+# Positive/negative boundary markers. These are DELIMITERS ONLY — every match is
+# stripped, so no '[POSITIVE]' / 'Negative prompt:' residue ever reaches output.
+_POS_MARKER_RE = re.compile(
+    r'(?is)^\s*(?:\[\s*positive\s*\]|positive(?:\s+prompt)?\s*[:\-])\s*'
+)
+# The bracket form '[NEGATIVE]' is distinctive enough to match anywhere (incl.
+# inline). The bare-word form ('Negative:' / 'Negative prompt:') is line-anchored
+# so we never trip on the word "negative" inside prompt content (e.g. "negative
+# space"). Either way a trailing newline is consumed so it leaves no residue.
+_NEG_MARKER_RE = re.compile(
+    r'(?i)(?:\[\s*negative\s*\]|(?:^|\n)[ \t]*negative(?:\s+prompt)?\s*[:\-])[ \t]*\n?'
+)
 
-    When do_split is True and a pipe is present, splits on the FIRST pipe and
-    strips both halves. When do_split is False, or there's no pipe (single-output
-    prompts like Flux/Chroma that produce no negative), returns (full_text, "")
-    so the positive output always carries the prompt and negative stays empty.
+
+def _strip_pos_marker(s: str) -> str:
+    """Remove a leading [POSITIVE] / 'Positive:' marker so it never leaks out."""
+    return _POS_MARKER_RE.sub("", s or "", count=1).strip()
+
+
+def _try_json_pos_neg(text: str):
+    """Parse {"positive": ..., "negative": ...} (optionally code-fenced). None if not JSON."""
+    import json
+    s = re.sub(r'^```(?:json)?|```$', '', (text or "").strip(), flags=re.IGNORECASE).strip()
+    if not (s.startswith("{") and "positive" in s.lower()):
+        return None
+    try:
+        obj = json.loads(s)
+    except Exception:
+        return None
+    if isinstance(obj, dict):
+        pos = obj.get("positive") or obj.get("Positive") or ""
+        neg = obj.get("negative") or obj.get("Negative") or ""
+        if isinstance(pos, str) and pos.strip():
+            return pos.strip(), (neg.strip() if isinstance(neg, str) else "")
+    return None
+
+
+def split_positive_negative(text: str, do_split: bool) -> tuple[str, str]:
+    """Split model output into (positive, negative) — robust to a dropped delimiter.
+
+    When do_split is True, tries in order: JSON {positive, negative}; labelled
+    markers ([POSITIVE]/[NEGATIVE], 'Negative prompt:', 'NEGATIVE:'); the legacy
+    '|' pipe. ALL markers/labels are stripped, so the returned strings contain no
+    bracket or label residue. If nothing matches (or do_split is False), the whole
+    text goes to positive and negative is empty — the prompt is never lost.
     """
     text = (text or "").strip()
-    if do_split and "|" in text:
+    if not text:
+        return "", ""
+    if not do_split:
+        return _strip_pos_marker(text), ""
+
+    # 1) JSON object
+    parsed = _try_json_pos_neg(text)
+    if parsed:
+        return parsed
+
+    # 2) Negative marker / label — split on the first one, strip both markers
+    m = _NEG_MARKER_RE.search(text)
+    if m:
+        positive = _strip_pos_marker(text[:m.start()])
+        negative = text[m.end():].strip()
+        if positive:  # only accept if real positive content precedes the marker
+            return positive, negative
+
+    # 3) Legacy pipe
+    if "|" in text:
         pos, _, neg = text.partition("|")
-        return pos.strip(), neg.strip()
-    return text, ""
+        return _strip_pos_marker(pos), neg.strip()
+
+    # 4) Fallback — the whole thing is the positive prompt
+    return _strip_pos_marker(text), ""
 
 
 def normalize_prompt_separator(text: str) -> str:
