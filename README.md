@@ -21,7 +21,7 @@ All three share the same `prompts/*.md` preset library and the same bulletproof 
 - **One node for every local LLM family.** A small adapter registry inside the node detects the model from its filename and picks the right llama-cpp chat handler — `Gemma4ChatHandler`, `Qwen35ChatHandler`, `Qwen3VLChatHandler`, or a fallback chain — so you don't need separate nodes per model.
 - **Handler-level thinking control.** `enable_thinking` / `force_reasoning` / `preserve_thinking` are passed directly to the chat handler at load time, not patched in at inference. Reliable thinking-off across Qwen and Gemma.
 - **`auto_settings`** automatically applies the official recommended sampling for the detected family (Qwen Unsloth defaults, Gemma Google defaults). One toggle, correct settings every run.
-- **Bulletproof positive/negative split.** The node injects an authoritative `[POSITIVE]` / `[NEGATIVE]` marker contract. A hardened multi-format parser accepts brackets, labels, the legacy `|` pipe, or JSON — and strips all markers from the output. No more "the model dropped my pipe" failures.
+- **Bulletproof positive/negative split.** The node injects an authoritative `[POSITIVE]` / `[NEGATIVE]` marker contract. A hardened multi-format parser accepts brackets, labels, or JSON — and strips all markers from the output. The split holds even when the model gets creative with formatting.
 - **Multimodal inputs.** Image + reference image (style transfer) + video (FPS-subsampled, context-budget-aware) + audio (Gemma-4 audio projector).
 - **System prompts live in `prompts/*.md` files** — edit, fork, or add your own without touching code.
 - **V3 schema** with a Basic/Advanced UI split (collapse toggle in both ComfyUI frontends).
@@ -201,8 +201,7 @@ Write nothing before [POSITIVE] and nothing after the negative prompt.
 The hardened parser then accepts (and strips) any of:
 1. `[POSITIVE] ... [NEGATIVE] ...` markers
 2. `Positive prompt: ... Negative prompt: ...` labels
-3. The legacy `pos | neg` pipe
-4. JSON `{"positive": ..., "negative": ...}`
+3. JSON `{"positive": ..., "negative": ...}`
 
 …and falls back to "whole text = positive, negative empty" if none match. **No prompt is ever lost.**
 
