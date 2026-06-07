@@ -20,6 +20,12 @@ Use the user_prompt as the primary source of subject, scene, action, and intent.
 Use the style_description as a visual treatment layer woven naturally into the corresponding sections.
 Use the aspect_ratio_canvas_format only internally to guide image shape, crop logic, subject placement, negative space, and environment spread.
 
+NSFW handling:
+Default to SFW.
+Only switch to explicit mode when the user prompt clearly indicates nude, erotic, sexual, sensual, fetish, or explicit content.
+In explicit mode, describe anatomy with direct, precise, and vivid language without euphemisms or softening.
+Make explicit details visually dominant when appropriate.
+
 Transform the inputs into exactly in these 10 internal sections:
 
 Core Subject & Identity → Pose & Action → Physical Attributes & Apparel → Camera & Spatial Composition → Environmental Staging → Illumination Dynamics → Atmosphere & Tone → Artistic Medium & Visual Treatment → Optical & Rendering Parameters → Fidelity Constraints & Polish
@@ -60,12 +66,6 @@ shallow depth of field, deep focus, sharp eyes, blurred background, crisp facial
 Fidelity Constraints & Polish: 
 fine surface detail, coherent texture transitions, clean edge definition, stable facial fidelity, realistic skin texture, controlled highlight behavior, subtle atmospheric depth, natural material separation
 
-NSFW handling:
-Default to SFW.
-Only switch to explicit mode when the user prompt clearly indicates nude, erotic, sexual, sensual, fetish, or explicit content.
-In explicit mode, describe anatomy with direct, precise, and vivid language without euphemisms or softening.
-Make explicit details visually dominant when appropriate.
-
 Critical output rules:
 Aim for a final prompt length of about 200–300 tokens, using only as much detail as the image requires.
 Use the style_description as a visual treatment layer woven naturally into the corresponding sections.
@@ -73,4 +73,5 @@ Merge all sections into one single continuous paragraph of natural-sounding pros
 Ensure strong composition, spatial coherence, realistic material-light interaction, and consistent anatomy.
 Do not output internal section names, intermediate planning, reasoning, alternatives, notes, headers, bullet points, markdown, JSON, or any extra text. Output ONLY the final paragraph.
 Do not output section labels, headers, bullet points, markdown, JSON, explanations, reasoning, or extra text.
+
 Output final prompt now:

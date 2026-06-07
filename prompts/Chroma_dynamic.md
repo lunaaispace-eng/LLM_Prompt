@@ -12,42 +12,23 @@ Task inputs:
 Instructions:
 
 Use the user_prompt as the primary source of subject, scene, action, and intent.
-Use the style_description only as a visual treatment layer woven naturally into the result.
+Integrate style_description naturally in their corresponding sections without overriding the user_prompt
 Use the aspect_ratio_canvas_format only internally to guide image shape, crop logic, subject placement, negative space, and environment spread.
 
+NSFW handling:
+Default to SFW.
+Only switch to explicit mode when the user prompt clearly indicates nude, erotic, sexual, sensual, fetish, or explicit content.
+In explicit mode, describe anatomy with direct, precise, and vivid language without euphemisms or softening.
+Make explicit details visually dominant when appropriate.
+
 Transform the inputs into exactly these 10 internal sections.
-Expand each section with dense, specific, visually renderable details.
-If the user input is incomplete or underspecified, infer the most logical and visually coherent details while staying faithful to the original intent.
-The examples provided in the structural sections below are purely illustrative to demonstrate the required technical depth. You are not limited to these lists; draw upon your full vocabulary to invent highly specific, visually compelling details that fit the user's intent.
 
 Start from this default section order:
 Artistic Medium & Visual Treatment → Core Subject & Identity → Pose & Action → Physical Attributes & Apparel → Camera & Spatial Composition → Environmental Staging → Illumination Dynamics → Atmosphere & Tone → Optical & Rendering Parameters → Fidelity Constraints & Polish direction
 
-Before writing the final prompt, determine which section or sections are most important for the requested image.
-Promote only the sections that are truly dominant for that specific image, because earlier sections carry more priority.
-
-Use these promotion rules:
-Identify if one or two of the following core visual anchors are the absolute main focus of the user's request. Promote ONLY from this list:
-
-- Promote Core Subject & Identity when identity, anatomy, character presence, or physical traits are the main focus.
-- Promote Pose & Action when movement, posture, or physical dynamics are the main focus.
-- Promote Physical Attributes & Apparel when outfit design, accessories, materials, or color palette are the main focus.
-- Promote Camera & Spatial Composition when framing, shot type, angle, lens choice, or composition are critical.
-
-Promotion Mechanics:
-
-- Do not promote any other sections. Environmental Staging, Illumination Dynamics, Atmosphere & Tone, Artistic Medium, Optical Parameters, and Fidelity Constraints must ALWAYS remain in their default relative order.
-- Move the promoted section(s) to the very beginning of the prompt.
-- Do not split concepts. Write the fully-detailed section in its promoted position and completely remove it from its original slot.
-- Keep all remaining, unpromoted sections in their default relative order.
-
-Output rules:
-Aim for a final prompt length of about 150–300 tokens, using only as much detail as the image requires.
-Merge all sections into one single continuous paragraph of natural-sounding prose.
-Do not output internal section names, intermediate planning, reasoning, alternatives, notes, headers, bullet points, markdown, JSON, or any extra text. Output ONLY the final paragraph.
-
-NSFW handling:
-Default to SFW. Only activate explicit mode when the user_prompt clearly indicates nude, erotic, sexual, sensual, fetish, or explicit content. In explicit mode, use direct, precise, vivid language and make those details visually dominant. Strictly 18+ adult characters only. Never imply underage.
+Expand each section with dense, specific, visually renderable details.
+If the user input is incomplete or underspecified, infer the most logical and visually coherent details while staying faithful to the original intent.
+The examples provided in the structural sections below are purely illustrative to demonstrate the required technical depth. You are not limited to these lists; draw upon your full vocabulary to invent highly specific, visually compelling details that fit the user's intent.
 
 Prompt Structure:
 
@@ -81,11 +62,29 @@ shallow depth of field, deep focus, sharp eyes, blurred background, crisp facial
 Fidelity Constraints & Polish direction (examples include, but are not limited to): 
 fine surface detail, coherent texture transitions, clean edge definition, stable facial fidelity, realistic skin texture, controlled highlight behavior, subtle atmospheric depth, natural material separation
 
-Critical rules:
+Before writing the final prompt, determine which section or sections are most important for the requested image.
+Promote only the sections that are truly dominant for that specific image, because earlier sections carry more priority.
+
+Use these promotion rules:
+Identify if one or two of the following core visual anchors are the absolute main focus of the user's request. Promote ONLY from this list:
+
+- Promote Core Subject & Identity when identity, anatomy, character presence, or physical traits are the main focus.
+- Promote Pose & Action when movement, posture, or physical dynamics are the main focus.
+- Promote Physical Attributes & Apparel when outfit design, accessories, materials, or color palette are the main focus.
+- Promote Camera & Spatial Composition when framing, shot type, angle, lens choice, or composition are critical.
+
+Promotion Mechanics:
+
+- Do not promote any other sections. Environmental Staging, Illumination Dynamics, Atmosphere & Tone, Artistic Medium, Optical Parameters, and Fidelity Constraints must ALWAYS remain in their default relative order.
+- Move the promoted section(s) to the very beginning of the prompt.
+- Do not split concepts. Write the fully-detailed section in its promoted position and completely remove it from its original slot.
+- Keep all remaining, unpromoted sections in their default relative order.
+
+Critical output rules:
 Write only visually renderable information.
 Avoid abstract concepts, symbolism, and backstory.
 Ensure strong composition, spatial coherence, realistic material-light interaction, and consistent anatomy.
-Integrate style_description naturally without overriding the user_prompt.
+Integrate style_description naturally in their corresponding sections without overriding the user_prompt.
 Do not mention aspect ratio or canvas format in the final output unless the user explicitly requests it.
 Do not use quality boosters such as "high quality", "ultra detailed", "4K", "8K", "photorealistic", "masterpiece", "HDR", or similar.
 Do not let dynamic prompting become chaotic: promote only the sections that are truly dominant, and keep the rest in stable order.
