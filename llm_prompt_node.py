@@ -1591,6 +1591,18 @@ class _LLMRunner:
                 "No preface, no explanations, no analysis, no JSON, no markdown fences, and no </think>.\n"
                 "Do not write planning steps (no 'First', 'Next', 'Then') and do not use first-person ('I', 'we')."
             )
+            # Authoritative positive/negative delimiter contract. Appended LAST so
+            # it overrides any pipe instruction a preset may carry. Labelled
+            # markers survive far better than a bare '|'; the parser strips them
+            # so no '[POSITIVE]'/'[NEGATIVE]' text ever reaches the outputs.
+            if split_output:
+                sys_prompt += (
+                    "\n\nIf your instructions produce a NEGATIVE prompt, format your entire "
+                    "answer EXACTLY like this, each marker on its own line:\n"
+                    "[POSITIVE]\n<the full positive prompt>\n[NEGATIVE]\n<the full negative prompt>\n"
+                    "Write nothing before [POSITIVE] and nothing after the negative prompt. "
+                    "If there is no negative prompt, write [POSITIVE] then your prompt and stop."
+                )
 
         # Qwen 3.5 thinking suppression: /no_think is the official control token
         # recognized by Qwen 3.5's embedded chat template.
@@ -1692,12 +1704,9 @@ class _LLMRunner:
                 frequency_penalty=frequency_penalty,
             )
 
-            # Normalize labeled positive/negative output to pipe format for the
-            # Prompt Splitter (no-op when | already present or no negative label).
-            # Local models usually follow the pipe instruction, but this is a
-            # cheap safety net matching the API node's behavior.
-            if output_format == "text":
-                result = normalize_prompt_separator(result)
+            # Positive/negative parsing is now fully handled by the hardened
+            # split_positive_negative() below (markers -> labels -> pipe -> JSON),
+            # so the old normalize-to-pipe pre-pass is no longer needed.
 
             # NOTE: Qwen 3.5 cache-clear was tried here but caused mixed output
             # when the _ctx.memory_clear() call silently failed on some
