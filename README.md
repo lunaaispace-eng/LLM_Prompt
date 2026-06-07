@@ -261,10 +261,22 @@ For single-output presets (no negative), set `split_output` **OFF** — the mark
 
 ## Credits
 
-- **JamePeng** for the continuously-updated [`llama-cpp-python` fork](https://github.com/JamePeng/llama-cpp-python) that exposes Gemma-4 / Qwen-3.5 / Qwen-3-VL chat handlers — this node is built on top of it.
-- **Duffy Nodes** for the multimodal-analyzer reference architecture that informed the V3 schema migration and the `reference_image` / audio input design.
-- **Unsloth** for the published Qwen 3/3.5/3.6 sampling recommendations baked into `auto_settings`.
-- **Google** for the Gemma 4 official sampling defaults.
+### Special thanks — [Duffy Nodes](https://github.com/elmarkrueger/Duffy_Nodes)
+
+A real shout-out to **Duffy**. His multimodal-analyzer nodes were the reference architecture for the biggest jump in this node's reliability. The pieces of his code that fixed real problems here:
+
+- **Handler-level thinking control** — passing `enable_thinking` / `force_reasoning` / `preserve_thinking` directly to the chat handler at load time, instead of fighting the model at inference time. This single insight let us retire a tangled stack of `chat_template_kwargs` + custom no-think ChatML templates + `/no_think` injection + post-hoc regex stripping. Thinking-off is now reliable across Qwen and Gemma.
+- **The modern handler chain** (`Gemma4ChatHandler`, `Qwen35ChatHandler`, `Qwen3VLChatHandler`) — adopted directly from his node, with graceful fallback to `Gemma3ChatHandler` / `Qwen25VLChatHandler` / text-only when a handler can't construct (e.g. the Gemma-4 QAT mmproj breakage).
+- **The V3 schema architecture and module-level model cache pattern** — turned this from a branchy V1 instance-state node into a clean stateless V3 node with adapter-style dispatch.
+- **The `reference_image` and audio input design** — both inputs and the labelled multi-image content order came from his analyzer nodes.
+
+If you like this node, please go star his repo too. None of this would be where it is without his code as the reference.
+
+### Other credits
+
+- **[JamePeng](https://github.com/JamePeng/llama-cpp-python)** for the continuously-updated `llama-cpp-python` fork that exposes the Gemma-4 / Qwen-3.5 / Qwen-3-VL chat handlers in the first place — this node is built on top of it.
+- **Unsloth** for the published Qwen 3 / 3.5 / 3.6 sampling recommendations baked into `auto_settings`.
+- **Google** for the Gemma 3 / 4 official sampling defaults.
 
 ---
 
