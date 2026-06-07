@@ -175,6 +175,21 @@ def _drop_preamble(text: str) -> str:
     return "\n".join(lines[keep_from:]).strip()
 
 
+def split_positive_negative(text: str, do_split: bool) -> tuple[str, str]:
+    """Split a 'positive|negative' string into (positive, negative).
+
+    When do_split is True and a pipe is present, splits on the FIRST pipe and
+    strips both halves. When do_split is False, or there's no pipe (single-output
+    prompts like Flux/Chroma that produce no negative), returns (full_text, "")
+    so the positive output always carries the prompt and negative stays empty.
+    """
+    text = (text or "").strip()
+    if do_split and "|" in text:
+        pos, _, neg = text.partition("|")
+        return pos.strip(), neg.strip()
+    return text, ""
+
+
 def normalize_prompt_separator(text: str) -> str:
     """Normalize labeled positive/negative sections to pipe-separated format.
 

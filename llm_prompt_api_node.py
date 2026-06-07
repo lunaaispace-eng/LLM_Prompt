@@ -38,7 +38,7 @@ from .llm_prompt_node import (
     _tensor_to_base64_png,
     _sample_video_frames,
 )
-from .output_cleaner import OutputCleanConfig, clean_model_output, normalize_prompt_separator
+from .output_cleaner import OutputCleanConfig, clean_model_output, normalize_prompt_separator, split_positive_negative
 
 
 # ---------------------------------------------------------------------------
@@ -967,8 +967,8 @@ class LLMPromptAPINode:
     Zero llama-cpp-python dependency. Just HTTP.
     """
 
-    RETURN_TYPES = ("STRING",)
-    RETURN_NAMES = ("PROMPT",)
+    RETURN_TYPES = ("STRING", "STRING")
+    RETURN_NAMES = ("positive", "negative")
     FUNCTION = "generate"
     CATEGORY = "Luna/LLM"
 
@@ -1061,6 +1061,10 @@ class LLMPromptAPINode:
                 "output_format": (["text", "json", "list"], {
                     "default": "text",
                     "tooltip": "text = plain prompt paragraph. json = forced JSON output via response_format (server-side enforced). list = numbered multi-scene list (for LTX video tracks).",
+                }),
+                "split_output": ("BOOLEAN", {
+                    "default": True,
+                    "tooltip": "When ON, splits the model's 'positive|negative' output on the | into the two outputs (positive / negative) — no external splitter needed. When OFF, the full text goes to 'positive' and 'negative' is empty. For prompts with no negative (Flux/Chroma), positive gets the whole prompt either way.",
                 }),
                 "max_tokens": ("INT", {
                     "default": 4096,
@@ -1183,6 +1187,7 @@ class LLMPromptAPINode:
         custom_system_prompt: str,
         user_prompt: str,
         output_format: str,
+        split_output: bool,
         max_tokens: int,
         temperature: float,
         top_p: float,
@@ -1439,7 +1444,10 @@ class LLMPromptAPINode:
         else:
             cleaned = raw
 
-        return (cleaned,)
+        # Split 'positive|negative' into the two outputs (or full text on
+        # positive + empty negative when split_output is off / no pipe).
+        positive, negative = split_positive_negative(cleaned, split_output)
+        return (positive, negative)
 
 
 # ---------------------------------------------------------------------------
