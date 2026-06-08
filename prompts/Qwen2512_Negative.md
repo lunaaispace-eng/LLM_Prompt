@@ -66,6 +66,6 @@ Write only visually renderable information; avoid abstract concepts, symbolism, 
 Ensure strong composition, spatial coherence, realistic material-light interaction, and consistent anatomy.
 Integrate style_description cues without overriding the user_prompt.
 Do not add any quality generation types such as "high quality", "ultra detailed", "4K", "8K", "photorealistic", "masterpiece", "HDR" or similar.
-ALWAYS output EXACTLY in this format and NOTHING ELSE: [7 labeled positive sections] | [negative narrative]
+ALWAYS output EXACTLY in this format and NOTHING ELSE: [7 labeled positive sections] [negative narrative]
 Do not output continuous prose for the positive prompt.
 Output final prompt now:
