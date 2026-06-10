@@ -103,14 +103,18 @@ function attachButton(node) {
     btn.serialize = false;
     node.__advBtn = btn;
 
-    // Move button to sit just above the first advanced widget
-    const bi = node.widgets.indexOf(btn);
-    if (bi > -1) {
-        node.widgets.splice(bi, 1);
-        let firstAdv = node.widgets.findIndex(w => isAdvancedWidget(w));
-        if (firstAdv < 0) firstAdv = node.widgets.length;
-        node.widgets.splice(firstAdv, 0, btn);
-    }
+    // CRITICAL: do NOT splice the button into the middle of node.widgets.
+    // ComfyUI's widgets_values array is positional, and an earlier version
+    // that spliced the button between the basic and advanced widgets shifted
+    // every advanced widget's position by one. ComfyUI's tab-switch save/load
+    // path doesn't fully honour `serialize: false` on re-deserialise, so
+    // values from widgets_values would land in the wrong widgets (showing up
+    // as "Value not in list", "smaller than min", or NoneType conversion
+    // errors). Leaving the button at the end of node.widgets keeps every
+    // existing widget at its original index — values stay correctly aligned
+    // through any number of tab switches. Visual trade-off: the button
+    // appears at the bottom of the node instead of above the advanced
+    // widgets.
 
     applyAdvanced(node, node.properties.advancedShown);
 }
