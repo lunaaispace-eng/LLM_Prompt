@@ -2,7 +2,7 @@
 
 Nodes shipped:
   - LLMPrompt         : local GGUF inference via llama-cpp-python
-  - LLMPromptAPI      : OpenAI-compatible HTTP — LM Studio, Gemini, Grok,
+  - LLMPromptAPI      : OpenAI-compatible HTTP — Gemini (default), Grok,
                         OpenAI, OpenRouter, or any custom endpoint.
   - Grok Imagine (API Key) : image/video generation via xAI directly using your
                         own XAI_API_KEY (no ComfyUI credits, no proxy).

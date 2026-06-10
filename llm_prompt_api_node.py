@@ -1,15 +1,14 @@
 """LLM Prompt (API) — ComfyUI node for prompt generation via remote/local OpenAI-compatible endpoints.
 
 Supported providers:
-  - LM Studio (local server)
-  - Gemini (Google's OpenAI-compatible endpoint)
+  - Gemini (Google) — native API, default provider
   - Grok (xAI)
   - Custom (arbitrary OpenAI-compatible endpoint)
 
 Design principles:
   - No GGUF loading, no chat template hell, no KV cache mgmt — the upstream
     server handles all of that.
-  - Live-query /v1/models when possible (LM Studio, Gemini, Custom).
+  - Live-query /v1/models when possible (Gemini, Custom).
   - Grok has no /models endpoint per docs, so we keep a small curated list.
   - Per-provider parameter sanitization — strip params the provider rejects.
   - Cache-friendly prompt assembly: stable parts (style, canvas) first,
@@ -46,13 +45,6 @@ from .output_cleaner import OutputCleanConfig, clean_model_output, normalize_pro
 # ---------------------------------------------------------------------------
 
 PROVIDERS = {
-    "LM Studio (local)": {
-        "base_url": "http://localhost:1234/v1",
-        "env_var": None,
-        "needs_auth": False,
-        "live_models": True,
-        "fallback_models": ["<no model loaded — load one in LM Studio>"],
-    },
     "Gemini": {
         # NATIVE Gemini REST API — NOT the OpenAI-compat layer. The compat layer
         # silently drops Gemini-specific params (thinking_budget, safety, top_k),
@@ -434,10 +426,6 @@ def _sanitize_payload_for_provider(provider: str, payload: dict) -> dict:
         p.pop("min_p", None)
         p.pop("repetition_penalty", None)
         p.pop("repeat_penalty", None)
-
-    elif provider == "LM Studio (local)":
-        # LM Studio accepts everything llama.cpp-style; nothing to strip
-        pass
 
     elif provider == "Custom":
         # Unknown server — be conservative, send everything
@@ -907,40 +895,6 @@ def _send_chat_completion(
 
 
 # ---------------------------------------------------------------------------
-# LM Studio unload endpoint (called from the JS button)
-# ---------------------------------------------------------------------------
-
-def _unload_lm_studio_model(base_url: str, model_name: str = "") -> tuple[bool, str]:
-    """Best-effort unload via LM Studio's REST API. Returns (success, message)."""
-    if not base_url:
-        return False, "No base URL"
-
-    # Strip /v1 if present, then try LM Studio's native unload endpoint
-    root = base_url.replace("/v1", "").rstrip("/")
-    candidates = [
-        (f"{root}/api/v0/models/unload", "POST"),
-    ]
-    if model_name:
-        candidates.append((f"{root}/api/v0/models/{model_name}/unload", "POST"))
-
-    for url, method in candidates:
-        body = json.dumps({"identifier": model_name} if model_name else {}).encode("utf-8")
-        req = urllib.request.Request(url, data=body, method=method)
-        req.add_header("Content-Type", "application/json")
-        try:
-            with urllib.request.urlopen(req, timeout=5.0) as resp:
-                if 200 <= resp.status < 300:
-                    return True, f"Unloaded via {url}"
-        except urllib.error.HTTPError as e:
-            if e.code in (404, 405):
-                continue  # try next candidate
-            return False, f"HTTP {e.code}: {e.reason}"
-        except Exception as e:
-            return False, str(e)
-    return False, "No unload endpoint responded (LM Studio's REST API may not be enabled)"
-
-
-# ---------------------------------------------------------------------------
 # Image / video message builders
 # ---------------------------------------------------------------------------
 
@@ -962,7 +916,7 @@ def _build_multimodal_user_content(text: str, images_b64: list[str]) -> list[dic
 # ---------------------------------------------------------------------------
 
 class LLMPromptAPINode:
-    """Prompt generation via OpenAI-compatible API (LM Studio, Gemini, Grok, Custom).
+    """Prompt generation via OpenAI-compatible API (Gemini, Grok, Custom).
 
     Zero llama-cpp-python dependency. Just HTTP.
     """
@@ -986,8 +940,8 @@ class LLMPromptAPINode:
         # server-side. The JS extension changes the *visible* options when the
         # user picks a provider, but the validator uses what's returned here.
         # So we must return a SUPERSET of all possible model names across all
-        # providers — otherwise picking e.g. a Gemini model fails validation
-        # because Gemini models aren't in LM Studio's list.
+        # providers — otherwise picking e.g. a Grok model fails validation
+        # because it isn't in Gemini's list.
         all_models: list[str] = []
         for prov_name, prov_cfg in PROVIDERS.items():
             all_models.extend(prov_cfg.get("fallback_models") or [])
@@ -1025,15 +979,15 @@ class LLMPromptAPINode:
             "required": {
                 "provider": (providers, {
                     "default": default_provider,
-                    "tooltip": "Which backend to call. LM Studio = local server on port 1234. Gemini/Grok = cloud APIs (need API key in env var or override field). Custom = arbitrary OpenAI-compatible endpoint.",
+                    "tooltip": "Which backend to call. Gemini / Grok = cloud APIs (need an API key in an env var or a .env at the ComfyUI root). Custom = any OpenAI-compatible endpoint (set server_url).",
                 }),
                 "model_name": (model_options, {
-                    "tooltip": "Available models. LM Studio shows what you have loaded. Gemini fetches your account's accessible models. Grok shows the curated list (no /models endpoint). Refreshes when provider changes.",
+                    "tooltip": "Available models. Gemini fetches your account's accessible models. Grok shows the curated list (no /models endpoint). Refreshes when the provider changes.",
                 }),
                 "server_url": ("STRING", {
                     "default": "",
                     "multiline": False,
-                    "tooltip": "Override the provider's default URL. Required for Custom provider. Leave empty to use the provider default (e.g. http://localhost:1234/v1 for LM Studio).",
+                    "tooltip": "Override the provider's default URL. Required for the Custom provider. Leave empty to use the provider default.",
                 }),
                 # NO api_key widget by design. Widget values are saved to
                 # workflow JSON, which means any shared/exported workflow would
@@ -1118,7 +1072,7 @@ class LLMPromptAPINode:
                     "min": 0.5,
                     "max": 2.0,
                     "step": 0.05,
-                    "tooltip": "Repetition penalty. 1.0 = disabled (Google recommendation). Mostly meaningful for LM Studio; cloud APIs typically ignore or reject it.",
+                    "tooltip": "Repetition penalty. 1.0 = disabled (Google recommendation). Many cloud APIs ignore or reject it.",
                 }),
                 "seed": ("INT", {
                     "default": 0,
@@ -1143,15 +1097,7 @@ class LLMPromptAPINode:
                 }),
                 "disable_thinking": ("BOOLEAN", {
                     "default": True,
-                    "tooltip": "Strips any <think> reasoning from the OUTPUT as a safety net. NOTE: for LM Studio, disable thinking in LM STUDIO itself (edit the model's jinja template to force no-think, or use its reasoning toggle) — the node deliberately does NOT send chat_template_kwargs, because that makes LM Studio ignore your template edit and re-enable thinking. Gemini uses gemini_thinking_budget instead.",
-                }),
-                "keep_model_loaded": ("BOOLEAN", {
-                    "default": True,
-                    "tooltip": "LM Studio only. When TRUE, model stays loaded in LM Studio's VRAM between runs (faster subsequent runs). When FALSE, requests LM Studio's JIT TTL behavior (model may auto-unload after idle period). Silently ignored for cloud providers.",
-                }),
-                "unload_after_run": ("BOOLEAN", {
-                    "default": False,
-                    "tooltip": "LM Studio only. After THIS generation finishes, send an explicit unload request to free VRAM immediately. Use when you're done with the model and want to load something else. Silently ignored for cloud providers.",
+                    "tooltip": "Strips any <think> reasoning from the OUTPUT as a safety net. For Gemini, set gemini_thinking_budget to 0 to disable thinking at the source.",
                 }),
                 "timeout_seconds": ("INT", {
                     "default": 120,
@@ -1201,8 +1147,6 @@ class LLMPromptAPINode:
         gemini_thinking_budget: int,
         enable_caching: bool,
         disable_thinking: bool,
-        keep_model_loaded: bool,
-        unload_after_run: bool,
         timeout_seconds: int,
         style: str = "",
         width: int = 0,
@@ -1366,65 +1310,48 @@ class LLMPromptAPINode:
         if stop_sequences and stop_sequences.strip():
             stops = [s.strip() for s in stop_sequences.split(",") if s.strip()]
 
-        # NOTE: we intentionally do NOT send chat_template_kwargs to LM Studio.
-        # When LM Studio receives that param it re-renders from the model's
-        # ORIGINAL embedded template — discarding any no-think edit you made to
-        # the template in LM Studio — which silently re-enables thinking. The
-        # reliable way to disable thinking for LM Studio is the template edit (or
-        # reasoning toggle) inside LM Studio itself; the node must not overwrite
-        # it. Stray thinking that slips through is still stripped from the output.
-        lm_extra_body: dict | None = None
-
         # Send the request — route Gemini through its native API for full
         # feature support (thinking_budget, safety, top_k, caching). Other
         # providers go through the OpenAI-compatible /v1/chat/completions path.
-        try:
-            if cfg.get("native_protocol") == "gemini":
-                # Caching: create or reuse a cached content resource for the stable prefix
-                cache_name: str | None = None
-                if enable_caching and resolved_key and sys_prompt and stable_user_text:
-                    cache_name = _gemini_create_cached_content(
-                        api_key=resolved_key,
-                        model=model_name,
-                        system_text=sys_prompt,
-                        stable_user_text=stable_user_text,
-                    )
-                    if cache_name:
-                        print(f"[LLM_Prompt_API] Using Gemini cached content: {cache_name}")
+        if cfg.get("native_protocol") == "gemini":
+            # Caching: create or reuse a cached content resource for the stable prefix
+            cache_name: str | None = None
+            if enable_caching and resolved_key and sys_prompt and stable_user_text:
+                cache_name = _gemini_create_cached_content(
+                    api_key=resolved_key,
+                    model=model_name,
+                    system_text=sys_prompt,
+                    stable_user_text=stable_user_text,
+                )
+                if cache_name:
+                    print(f"[LLM_Prompt_API] Using Gemini cached content: {cache_name}")
 
-                raw = _send_gemini_native(
-                    base_url=base_url,
-                    api_key=resolved_key,
-                    model=model_name,
-                    messages=messages,
-                    sampling=sampling,
-                    output_format=output_format,
-                    stop_sequences=stops,
-                    thinking_budget=gemini_thinking_budget,
-                    cached_content_name=cache_name,
-                    timeout=float(timeout_seconds),
-                )
-            else:
-                raw = _send_chat_completion(
-                    provider=provider,
-                    base_url=base_url,
-                    api_key=resolved_key,
-                    model=model_name,
-                    messages=messages,
-                    sampling=sampling,
-                    output_format=output_format,
-                    stop_sequences=stops,
-                    timeout=float(timeout_seconds),
-                    extra_body=lm_extra_body,
-                    response_format_override=grok_pair_schema,
-                )
-        finally:
-            if unload_after_run and provider == "LM Studio (local)":
-                ok, msg = _unload_lm_studio_model(base_url, model_name)
-                if ok:
-                    print(f"[LLM_Prompt_API] {msg}")
-                else:
-                    print(f"[LLM_Prompt_API] Unload-after-run failed: {msg}")
+            raw = _send_gemini_native(
+                base_url=base_url,
+                api_key=resolved_key,
+                model=model_name,
+                messages=messages,
+                sampling=sampling,
+                output_format=output_format,
+                stop_sequences=stops,
+                thinking_budget=gemini_thinking_budget,
+                cached_content_name=cache_name,
+                timeout=float(timeout_seconds),
+            )
+        else:
+            raw = _send_chat_completion(
+                provider=provider,
+                base_url=base_url,
+                api_key=resolved_key,
+                model=model_name,
+                messages=messages,
+                sampling=sampling,
+                output_format=output_format,
+                stop_sequences=stops,
+                timeout=float(timeout_seconds),
+                extra_body=None,
+                response_format_override=grok_pair_schema,
+            )
 
         if grok_pair_schema:
             # Grok returned a guaranteed JSON object — assemble positive|negative directly.
@@ -1448,41 +1375,6 @@ class LLMPromptAPINode:
         # positive + empty negative when split_output is off / no pipe).
         positive, negative = split_positive_negative(cleaned, split_output)
         return (positive, negative)
-
-
-# ---------------------------------------------------------------------------
-# HTTP route for the LM Studio "Unload Now" JS button
-# ---------------------------------------------------------------------------
-
-def _register_routes():
-    """Register a server-side route the JS button calls to trigger an unload.
-
-    Doing this server-side (instead of having JS hit LM Studio directly) avoids
-    CORS issues when ComfyUI runs on a different origin.
-    """
-    try:
-        from server import PromptServer  # type: ignore
-    except Exception:
-        return
-
-    try:
-        from aiohttp import web  # type: ignore
-    except Exception:
-        return
-
-    @PromptServer.instance.routes.post("/llm_prompt_api/lmstudio_unload")
-    async def _route_unload(request):
-        try:
-            data = await request.json()
-        except Exception:
-            data = {}
-        base_url = (data.get("base_url") or "http://localhost:1234/v1").strip()
-        model_name = (data.get("model_name") or "").strip()
-        ok, msg = _unload_lm_studio_model(base_url, model_name)
-        return web.json_response({"ok": bool(ok), "message": str(msg)})
-
-
-_register_routes()
 
 
 # ---------------------------------------------------------------------------
