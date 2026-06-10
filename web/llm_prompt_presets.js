@@ -197,11 +197,17 @@ function applyPreset(node, presetKey) {
 
 function hookModelWidget(node) {
     const w = node.widgets?.find((widget) => widget.name === "model_name");
-    if (!w || w._presetHooked) return;
-    w._presetHooked = true;
+    if (!w) return;
+    // Self-healing: re-wrap whenever OUR wrapper isn't the active callback.
+    // The API node replaces the model widget's callback when the provider /
+    // model options rebuild (provider switch, live /models refresh), which
+    // silently dropped our preset hook. The old one-time `_presetHooked` flag
+    // never re-fired in that case (you had to switch category and back). An
+    // identity check makes re-hooking reliable.
+    if (w.callback && w.callback.__llmPresetWrapper) return;
 
     const orig = w.callback;
-    w.callback = function (value) {
+    const wrapper = function (value) {
         if (typeof orig === "function") {
             try { orig.apply(this, arguments); } catch (e) { /* ignore */ }
         }
@@ -209,6 +215,34 @@ function hookModelWidget(node) {
         if (family) {
             applyPreset(node, family);
         }
+    };
+    wrapper.__llmPresetWrapper = true;
+    w.callback = wrapper;
+}
+
+// API node only: when the provider changes the model options rebuild, so
+// re-hook the model widget AND immediately apply the preset for whatever model
+// is now selected — no more "pick another category and come back" dance.
+function hookProviderWidget(node) {
+    const pw = node.widgets?.find((widget) => widget.name === "provider");
+    if (!pw || pw.__llmProviderHooked) return;
+    pw.__llmProviderHooked = true;
+
+    const orig = pw.callback;
+    pw.callback = function (value) {
+        if (typeof orig === "function") {
+            try { orig.apply(this, arguments); } catch (e) { /* ignore */ }
+        }
+        // Model options rebuild asynchronously after a provider switch; re-hook
+        // and apply on the next tick once the new model value has settled.
+        setTimeout(() => {
+            hookModelWidget(node);
+            const mw = node.widgets?.find((widget) => widget.name === "model_name");
+            if (mw) {
+                const family = detectFamily(mw.value);
+                if (family) applyPreset(node, family);
+            }
+        }, 200);
     };
 }
 
@@ -222,15 +256,16 @@ app.registerExtension({
         const onCreated = nodeType.prototype.onNodeCreated;
         nodeType.prototype.onNodeCreated = function () {
             const r = onCreated?.apply(this, arguments);
-            hookModelWidget(this);
-
-            // Also re-hook whenever the model_name widget gets its options refreshed
-            // (the API node rebuilds options when the provider changes, but the
-            // callback may be replaced). Watching with a small interval is the
-            // cheapest reliable approach since ComfyUI doesn't fire an event.
             const node = this;
-            setTimeout(() => hookModelWidget(node), 100);
-            setInterval(() => hookModelWidget(node), 2000);
+            hookModelWidget(node);
+            hookProviderWidget(node);
+
+            // Backstop: re-assert both hooks shortly after creation (widgets may
+            // still be building) and periodically (cheap identity checks bail
+            // immediately when already hooked). Self-healing if anything
+            // replaces a callback later.
+            setTimeout(() => { hookModelWidget(node); hookProviderWidget(node); }, 150);
+            setInterval(() => { hookModelWidget(node); hookProviderWidget(node); }, 1500);
 
             return r;
         };

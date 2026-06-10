@@ -9,7 +9,7 @@ Local GGUF and cloud-API prompt-writing nodes for ComfyUI, with model-family aut
 | Node | What it does |
 |---|---|
 | **LLM Prompt** | Local prompt generation via GGUF vision/text models (llama-cpp). Qwen 2.5/3/3.5/3.6 and Gemma 3/4 with automatic family detection. Vision + video + audio inputs. |
-| **LLM Prompt (API)** | Cloud prompt generation via OpenAI-compatible endpoints. LM Studio, Google Gemini (native), xAI Grok, OpenRouter, or any custom endpoint. |
+| **LLM Prompt (API)** | Cloud prompt generation via OpenAI-compatible endpoints. Google Gemini (native, default), xAI Grok, OpenRouter, or any custom endpoint. |
 | **Grok Imagine (API Key)** | Image and video generation via xAI's Grok Imagine using your own `XAI_API_KEY` (no ComfyUI credits, no proxy). |
 
 All three share the same `prompts/*.md` preset library and the same bulletproof positive/negative output split.
@@ -160,8 +160,7 @@ Built-in providers:
 
 | Provider | Endpoint | Auth env var |
 |---|---|---|
-| **LM Studio (local)** | `http://localhost:1234/v1` | none |
-| **Gemini** | Native REST (`generativelanguage.googleapis.com`) | `GEMINI_API_KEY` / `GOOGLE_API_KEY` / `GOOGLE_GEMINI_API_KEY` |
+| **Gemini** (default) | Native REST (`generativelanguage.googleapis.com`) | `GEMINI_API_KEY` / `GOOGLE_API_KEY` / `GOOGLE_GEMINI_API_KEY` |
 | **Grok (xAI)** | `https://api.x.ai/v1` | `XAI_API_KEY` / `GROK_API_KEY` |
 | **Custom** | You supply `server_url` | optional `api_key` widget |
 

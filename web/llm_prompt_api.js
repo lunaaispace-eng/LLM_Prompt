@@ -2,23 +2,15 @@
 //
 // Responsibilities:
 //   - Refresh the model_name dropdown when provider / server_url change
-//   - Live-query /v1/models for LM Studio, Gemini, Custom (cached 60s)
+//   - Live-query /v1/models for Gemini / Custom (cached 60s)
 //   - Apply capability filter (text / vision / multimodal) before showing
-//   - Show "Unload Now" button only when LM Studio is selected
-//   - Health-check indicator (green/red dot) for LM Studio reachability
+//   - Show/hide Gemini-only widgets (thinking budget, caching)
 
 import { app } from "/scripts/app.js";
 
 // Mirror of the Python-side PROVIDERS table — just enough for live querying.
 // Keeps the JS independent of the backend for client-side decisions.
 const PROVIDERS = {
-    "LM Studio (local)": {
-        defaultUrl: "http://localhost:1234/v1",
-        liveModels: true,
-        needsAuth: false,
-        envVar: null,
-        fallback: ["<no model loaded — load one in LM Studio>"],
-    },
     "Gemini": {
         defaultUrl: "https://generativelanguage.googleapis.com/v1beta/openai",
         liveModels: true,
@@ -171,32 +163,6 @@ async function refreshModels(node) {
     );
 }
 
-// LM Studio health check — pings /v1/models with a tiny timeout
-async function checkLMStudioHealth(baseUrl) {
-    try {
-        const resp = await fetch(baseUrl.replace(/\/$/, "") + "/models", {
-            method: "GET",
-            signal: AbortSignal.timeout(1500),
-        });
-        return resp.ok;
-    } catch (e) {
-        return false;
-    }
-}
-
-// Add a small text widget that shows the LM Studio status
-function addHealthIndicator(node) {
-    // We use a non-interactive label-style widget — just for display
-    const w = node.addCustomWidget?.({
-        name: "lm_studio_status",
-        type: "info",
-        value: "",
-        draw(ctx, node, widget_width, y, widget_height) {
-            // ComfyUI doesn't need this drawn — we'll update via title overlay
-        },
-    });
-}
-
 // Show/hide a widget by manipulating its computeSize / type. ComfyUI doesn't
 // have a first-class "hide" API for built-in widgets, but setting computeSize
 // to return [0, -4] effectively collapses the widget row.
@@ -221,70 +187,11 @@ function setWidgetVisible(widget, visible) {
     // Otherwise: already in the desired state, do nothing
 }
 
-// Add a JS-side "Unload Now" button, only visible when LM Studio is the provider.
-function addUnloadButton(node) {
-    const button = node.addWidget("button", "Unload Now (LM Studio)", null, async () => {
-        const providerW = node.widgets?.find((w) => w.name === "provider");
-        const urlW = node.widgets?.find((w) => w.name === "server_url");
-        const modelW = node.widgets?.find((w) => w.name === "model_name");
-
-        if (providerW?.value !== "LM Studio (local)") {
-            alert("Unload only works for LM Studio.");
-            return;
-        }
-
-        const baseUrl = (urlW?.value?.trim() || PROVIDERS["LM Studio (local)"].defaultUrl).replace(/\/$/, "");
-        const modelName = modelW?.value || "";
-
-        try {
-            const resp = await fetch("/llm_prompt_api/lmstudio_unload", {
-                method: "POST",
-                headers: { "Content-Type": "application/json" },
-                body: JSON.stringify({ base_url: baseUrl, model_name: modelName }),
-            });
-            const result = await resp.json();
-            if (result.ok) {
-                console.log(`[LLM_Prompt_API] ${result.message}`);
-                // Briefly flash a notification — ComfyUI's app.ui.dialog
-                if (app.ui?.dialog?.show) {
-                    app.ui.dialog.show(`Unloaded: ${result.message}`);
-                    setTimeout(() => app.ui.dialog.close?.(), 2000);
-                }
-            } else {
-                console.warn(`[LLM_Prompt_API] Unload failed: ${result.message}`);
-                alert(`Unload failed:\n${result.message}`);
-            }
-        } catch (e) {
-            console.error("[LLM_Prompt_API] Unload request failed:", e);
-            alert(`Unload request failed: ${e.message}`);
-        }
-    });
-    button._isUnloadButton = true;
-    return button;
-}
-
 function updateProviderSpecificVisibility(node) {
     const providerW = node.widgets?.find((w) => w.name === "provider");
-    const provider = providerW?.value;
-    const isLM = provider === "LM Studio (local)";
-    const isGemini = provider === "Gemini";
+    const isGemini = providerW?.value === "Gemini";
 
-    // Show/hide the Unload Now button
-    const unloadBtn = node.widgets?.find((w) => w._isUnloadButton);
-    setWidgetVisible(unloadBtn, isLM);
-
-    // LM-Studio-relevant toggles: ALWAYS visible. Previously these were hidden
-    // for non-LM providers, but the collapse/restore dance in setWidgetVisible
-    // could leave them stuck hidden even on LM Studio (the bug: "Unload Now"
-    // button showed but unload_after_run / keep_model_loaded toggles vanished).
-    // They're harmless on cloud providers — the backend ignores them — so just
-    // keep them shown rather than relying on fragile show/hide state.
-    const keepLoaded = node.widgets?.find((w) => w.name === "keep_model_loaded");
-    setWidgetVisible(keepLoaded, true);
-    const unloadAfterRun = node.widgets?.find((w) => w.name === "unload_after_run");
-    setWidgetVisible(unloadAfterRun, true);
-
-    // Show/hide Gemini-only widgets
+    // Gemini-only widgets: visible only when Gemini is the provider.
     const thinkingBudget = node.widgets?.find((w) => w.name === "gemini_thinking_budget");
     setWidgetVisible(thinkingBudget, isGemini);
     const enableCaching = node.widgets?.find((w) => w.name === "enable_caching");
@@ -303,9 +210,6 @@ app.registerExtension({
         nodeType.prototype.onNodeCreated = function () {
             const r = onCreated?.apply(this, arguments);
             const node = this;
-
-            // Add the Unload Now button
-            addUnloadButton(node);
 
             // Initial refresh — populate dropdown with the default provider's models
             refreshModels(node);
