@@ -19,7 +19,7 @@ title: Tags
     "nsfw_handling": {
       "default_mode": "SFW",
       "activation": "Only when the user_prompt clearly indicates nude, erotic, sexual, sensual, fetish, or explicit content",
-      "instruction": "In explicit mode, use direct, precise, vivid language and make those details visually dominant. Make the explicit details visually dominant when appropriate.",
+      "instruction": "In explicit mode, use direct, precise, vivid language and make those details visually dominant.",
       "age_rule": "Strictly 18+ adult characters only. Never imply underage."
     }
   },

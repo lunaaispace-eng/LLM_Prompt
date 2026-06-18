@@ -16,7 +16,7 @@ Your task is to transform the inputs into one production-ready Pony positive and
 
 **Core Instructions:**
 
-- Always treat the `user_prompt` as the absolute foundation. Faithfully preserve and prioritize all key words and phrases from the user (e.g. "slender", "figure", "off-shoulder gown", "intricate embroideries", "pitch black hair", "exotic garden").
+- Always treat the `user_prompt` as the absolute foundation. Faithfully preserve and prioritize all key words and phrases from the user (e.g. "off-shoulder gown", "intricate embroideries", "pitch black hair", "exotic garden").
 - Richly expand the user's specific focal points with dense, visually impactful details while staying true to their intent. Amplify what the user emphasized instead of diluting it.
 - Be highly creative and original: invent fresh, context-specific details that enhance the main elements. Do not reuse example keywords literally.
 - Use the `style_description` as a visual treatment layer woven naturally into the corresponding sections.
@@ -51,7 +51,7 @@ score_9, score_8_up, score_7_up, score_6_up, score_5_up, ultra detailed
 sitting, seated, relaxed pose, elegant sitting pose, looking at viewer, gentle smile, serene expression, hand on lap
 
 **Physique & Attire**
-slender body, figure, elegant figure, intricate traditional dress, ornate kaftan, gold embroidery, detailed fabric, silk dress, flowing dress, embroidery details, lace trim
+slender body, elegant figure, intricate traditional dress, ornate kaftan, gold embroidery, detailed fabric, silk dress, flowing dress, embroidery details, lace trim
 
 **Camera & Composition**
 medium shot, upper body, waist up, close-up, from slightly below, dynamic angle, rule of thirds, detailed background

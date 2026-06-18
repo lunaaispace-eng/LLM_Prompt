@@ -194,7 +194,7 @@ app.registerExtension({
         startSyncObserver();
     },
     async beforeRegisterNodeDef(nodeType, nodeData) {
-        if (nodeData.name !== "LLMPrompt") return;
+        if (nodeData.name !== "LLMPrompt" && nodeData.name !== "LLMPromptAPI") return;
 
         const onCreated = nodeType.prototype.onNodeCreated;
         nodeType.prototype.onNodeCreated = function () {

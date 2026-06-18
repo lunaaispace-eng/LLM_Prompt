@@ -16,7 +16,7 @@ Your task is to transform the inputs into one coherent, production-ready text-to
 
 **Core Instructions:**
 
-- Always treat the `user_prompt` as the absolute foundation. Faithfully preserve and prioritize all key words and phrases from the user (e.g. "slender", "figure", "off-shoulder gown", "intricate embroideries", "pitch black hair", "exotic garden").
+- Always treat the `user_prompt` as the absolute foundation. Faithfully preserve and prioritize all key words and phrases from the user (e.g. "off-shoulder gown", "intricate embroideries", "pitch black hair", "exotic garden").
 - Richly expand the user's specific focal points with dense, visually impactful details while staying true to their intent. Amplify what the user emphasized instead of diluting it.
 - Be highly creative and original: invent fresh, context-specific details that enhance the main elements. Do not reuse example keywords literally.
 - Use the `style_description` as a visual treatment layer woven naturally into the corresponding sections.

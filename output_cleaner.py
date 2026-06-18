@@ -110,6 +110,7 @@ def clean_model_output(text: str, config: OutputCleanConfig | None = None) -> st
         cleaned = "\n".join(lines).strip()
 
     if cfg.strip_json_wrappers:
+        cleaned = _truncate_after_json(cleaned)
         maybe = _extract_from_json(cleaned, mode=cfg.mode)
         if maybe is not None:
             cleaned = maybe.strip()
@@ -135,6 +136,25 @@ def clean_model_output(text: str, config: OutputCleanConfig | None = None) -> st
         cleaned = parts[0].strip()
 
     return cleaned
+
+
+def _truncate_after_json(text: str) -> str:
+    """Drop anything trailing after the first balanced JSON object/array.
+
+    Some models append stray closing braces (e.g. "...}}\\n}}") or commentary
+    after an otherwise-valid object. raw_decode parses only the first value and
+    reports where it ends, so we keep exactly that substring — preserving the
+    model's original (compact) formatting. No-op unless the text starts with a
+    JSON value and parses cleanly.
+    """
+    s = text.lstrip()
+    if not s or s[0] not in "{[":
+        return text
+    try:
+        _obj, end = json.JSONDecoder().raw_decode(s)
+    except ValueError:
+        return text
+    return s[:end]
 
 
 def _extract_from_json(text: str, mode: str) -> str | None:

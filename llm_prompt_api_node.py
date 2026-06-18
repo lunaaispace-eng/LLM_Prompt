@@ -38,6 +38,7 @@ from .llm_prompt_node import (
     _sample_video_frames,
 )
 from .output_cleaner import OutputCleanConfig, clean_model_output, normalize_prompt_separator, split_positive_negative
+from comfy_api.latest import io
 
 
 # ---------------------------------------------------------------------------
@@ -601,6 +602,7 @@ def _send_gemini_native(
     output_format: str,
     stop_sequences: list[str],
     thinking_budget: int,
+    thinking_level: str,
     cached_content_name: str | None,
     timeout: float,  # unused — SDK manages timeouts
 ) -> str:
@@ -682,8 +684,23 @@ def _send_gemini_native(
         config_kwargs["stop_sequences"] = list(stop_sequences)
     if output_format == "json":
         config_kwargs["response_mime_type"] = "application/json"
-    # Thinking budget: 0 = disabled (recommended for prompt gen)
-    if thinking_budget >= 0:
+    # Thinking control. On Gemini 3 Pro the API uses thinking_level (low/medium/
+    # high) instead of a token budget; the two are mutually exclusive. When a
+    # level is set AND the model is a Gen-3 Pro, send the level; otherwise fall
+    # back to the token budget (0 = disabled, recommended for prompt gen).
+    _is_gen3_pro = "gemini-3" in model.lower() and "pro" in model.lower()
+    if thinking_level and thinking_level != "None" and _is_gen3_pro:
+        try:
+            config_kwargs["thinking_config"] = types.ThinkingConfig(
+                thinking_level=thinking_level,
+            )
+        except Exception:
+            # SDK too old for thinking_level — fall back to the token budget.
+            if thinking_budget >= 0:
+                config_kwargs["thinking_config"] = types.ThinkingConfig(
+                    thinking_budget=int(thinking_budget),
+                )
+    elif thinking_budget >= 0:
         config_kwargs["thinking_config"] = types.ThinkingConfig(
             thinking_budget=int(thinking_budget),
         )
@@ -915,22 +932,14 @@ def _build_multimodal_user_content(text: str, images_b64: list[str]) -> list[dic
 # The Node
 # ---------------------------------------------------------------------------
 
-class LLMPromptAPINode:
+class LLMPromptAPINode(io.ComfyNode):
     """Prompt generation via OpenAI-compatible API (Gemini, Grok, Custom).
 
     Zero llama-cpp-python dependency. Just HTTP.
     """
 
-    RETURN_TYPES = ("STRING", "STRING")
-    RETURN_NAMES = ("positive", "negative")
-    FUNCTION = "generate"
-    CATEGORY = "Luna/LLM"
-
-    def __init__(self):
-        pass
-
     @classmethod
-    def INPUT_TYPES(cls):
+    def define_schema(cls) -> io.Schema:
         prompts = load_system_prompts()
         prompt_names = ["None"] + sorted(prompts.keys())
         providers = list(PROVIDERS.keys())
@@ -975,156 +984,103 @@ class LLMPromptAPINode:
         if not model_options:
             model_options = ["<no models available>"]
 
-        return {
-            "required": {
-                "provider": (providers, {
-                    "default": default_provider,
-                    "tooltip": "Which backend to call. Gemini / Grok = cloud APIs (need an API key in an env var or a .env at the ComfyUI root). Custom = any OpenAI-compatible endpoint (set server_url).",
-                }),
-                "model_name": (model_options, {
-                    "tooltip": "Available models. Gemini fetches your account's accessible models. Grok shows the curated list (no /models endpoint). Refreshes when the provider changes.",
-                }),
-                "server_url": ("STRING", {
-                    "default": "",
-                    "multiline": False,
-                    "tooltip": "Override the provider's default URL. Required for the Custom provider. Leave empty to use the provider default.",
-                }),
-                # NO api_key widget by design. Widget values are saved to
-                # workflow JSON, which means any shared/exported workflow would
-                # leak the key. Keys are read ONLY from os.environ or .env at
-                # ComfyUI root — both stay out of workflows and out of git.
-                "model_filter": (["all", "text only", "vision", "multimodal"], {
-                    "default": "all",
-                    "tooltip": "Filter the model dropdown by capability. 'vision' shows models that accept images. 'multimodal' shows models accepting multiple input types (image+video+audio).",
-                }),
-                "system_prompt": (prompt_names, {
-                    "default": prompt_names[0],
-                    "tooltip": "System prompt preset loaded from prompts/*.md. Choose None to use only custom_system_prompt.",
-                }),
-                "custom_system_prompt": ("STRING", {
-                    "default": "",
-                    "multiline": True,
-                    "tooltip": "Override the preset. If non-empty, replaces whatever the preset would have been.",
-                }),
-                "user_prompt": ("STRING", {
-                    "default": "",
-                    "multiline": True,
-                    "tooltip": "Your scene concept, subject, idea.",
-                    "forceInput": False,
-                }),
-                "output_format": (["text", "json", "list"], {
-                    "default": "text",
-                    "tooltip": "text = plain prompt paragraph. json = forced JSON output via response_format (server-side enforced). list = numbered multi-scene list (for LTX video tracks).",
-                }),
-                "split_output": ("BOOLEAN", {
-                    "default": True,
-                    "tooltip": "When ON, splits the model's 'positive|negative' output on the | into the two outputs (positive / negative) — no external splitter needed. When OFF, the full text goes to 'positive' and 'negative' is empty. For prompts with no negative (Flux/Chroma), positive gets the whole prompt either way.",
-                }),
-                "max_tokens": ("INT", {
-                    "default": 4096,
-                    "min": 64,
-                    "max": 32000,
-                    "tooltip": "Maximum tokens to generate. 4096 handles single prompts and short multi-scene lists. Raise for long LTX video tracks.",
-                }),
-                "temperature": ("FLOAT", {
-                    "default": 0.7,
-                    "min": 0.0,
-                    "max": 2.0,
-                    "step": 0.05,
-                    "tooltip": "Sampling randomness. Lower = more deterministic, higher = more creative. Auto-fills when you pick a model from a known family.",
-                }),
-                "top_p": ("FLOAT", {
-                    "default": 0.9,
-                    "min": 0.0,
-                    "max": 1.0,
-                    "step": 0.05,
-                    "tooltip": "Nucleus sampling. Common values: 0.8 (Qwen instruct), 0.95 (Gemma 4 / thinking models). Auto-fills with the model preset.",
-                }),
-                "top_k": ("INT", {
-                    "default": 0,
-                    "min": 0,
-                    "max": 200,
-                    "tooltip": "Top-K sampling. 0 = disabled. Qwen wants 20, Gemma 4 wants 64. Grok and OpenAI reject this parameter — it gets stripped automatically.",
-                }),
-                "min_p": ("FLOAT", {
-                    "default": 0.0,
-                    "min": 0.0,
-                    "max": 1.0,
-                    "step": 0.01,
-                    "tooltip": "Min-P sampling. 0.0 = disabled (the Unsloth default for both Qwen and Gemma). Some cloud APIs reject this — gets stripped automatically.",
-                }),
-                "presence_penalty": ("FLOAT", {
-                    "default": 0.0,
-                    "min": -2.0,
-                    "max": 2.0,
-                    "step": 0.1,
-                    "tooltip": "Discourages reusing tokens (encourages diversity). Unsloth recommends 1.5 for Qwen instruct mode. 0.0 for Gemma 4.",
-                }),
-                "frequency_penalty": ("FLOAT", {
-                    "default": 0.0,
-                    "min": -2.0,
-                    "max": 2.0,
-                    "step": 0.1,
-                    "tooltip": "Discourages repeating frequent tokens. 0.0 = disabled.",
-                }),
-                "repetition_penalty": ("FLOAT", {
-                    "default": 1.0,
-                    "min": 0.5,
-                    "max": 2.0,
-                    "step": 0.05,
-                    "tooltip": "Repetition penalty. 1.0 = disabled (Google recommendation). Many cloud APIs ignore or reject it.",
-                }),
-                "seed": ("INT", {
-                    "default": 0,
-                    "min": 0,
-                    "max": 2**32 - 1,
-                    "tooltip": "Random seed. 0 = non-deterministic (the provider picks). Same seed + same prompt + same params = same output (cloud APIs treat this as best-effort).",
-                }),
-                "stop_sequences": ("STRING", {
-                    "default": "",
-                    "multiline": False,
-                    "tooltip": "Comma-separated strings that stop generation when emitted. Example: 'END,---,EOF'. Leave empty for default behavior.",
-                }),
-                "gemini_thinking_budget": ("INT", {
-                    "default": 0,
-                    "min": 0,
-                    "max": 24576,
-                    "tooltip": "Gemini only. Tokens the model spends on internal reasoning before answering. 0 = no thinking (fastest, cheapest, recommended for prompt gen). Max 24576 for flash models. Ignored for non-Gemini providers.",
-                }),
-                "enable_caching": ("BOOLEAN", {
-                    "default": False,
-                    "tooltip": "Gemini only. Caches the stable prefix (system + style + canvas) to cut cost when generating multiple variations of the same character/scene. Requires the prefix to be at least ~1024 tokens.",
-                }),
-                "disable_thinking": ("BOOLEAN", {
-                    "default": True,
-                    "tooltip": "Strips any <think> reasoning from the OUTPUT as a safety net. For Gemini, set gemini_thinking_budget to 0 to disable thinking at the source.",
-                }),
-                "timeout_seconds": ("INT", {
-                    "default": 120,
-                    "min": 5,
-                    "max": 600,
-                    "tooltip": "HTTP timeout for the chat call. Cloud APIs can be slow at peak times — raise to 180+ for big reasoning models like grok-4.20-reasoning.",
-                }),
-            },
-            "optional": {
-                "style": ("STRING", {"forceInput": True}),
-                "width": ("INT", {"forceInput": True}),
-                "height": ("INT", {"forceInput": True}),
-                "image": ("IMAGE", {"forceInput": True}),
-                "video": ("VIDEO", {"forceInput": True}),
-            },
-        }
+        return io.Schema(
+            node_id="LLMPromptAPI",
+            display_name="LLM Prompt (API)",
+            category="Luna/LLM",
+            description=(
+                "Cloud prompt generation via OpenAI-compatible / native APIs. "
+                "Gemini (default, via google-genai SDK), Grok, or any Custom endpoint. "
+                "Outputs positive / negative for image-gen workflows."
+            ),
+            inputs=[
+                # ===== BASIC =====
+                io.Combo.Input("provider", options=providers, default=default_provider,
+                               tooltip="Which backend to call. Gemini / Grok = cloud APIs (need an API key in an env var or a .env at the ComfyUI root). Custom = any OpenAI-compatible endpoint (set server_url)."),
+                io.Combo.Input("model_name", options=model_options,
+                               tooltip="Available models. Gemini fetches your account's accessible models. Grok shows the curated list (no /models endpoint). Refreshes when the provider changes."),
+                io.String.Input("server_url", default="",
+                                tooltip="Override the provider's default URL. Required for the Custom provider. Leave empty to use the provider default."),
+                io.Combo.Input("model_filter", options=["all", "text only", "vision", "multimodal"], default="all",
+                               tooltip="Filter the model dropdown by capability. 'vision' shows models that accept images. 'multimodal' shows models accepting multiple input types."),
+                io.Combo.Input("system_prompt", options=prompt_names, default=prompt_names[0],
+                               tooltip="System prompt preset loaded from prompts/*.md. Choose None to use only custom_system_prompt."),
+                io.String.Input("custom_system_prompt", multiline=True, default="",
+                                tooltip="Override the preset. If non-empty, replaces whatever the preset would have been."),
+                io.String.Input("user_prompt", multiline=True, default="",
+                                tooltip="Your scene concept, subject, idea."),
+                io.Combo.Input("output_format", options=["text", "json", "list"], default="text",
+                               tooltip="text = plain prompt paragraph. json = forced JSON output. list = numbered multi-scene list (for LTX video tracks)."),
+                io.Boolean.Input("split_output", default=True,
+                                 tooltip="ON splits a 'positive | negative' result into the two outputs. OFF = full text on positive, negative empty. Uses the same bulletproof marker contract as the GGUF node."),
+                io.Int.Input("max_tokens", default=4096, min=64, max=32000,
+                             tooltip="Maximum tokens to generate. 4096 handles single prompts and short lists. Raise for long LTX video tracks."),
+                io.Int.Input("seed", default=0, min=0, max=2**32 - 1,
+                             tooltip="Random seed. 0 = non-deterministic (the provider picks). Cloud APIs treat this as best-effort."),
+
+                # ===== ADVANCED (collapsed by default) =====
+                io.Float.Input("temperature", default=0.7, min=0.0, max=2.0, step=0.05, advanced=True,
+                               tooltip="Sampling randomness. Lower = focused, higher = creative. Auto-fills when you pick a model from a known family."),
+                io.Float.Input("top_p", default=0.9, min=0.0, max=1.0, step=0.05, advanced=True,
+                               tooltip="Nucleus sampling. Ref: Qwen ~0.8, Gemma ~0.95. Auto-fills with the model preset."),
+                io.Int.Input("top_k", default=0, min=0, max=200, advanced=True,
+                             tooltip="Top-K. 0 = disabled. Qwen 20, Gemma 64. Grok / OpenAI reject it — stripped automatically."),
+                io.Float.Input("min_p", default=0.0, min=0.0, max=1.0, step=0.01, advanced=True,
+                               tooltip="Min-P. 0.0 = disabled (Unsloth default). Some cloud APIs reject it — stripped automatically."),
+                io.Float.Input("presence_penalty", default=0.0, min=-2.0, max=2.0, step=0.1, advanced=True,
+                               tooltip="Discourages reusing tokens. Unsloth recommends 1.5 for Qwen instruct, 0.0 for Gemma 4."),
+                io.Float.Input("frequency_penalty", default=0.0, min=-2.0, max=2.0, step=0.1, advanced=True,
+                               tooltip="Discourages repeating frequent tokens. 0.0 = disabled."),
+                io.Float.Input("repetition_penalty", default=1.0, min=0.5, max=2.0, step=0.05, advanced=True,
+                               tooltip="Repetition penalty. 1.0 = disabled. Many cloud APIs ignore or reject it."),
+                io.String.Input("stop_sequences", default="", advanced=True,
+                                tooltip="Comma-separated strings that stop generation. Example: 'END,---,EOF'. Empty = default."),
+                io.Int.Input("gemini_thinking_budget", default=0, min=0, max=24576, advanced=True,
+                             tooltip="Gemini flash/2.5 only. Reasoning tokens before answering. 0 = no thinking (recommended for prompts). Ignored on Gemini 3 Pro (use gemini_thinking_level)."),
+                io.Combo.Input("gemini_thinking_level", options=["None", "low", "medium", "high"], default="None", advanced=True,
+                               tooltip="Gemini 3 Pro only. Reasoning depth — the Gen-3 Pro replacement for thinking_budget. When set (not None) on a Gemini 3 Pro model it overrides the budget. Leave None for prompts."),
+                io.Boolean.Input("enable_caching", default=False, advanced=True,
+                                 tooltip="Gemini only. Caches the stable prefix (system + style + canvas) to cut cost on repeated variations. Needs a ~1024+ token prefix."),
+                io.Boolean.Input("disable_thinking", default=True, advanced=True,
+                                 tooltip="Strips any <think> reasoning from the OUTPUT as a safety net. For Gemini, set the thinking budget/level to 0/None to disable at the source."),
+                io.Int.Input("timeout_seconds", default=120, min=5, max=600, advanced=True,
+                             tooltip="HTTP timeout for the chat call. Raise to 180+ for big reasoning models."),
+                io.Float.Input("bbox_min_score", default=0.0, min=0.0, max=1.0, step=0.05, advanced=True,
+                               tooltip="Filter pre-detected bboxes by detection score before injecting. 0 = keep all."),
+
+                # ===== Optional connections =====
+                io.String.Input("style", optional=True, force_input=True,
+                                tooltip="Style description from an external node."),
+                io.Int.Input("width", optional=True, force_input=True,
+                             tooltip="Image width - drives an aspect-ratio composition profile."),
+                io.Int.Input("height", optional=True, force_input=True,
+                             tooltip="Image height - drives an aspect-ratio composition profile."),
+                io.Image.Input("image", optional=True, tooltip="Input image for vision-capable models."),
+                io.Video.Input("video", optional=True, tooltip="Input video for vision-capable models."),
+                io.BoundingBox.Input("bboxes", optional=True, force_input=True,
+                                     tooltip="Optional pre-detected regions (e.g. SAM 3.1), pixel-space "
+                                             "[[{x,y,width,height,score}]]. When present, they're injected into the "
+                                             "prompt as FIXED regions the model must describe in context and reuse "
+                                             "verbatim (image-to-image layout). Needs the image dims — wire width/height "
+                                             "or connect the reference image."),
+            ],
+            outputs=[
+                io.String.Output("positive", display_name="positive"),
+                io.String.Output("negative", display_name="negative"),
+            ],
+        )
 
     @classmethod
-    def IS_CHANGED(cls, **kwargs):
+    def fingerprint_inputs(cls, **kwargs):
         return float("nan")
 
     # ------------------------------------------------------------------
     # Entry point
     # ------------------------------------------------------------------
 
-    def generate(
-        self,
+    @classmethod
+    def execute(
+        cls,
         provider: str,
         model_name: str,
         server_url: str,
@@ -1145,6 +1101,7 @@ class LLMPromptAPINode:
         seed: int,
         stop_sequences: str,
         gemini_thinking_budget: int,
+        gemini_thinking_level: str,
         enable_caching: bool,
         disable_thinking: bool,
         timeout_seconds: int,
@@ -1153,6 +1110,8 @@ class LLMPromptAPINode:
         height: int = 0,
         image=None,
         video=None,
+        bboxes=None,
+        bbox_min_score: float = 0.0,
     ):
         cfg = PROVIDERS.get(provider)
         if not cfg:
@@ -1247,18 +1206,82 @@ class LLMPromptAPINode:
                     "\n\nReturn only the final prompt text. "
                     "No preface, no explanations, no JSON, no markdown fences."
                 )
+                # Authoritative positive/negative delimiter contract (identical to
+                # the GGUF node). Labelled markers survive where a bare '|' gets
+                # dropped; the shared parser strips them so outputs stay clean.
+                if split_output:
+                    sys_prompt += (
+                        "\n\nIf your instructions produce a NEGATIVE prompt, format your entire "
+                        "answer EXACTLY like this, each marker on its own line:\n"
+                        "[POSITIVE]\n<the full positive prompt>\n[NEGATIVE]\n<the full negative prompt>\n"
+                        "Write nothing before [POSITIVE] and nothing after the negative prompt. "
+                        "If there is no negative prompt, write [POSITIVE] then your prompt and stop."
+                    )
+
+        # Pre-detected regions (e.g. SAM 3.1): pixel [[{x,y,width,height,score}]] ->
+        # a fixed [ymin,xmin,ymax,xmax] 0-1000 block the model must reuse verbatim.
+        def _sam_region_block():
+            if not bboxes:
+                return ""
+            nw, nh = width, height
+            if (nw <= 0 or nh <= 0) and image is not None:
+                try:
+                    nh, nw = int(image.shape[1]), int(image.shape[2])
+                except Exception:
+                    nw = nh = 0
+            if nw <= 0 or nh <= 0:
+                return ""
+            if isinstance(bboxes, dict):
+                frame = [bboxes]
+            elif isinstance(bboxes, (list, tuple)) and bboxes and isinstance(bboxes[0], (list, tuple)):
+                frame = bboxes[0]
+            else:
+                frame = bboxes
+            def c(v, m):
+                return max(0, min(1000, round(v / m * 1000)))
+            rows = []
+            for bb in frame or []:
+                if not isinstance(bb, dict):
+                    continue
+                if bbox_min_score and float(bb.get("score", 1.0)) < bbox_min_score:
+                    continue
+                x, y = bb.get("x", 0), bb.get("y", 0)
+                w, h = bb.get("width", 0), bb.get("height", 0)
+                rows.append([c(y, nh), c(x, nw), c(y + h, nh), c(x + w, nw)])
+            if not rows:
+                return ""
+            lines = "\n".join(f"  - Region {i + 1}: bbox {b}" for i, b in enumerate(rows))
+            return (
+                "PRE-DETECTED REGIONS (from image segmentation). Use these EXACT bboxes "
+                "verbatim — do NOT move, resize, add, or drop any. For each region, describe "
+                "what occupies it in the context of the image, and assemble the output using "
+                "exactly these bboxes (format [ymin,xmin,ymax,xmax] on a 0-1000 grid):\n" + lines
+            )
+
+        # Effective canvas dims: wired width/height, else the input image's dims,
+        # so composition is ALWAYS aspect-ratio-driven.
+        eff_w, eff_h = width, height
+        if (eff_w <= 0 or eff_h <= 0) and image is not None:
+            try:
+                eff_h, eff_w = int(image.shape[1]), int(image.shape[2])
+            except Exception:
+                pass
 
         # Build user prompt — STABLE FIRST, VARIABLE LAST for cache friendliness.
-        # Order: STYLE (rarely changes) -> CANVAS (rarely changes) -> USER REQUEST (varies)
+        # LEAD with the aspect-ratio canvas profile, then STYLE -> REGIONS / USER REQUEST.
         stable_parts: list[str] = []
-        if style and style.strip():
-            stable_parts.append(f"STYLE:\n{style.strip()}")
-        if width > 0 and height > 0:
-            canvas_block = _build_canvas_profile(width, height)
+        if eff_w > 0 and eff_h > 0:
+            canvas_block = _build_canvas_profile(eff_w, eff_h)
             if canvas_block:
                 stable_parts.append(canvas_block)
+        if style and style.strip():
+            stable_parts.append(f"STYLE:\n{style.strip()}")
+
+        region_block = _sam_region_block()
 
         variable_parts: list[str] = []
+        if region_block:
+            variable_parts.append(region_block)
         if user_prompt and user_prompt.strip():
             variable_parts.append(f"USER REQUEST:\n{user_prompt.strip()}")
 
@@ -1268,9 +1291,10 @@ class LLMPromptAPINode:
         # Stable text for Gemini caching purposes (system + stable user portion)
         stable_user_text = "\n\n".join(stable_parts)
 
-        # Vision content
+        # Vision content. Guard against a disabled/empty upstream (e.g. a bypassed
+        # image loader): treat a missing or zero-length tensor as "no image" -> t2i.
         images_b64: list[str] = []
-        if image is not None:
+        if image is not None and getattr(image, "shape", (0,))[0] > 0:
             for i in range(image.shape[0]):
                 img = _tensor_to_base64_png(image[i])
                 if img:
@@ -1335,6 +1359,7 @@ class LLMPromptAPINode:
                 output_format=output_format,
                 stop_sequences=stops,
                 thinking_budget=gemini_thinking_budget,
+                thinking_level=gemini_thinking_level,
                 cached_content_name=cache_name,
                 timeout=float(timeout_seconds),
             )
@@ -1366,15 +1391,16 @@ class LLMPromptAPINode:
                 cleaned = clean_model_output(raw, OutputCleanConfig(mode="prompt")) or raw
                 cleaned = normalize_prompt_separator(cleaned)
         elif output_format == "text":
+            # The shared hardened split_positive_negative() below handles markers,
+            # labels, pipe and JSON, so the old normalize-to-pipe pre-pass is gone.
             cleaned = clean_model_output(raw, OutputCleanConfig(mode="prompt")) or raw
-            cleaned = normalize_prompt_separator(cleaned)
         else:
             cleaned = raw
 
         # Split 'positive|negative' into the two outputs (or full text on
         # positive + empty negative when split_output is off / no pipe).
         positive, negative = split_positive_negative(cleaned, split_output)
-        return (positive, negative)
+        return io.NodeOutput(positive, negative)
 
 
 # ---------------------------------------------------------------------------

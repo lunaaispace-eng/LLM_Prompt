@@ -62,12 +62,12 @@ _ASPECT_LABELS = {
     (5, 4):   "5:4 landscape",
     (3, 4):   "3:4 portrait",
     (4, 3):   "4:3 landscape",
-    (2, 3):   "2:3 tall portrait",
-    (3, 2):   "3:2 photographic",
-    (9, 16):  "9:16 vertical",
-    (16, 9):  "16:9 cinematic wide",
-    (21, 9):  "21:9 panoramic",
-    (9, 21):  "9:21 ultra tall",
+    (2, 3):   "2:3 portrait",
+    (3, 2):   "3:2 landscape",
+    (9, 16):  "9:16 portrait",
+    (16, 9):  "16:9 landscape",
+    (21, 9):  "21:9 landscape",
+    (9, 21):  "9:21 portrait",
 }
 
 
@@ -109,8 +109,8 @@ def _classify_canvas_shape(width: int, height: int) -> str:
 
     Buckets (by aspect ratio = width / height):
       ultra_tall   : <= 0.50    (9:21 and taller)
-      tall         : 0.51-0.70  (9:16, 2:3, 3:4 vertical)
-      portrait     : 0.71-0.95  (4:5, slight portrait)
+      tall         : 0.51-0.70  (9:16, 2:3 — a full standing figure fits naturally)
+      portrait     : 0.71-0.95  (3:4, 4:5 — 3/4-length; a full head-to-toe figure elongates here)
       square       : 0.95-1.05  (1:1 and near-square)
       landscape    : 1.05-1.40  (5:4, 4:3, 3:2 photographic)
       cinematic    : 1.41-1.90  (16:9 and similar widescreen)
@@ -121,9 +121,9 @@ def _classify_canvas_shape(width: int, height: int) -> str:
     ratio = width / height
     if ratio <= 0.50:
         return "ultra_tall"
-    if ratio <= 0.70:
+    if ratio <= 0.70:                      # 9:16, 2:3 — a full standing figure is natural here
         return "tall"
-    if ratio <= 0.95:
+    if ratio <= 0.95:                      # 3:4, 4:5 — 3/4-length; a full figure would elongate
         return "portrait"
     if ratio <= 1.05:
         return "square"
@@ -147,18 +147,18 @@ _CANVAS_PROFILES = {
         "avoid": "panoramic vistas, wide horizontal sweeps, group compositions, environmental establishing shots",
     },
     "tall": {
-        "framing": "half-body to full-body portrait, subject takes most of the frame height",
+        "framing": "full-body / head-to-feet portrait — the standing figure fits naturally, feet near the lower edge, subject fills most of the frame height",
         "composition": "vertical emphasis, subject anchored center or rule-of-thirds vertical",
         "camera": "85mm portrait lens feel, shallow to medium depth of field",
         "depth": "shallow — background softly blurred, subject in sharp focus",
         "avoid": "wide environmental shots, panoramic landscapes, lateral camera motion",
     },
     "portrait": {
-        "framing": "close-up to medium portrait, subject prominent with limited environment",
+        "framing": "three-quarter-length to medium portrait — frame the subject from roughly the knees or thighs up, prominent; do NOT force a full head-to-toe standing figure (it stretches the body)",
         "composition": "subject-forward, modest vertical bias",
         "camera": "50-85mm normal-to-portrait lens feel, moderate depth of field",
         "depth": "moderate — subject sharp, environment softened but recognizable",
-        "avoid": "wide vistas, complex multi-subject scenes",
+        "avoid": "wide vistas, complex multi-subject scenes, full head-to-toe standing figures (causes leg/body elongation)",
     },
     "square": {
         "framing": "tight centered subject, minimal environment, headshot or product-style framing",
@@ -191,31 +191,61 @@ _CANVAS_PROFILES = {
 }
 
 
-def _build_canvas_profile(width: int, height: int) -> str:
-    """Build a rich composition profile string from canvas dimensions.
+def _sam_region_block(bboxes, width, height, image=None, min_score=0.0):
+    """Pre-detected regions (e.g. SAM 3.1): pixel [[{x,y,width,height,score}]] ->
+    a fixed [ymin,xmin,ymax,xmax] 0-1000 instruction block the model must reuse
+    verbatim. Shared by the local (GGUF) and API LLM nodes. Returns "" when there
+    are no usable boxes (None/empty/disabled upstream)."""
+    if not bboxes:
+        return ""
+    nw, nh = width, height
+    if (nw <= 0 or nh <= 0) and image is not None:
+        try:
+            nh, nw = int(image.shape[1]), int(image.shape[2])
+        except Exception:
+            nw = nh = 0
+    if nw <= 0 or nh <= 0:
+        return ""
+    if isinstance(bboxes, dict):
+        frame = [bboxes]
+    elif isinstance(bboxes, (list, tuple)) and bboxes and isinstance(bboxes[0], (list, tuple)):
+        frame = bboxes[0]
+    else:
+        frame = bboxes
+    def c(v, m):
+        return max(0, min(1000, round(v / m * 1000)))
+    rows = []
+    for bb in frame or []:
+        if not isinstance(bb, dict):
+            continue
+        if min_score and float(bb.get("score", 1.0)) < min_score:
+            continue
+        x, y = bb.get("x", 0), bb.get("y", 0)
+        w, h = bb.get("width", 0), bb.get("height", 0)
+        rows.append([c(y, nh), c(x, nw), c(y + h, nh), c(x + w, nw)])
+    if not rows:
+        return ""
+    lines = "\n".join(f"  - Region {i + 1}: bbox {b}" for i, b in enumerate(rows))
+    return (
+        "PRE-DETECTED REGIONS (from image segmentation). Use these EXACT bboxes "
+        "verbatim — do NOT move, resize, add, or drop any. For each region, describe "
+        "what occupies it in the context of the image, and assemble the output using "
+        "exactly these bboxes (format [ymin,xmin,ymax,xmax] on a 0-1000 grid):\n" + lines
+    )
 
-    Returns a multi-line block suitable for injecting into the LLM user prompt.
-    Pure aspect-ratio-driven — no assumptions about target diffusion model or
-    detail density (those are user-controlled via the user_prompt text).
+
+def _build_canvas_profile(width: int, height: int) -> str:
+    """Aspect-ratio SHAPE HINT only.
+
+    The node states the frame shape (the one FACT the LLM needs, since the bbox
+    grid is aspect-blind). It deliberately does NOT dictate framing, lens, depth,
+    or shot type — hardcoding those fought the user's prompt and made results worse
+    (e.g. forcing a 'wide shot' on 16:9). Composition is owned by the user prompt +
+    the system-prompt's own rules.
     """
     if width <= 0 or height <= 0:
         return ""
-
-    label = _detect_aspect_ratio(width, height)
-    shape = _classify_canvas_shape(width, height)
-    profile = _CANVAS_PROFILES.get(shape)
-    if not profile:
-        return f"CANVAS FORMAT:\n{label} ({width}x{height})"
-
-    return (
-        f"CANVAS FORMAT:\n"
-        f"- Aspect: {label} ({width}x{height})\n"
-        f"- Framing: {profile['framing']}\n"
-        f"- Composition: {profile['composition']}\n"
-        f"- Camera: {profile['camera']}\n"
-        f"- Depth: {profile['depth']}\n"
-        f"- Avoid: {profile['avoid']}"
-    )
+    return f"CANVAS FORMAT: {_detect_aspect_ratio(width, height)} ({width}x{height})."
 
 # ---------------------------------------------------------------------------
 # System prompt loading from .md files
@@ -460,7 +490,7 @@ def _tensor_to_base64_png(tensor) -> str | None:
         tensor = tensor[0]
     array = (tensor * 255).clamp(0, 255).to(torch.uint8).cpu().numpy()
     pil_img = Image.fromarray(array, mode="RGB")
-    buf = io.BytesIO()
+    buf = BytesIO()
     pil_img.save(buf, format="PNG")
     return base64.b64encode(buf.getvalue()).decode("utf-8")
 
@@ -1527,6 +1557,8 @@ class _LLMRunner:
         reference_image=None,
         video=None,
         audio=None,
+        bboxes=None,
+        bbox_min_score: float = 0.0,
     ):
         # Gate the chatty status prints for this run (warnings/errors still show).
         self._verbose = bool(verbose_logging)
@@ -1616,16 +1648,30 @@ class _LLMRunner:
         if is_qwen35 and disable_thinking:
             sys_prompt = "/no_think\n" + sys_prompt + "\n/no_think"
 
-        # Build user prompt with labeled sections
+        # Effective canvas dims: wired width/height, else fall back to the input
+        # image's dims so the composition is ALWAYS aspect-ratio-driven.
+        eff_w, eff_h = width, height
+        if (eff_w <= 0 or eff_h <= 0) and image is not None:
+            try:
+                eff_h, eff_w = int(image.shape[1]), int(image.shape[2])
+            except Exception:
+                pass
+
+        # Build user prompt — LEAD with the aspect-ratio canvas profile so framing
+        # is the first thing the model reads, then user prompt / style / regions.
         parts = []
+        if eff_w > 0 and eff_h > 0:
+            canvas_block = _build_canvas_profile(eff_w, eff_h)
+            if canvas_block:
+                parts.append(canvas_block)
         if user_prompt and user_prompt.strip():
             parts.append(f"USER PROMPT:\n{user_prompt.strip()}")
         if style and style.strip():
             parts.append(f"STYLE DESCRIPTION:\n{style.strip()}")
-        if width > 0 and height > 0:
-            canvas_block = _build_canvas_profile(width, height)
-            if canvas_block:
-                parts.append(canvas_block)
+        # Pre-detected regions (e.g. SAM 3.1) for image-to-image: fixed bboxes to reuse verbatim.
+        region_block = _sam_region_block(bboxes, eff_w, eff_h, image, bbox_min_score)
+        if region_block:
+            parts.append(region_block)
 
         final_user_prompt = "\n\n".join(parts) if parts else "Describe a scene vividly."
 
@@ -1840,6 +1886,8 @@ class LLMPromptNode(io.ComfyNode):
                 io.Float.Input("video_fps", default=1.0, min=0.1, max=5.0, step=0.1, advanced=True,
                                tooltip="Frames/sec sampled from connected video. Ref: 1.0 default, 0.5 long clips, "
                                        "2-5 fast motion. Only with the video input."),
+                io.Float.Input("bbox_min_score", default=0.0, min=0.0, max=1.0, step=0.05, advanced=True,
+                               tooltip="Filter pre-detected bboxes by detection score before injecting. 0 = keep all."),
                 # --- Debug ---
                 io.Boolean.Input("verbose_logging", default=False, advanced=True,
                                  tooltip="Print detailed step-by-step info to the console. OFF = quiet log; "
@@ -1857,6 +1905,11 @@ class LLMPromptNode(io.ComfyNode):
                                tooltip="Reference image for style-transfer prompts (the style source)."),
                 io.Image.Input("video", optional=True, tooltip="Video frames [F,H,W,3] for vision analysis."),
                 io.Audio.Input("audio", optional=True, tooltip="Audio input (Gemma-4 audio projector only)."),
+                io.BoundingBox.Input("bboxes", optional=True, force_input=True,
+                                     tooltip="Optional pre-detected regions (e.g. SAM 3.1), pixel-space "
+                                             "[[{x,y,width,height,score}]]. When present, injected into the prompt "
+                                             "as FIXED regions the model must describe in context and reuse verbatim "
+                                             "(image-to-image). Needs image dims — wire width/height or the image."),
             ],
             outputs=[
                 io.String.Output("positive", display_name="positive"),

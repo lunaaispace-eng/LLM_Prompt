@@ -231,6 +231,36 @@ _SEED = ("INT", {"default": 0, "min": 0, "max": 2147483647, "control_after_gener
                  "tooltip": "Re-run trigger; results are nondeterministic regardless of seed."})
 _PROMPT = ("STRING", {"multiline": True, "default": "", "tooltip": "Text prompt."})
 
+# Optional connectable size inputs (e.g. from Resolution-Master). When both are
+# wired (>0) they pick the nearest supported aspect_ratio from the dims; image
+# nodes additionally resize the result to exactly width x height.
+_WIDTH_IN = ("INT", {"default": 0, "min": 0, "max": 32768, "forceInput": True,
+                     "tooltip": "Optional. Width from a size node (e.g. Resolution-Master). "
+                                "If width & height are both wired, they pick the nearest "
+                                "aspect_ratio (and resize image output to exactly this size)."})
+_HEIGHT_IN = ("INT", {"default": 0, "min": 0, "max": 32768, "forceInput": True,
+                      "tooltip": "Optional. Height from a size node. See width."})
+
+
+def _ar_value(ar: str) -> float:
+    a, b = ar.split(":")
+    return float(a) / float(b)
+
+
+def _nearest_ar(width: int, height: int, choices) -> str:
+    """Pick the aspect_ratio string from `choices` closest to width:height."""
+    r = width / height
+    numeric = [c for c in choices if ":" in c]
+    return min(numeric, key=lambda c: abs(r - _ar_value(c)))
+
+
+def _resize_batch_exact(image: torch.Tensor, width: int, height: int) -> torch.Tensor:
+    """Resize an IMAGE batch [B,H,W,C] (float 0-1) to exactly width x height."""
+    import torch.nn.functional as F
+    x = image.permute(0, 3, 1, 2)  # [B,C,H,W]
+    x = F.interpolate(x, size=(height, width), mode="bicubic", align_corners=False)
+    return x.permute(0, 2, 3, 1).clamp(0, 1).contiguous()
+
 
 class GrokImageAPINode:
     CATEGORY = "Luna/Grok"
@@ -247,18 +277,27 @@ class GrokImageAPINode:
             "resolution": (["1K", "2K"],),
             "seed": _SEED,
             "timeout_seconds": ("INT", {"default": 120, "min": 10, "max": 600}),
+        }, "optional": {
+            "width": _WIDTH_IN,
+            "height": _HEIGHT_IN,
         }}
 
-    def generate(self, model, prompt, aspect_ratio, number_of_images, resolution, seed, timeout_seconds):
+    def generate(self, model, prompt, aspect_ratio, number_of_images, resolution, seed,
+                 timeout_seconds, width=0, height=0):
         if not prompt.strip():
             raise ValueError("Prompt is required.")
+        if width and height and width > 0 and height > 0:
+            aspect_ratio = _nearest_ar(int(width), int(height), _IMAGE_AR)
         key = _resolve_xai_key()
         resp = _post("/images/generations", key, {
             "model": model, "prompt": prompt, "aspect_ratio": aspect_ratio,
             "n": int(number_of_images), "seed": int(seed),
             "response_format": "b64_json", "resolution": resolution.lower(),
         }, timeout=float(timeout_seconds))
-        return (_images_from_response(resp, key),)
+        images = _images_from_response(resp, key)
+        if width and height and width > 0 and height > 0:
+            images = _resize_batch_exact(images, int(width), int(height))
+        return (images,)
 
 
 class GrokImageEditAPINode:
@@ -277,9 +316,13 @@ class GrokImageEditAPINode:
             "aspect_ratio": (["auto"] + _IMAGE_AR,),
             "seed": _SEED,
             "timeout_seconds": ("INT", {"default": 120, "min": 10, "max": 600}),
+        }, "optional": {
+            "width": _WIDTH_IN,
+            "height": _HEIGHT_IN,
         }}
 
-    def generate(self, model, image, prompt, resolution, number_of_images, aspect_ratio, seed, timeout_seconds):
+    def generate(self, model, image, prompt, resolution, number_of_images, aspect_ratio,
+                 seed, timeout_seconds, width=0, height=0):
         if not prompt.strip():
             raise ValueError("Prompt is required.")
         frames = list(_iter_images(image))
@@ -288,6 +331,11 @@ class GrokImageEditAPINode:
             raise ValueError("The pro model supports only 1 input image.")
         if model != "grok-imagine-image-pro" and n_in > 3:
             raise ValueError("A maximum of 3 input images is supported.")
+        wired = bool(width and height and width > 0 and height > 0)
+        # xAI only allows a custom aspect_ratio when multiple inputs are connected;
+        # with 1 input we leave it "auto" and rely on the exact resize below.
+        if wired and n_in > 1:
+            aspect_ratio = _nearest_ar(int(width), int(height), _IMAGE_AR)
         if aspect_ratio != "auto" and n_in == 1:
             raise ValueError("Custom aspect ratio is only allowed when multiple images are connected.")
         key = _resolve_xai_key()
@@ -299,7 +347,10 @@ class GrokImageEditAPINode:
             "response_format": "b64_json",
             "aspect_ratio": None if aspect_ratio == "auto" else aspect_ratio,
         }, timeout=float(timeout_seconds))
-        return (_images_from_response(resp, key),)
+        images = _images_from_response(resp, key)
+        if wired:
+            images = _resize_batch_exact(images, int(width), int(height))
+        return (images,)
 
 
 class GrokVideoAPINode:
@@ -317,11 +368,14 @@ class GrokVideoAPINode:
             "duration": ("INT", {"default": 6, "min": 1, "max": 15}),
             "seed": _SEED,
             "timeout_seconds": ("INT", {"default": 120, "min": 10, "max": 600}),
-        }, "optional": {"image": ("IMAGE",)}}
+        }, "optional": {"image": ("IMAGE",), "width": _WIDTH_IN, "height": _HEIGHT_IN}}
 
-    def generate(self, model, prompt, resolution, aspect_ratio, duration, seed, timeout_seconds, image=None):
+    def generate(self, model, prompt, resolution, aspect_ratio, duration, seed,
+                 timeout_seconds, image=None, width=0, height=0):
         if not prompt.strip():
             raise ValueError("Prompt is required.")
+        if width and height and width > 0 and height > 0:
+            aspect_ratio = _nearest_ar(int(width), int(height), _VIDEO_AR)
         key = _resolve_xai_key()
         body = {
             "model": model, "prompt": prompt, "resolution": resolution,
@@ -354,11 +408,17 @@ class GrokVideoReferenceAPINode:
             "duration": ("INT", {"default": 6, "min": 2, "max": 15}),
             "seed": _SEED,
             "timeout_seconds": ("INT", {"default": 120, "min": 10, "max": 600}),
+        }, "optional": {
+            "width": _WIDTH_IN,
+            "height": _HEIGHT_IN,
         }}
 
-    def generate(self, model, prompt, reference_images, resolution, aspect_ratio, duration, seed, timeout_seconds):
+    def generate(self, model, prompt, reference_images, resolution, aspect_ratio, duration,
+                 seed, timeout_seconds, width=0, height=0):
         if not prompt.strip():
             raise ValueError("Prompt is required.")
+        if width and height and width > 0 and height > 0:
+            aspect_ratio = _nearest_ar(int(width), int(height), _VIDEO_AR[1:])
         frames = list(_iter_images(reference_images))[:7]
         if not frames:
             raise ValueError("At least one reference image is required.")
