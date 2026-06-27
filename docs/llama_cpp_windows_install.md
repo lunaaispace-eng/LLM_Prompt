@@ -6,6 +6,46 @@ The difficult part is not the node itself. The difficult part is choosing a `lla
 
 This node is tested with JamePeng's `llama-cpp-python` builds because those builds include handler support used by modern Gemma and Qwen GGUF models.
 
+## Automatic Doctor / Installer
+
+This repository includes a helper script:
+
+```text
+tools/llama_cpp_windows_doctor.py
+```
+
+Default mode is read-only. It inspects the selected ComfyUI Python, checks Python ABI, Torch CUDA, the existing `llama-cpp-python` install, queries JamePeng GitHub releases, and recommends the matching wheel.
+
+Run it from the node folder:
+
+```powershell
+$py = 'E:\ComfyUI-Easy-Install\python_embeded\python.exe'
+& $py tools\llama_cpp_windows_doctor.py --comfy-root E:\ComfyUI-Easy-Install\ComfyUI
+```
+
+Or pass the exact embedded Python:
+
+```powershell
+$py = 'E:\ComfyUI-Easy-Install\python_embeded\python.exe'
+& $py tools\llama_cpp_windows_doctor.py --python $py
+```
+
+To install the recommended wheel, close ComfyUI first, then run:
+
+```powershell
+$py = 'E:\ComfyUI-Easy-Install\python_embeded\python.exe'
+& $py tools\llama_cpp_windows_doctor.py --python $py --install
+```
+
+To save a report:
+
+```powershell
+$py = 'E:\ComfyUI-Easy-Install\python_embeded\python.exe'
+& $py tools\llama_cpp_windows_doctor.py --python $py --report llama_cpp_report.json
+```
+
+The manual steps below explain what the tool is checking.
+
 ## What Must Match
 
 Choose the wheel for the ComfyUI Python environment, not for system Python.
@@ -214,7 +254,7 @@ Cancel and reinstall with:
 
 ## Future Installer / Doctor Tool
 
-A safe installer should work as a doctor first and installer second.
+The included `tools/llama_cpp_windows_doctor.py` follows this model: doctor first, installer second.
 
 It should:
 

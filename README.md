@@ -54,6 +54,8 @@ Restart ComfyUI after installing or updating Python files. Hard-refresh the brow
 
 Windows users who want the local GGUF node should read the dedicated install guide:
 [docs/llama_cpp_windows_install.md](docs/llama_cpp_windows_install.md).
+The repo also includes a read-only doctor / explicit installer script:
+`tools/llama_cpp_windows_doctor.py`.
 
 ## Model Folder
 
