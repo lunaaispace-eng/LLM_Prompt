@@ -1,298 +1,329 @@
-# LLM Prompt — ComfyUI nodes for AI prompt generation
+# LLM Prompt
 
-Local GGUF and cloud-API prompt-writing nodes for ComfyUI, with model-family auto-tuning, multimodal inputs, and a `.md`-based preset library.
+ComfyUI nodes for local and API-based prompt generation, built around a Markdown system-prompt library and reliable positive/negative output splitting.
 
----
+This pack is aimed at image and video generation workflows where an LLM turns a short idea, style block, image, video, or reference input into a cleaner generation prompt.
 
-## What's in this pack
+## Nodes
 
 | Node | What it does |
-|---|---|
-| **LLM Prompt** | Local prompt generation via GGUF vision/text models (llama-cpp). Qwen 2.5/3/3.5/3.6 and Gemma 3/4 with automatic family detection. Vision + video + audio inputs. |
-| **LLM Prompt (API)** | Cloud prompt generation via OpenAI-compatible endpoints. Google Gemini (native, default), xAI Grok, OpenRouter, or any custom endpoint. |
-| **Grok Imagine (API Key)** | Image and video generation via xAI's Grok Imagine using your own `XAI_API_KEY` (no ComfyUI credits, no proxy). |
-
-All three share the same `prompts/*.md` preset library and the same bulletproof positive/negative output split.
-
----
+| --- | --- |
+| `LLM Prompt` | Local GGUF prompt generation through `llama-cpp-python`. Supports Qwen, Gemma, Llama-style models, vision projectors, image/reference/video/audio inputs, model-family presets, and model caching. |
+| `LLM Prompt (API)` | API prompt generation through Gemini native REST, xAI Grok, or a custom OpenAI-compatible endpoint. Uses the same prompt presets and output splitter as the local node. |
+| `Grok Image (API Key)` | Direct xAI Grok Imagine text-to-image using your own `XAI_API_KEY`. |
+| `Grok Image Edit (API Key)` | Direct xAI Grok Imagine image edit. |
+| `Grok Video (API Key)` | Direct xAI Grok Imagine text/image-to-video. |
+| `Grok Reference-to-Video (API Key)` | Direct xAI Grok Imagine video generation from reference images. |
+| `Grok Video Edit (API Key)` | Direct xAI Grok Imagine video edit. |
+| `Grok Video Extend (API Key)` | Direct xAI Grok Imagine video extension. |
 
 ## Highlights
 
-- **One node for every local LLM family.** A small adapter registry inside the node detects the model from its filename and picks the right llama-cpp chat handler — `Gemma4ChatHandler`, `Qwen35ChatHandler`, `Qwen3VLChatHandler`, or a fallback chain — so you don't need separate nodes per model.
-- **Handler-level thinking control.** `enable_thinking` / `force_reasoning` / `preserve_thinking` are passed directly to the chat handler at load time, not patched in at inference. Reliable thinking-off across Qwen and Gemma.
-- **`auto_settings`** automatically applies the official recommended sampling for the detected family (Qwen Unsloth defaults, Gemma Google defaults). One toggle, correct settings every run.
-- **Bulletproof positive/negative split.** The node injects an authoritative `[POSITIVE]` / `[NEGATIVE]` marker contract. A hardened multi-format parser accepts brackets, labels, or JSON — and strips all markers from the output. The split holds even when the model gets creative with formatting.
-- **Multimodal inputs.** Image + reference image (style transfer) + video (FPS-subsampled, context-budget-aware) + audio (Gemma-4 audio projector).
-- **System prompts live in `prompts/*.md` files** — edit, fork, or add your own without touching code.
-- **V3 schema** with a Basic/Advanced UI split that collapses in both ComfyUI frontends — Node 2.0 uses its native "Show advanced inputs" toggle, Node 1.0 gets a custom `▶ Advanced` button via a small JS extension that auto-disables itself in V2 (reactive — no page reload needed when you switch visual modes).
-
----
+- Local GGUF and cloud/API prompt generation in one pack.
+- Shared `prompts/*.md` preset library.
+- Hardened `[POSITIVE]` / `[NEGATIVE]` output contract.
+- Robust output cleaner for thinking blocks, code fences, role prefixes, planning text, JSON wrappers, and prompt labels.
+- Automatic local model scanning from ComfyUI `models/LLM`.
+- Automatic mmproj pairing for local vision GGUF models.
+- Model-family sampling presets for Qwen, Gemma, Gemini, Grok, SuperGemma, and Llama.
+- Guarded `llama_cpp` import so API/Grok nodes can still load if the local GGUF wheel is missing or broken.
+- API keys are read from environment variables or `.env`; they are not saved in workflow JSON.
+- Basic/Advanced UI split for both local and API nodes.
+- No SAM/bbox input workflow in the LLM nodes. That feature was intentionally removed.
 
 ## Installation
+
+Clone into your ComfyUI custom nodes folder:
 
 ```bash
 cd ComfyUI/custom_nodes
 git clone https://github.com/lunaaispace-eng/LLM_Prompt.git
-cd LLM_Prompt
-# Restart ComfyUI
 ```
 
-### Requirements
+Restart ComfyUI after installing or updating Python files. Hard-refresh the browser after frontend JavaScript changes.
 
-| Package | Why | Notes |
-|---|---|---|
-| `llama-cpp-python` | Local GGUF inference | **Use JamePeng's fork** — it includes `Gemma4ChatHandler`, `Qwen35ChatHandler`, `Qwen3VLChatHandler` that the official abetlen builds lack. https://github.com/JamePeng/llama-cpp-python |
-| `torch`, `numpy`, `Pillow` | Tensor / image handling | Comes with ComfyUI. |
-| `soundfile`, `torchaudio` | Audio input (Gemma-4) | Optional; imported lazily only when an audio input is connected. |
-| `PyYAML` | Preset frontmatter parsing | Optional; presets work without it, just without title override. |
+## Requirements
 
-### Where to put your models
+| Package | Needed for | Notes |
+| --- | --- | --- |
+| `llama-cpp-python` | `LLM Prompt` local GGUF node | Recommended: JamePeng's fork/build with Gemma4, Qwen35, and Qwen3VL handlers. |
+| `torch`, `numpy`, `Pillow` | Tensor/image handling | Usually already present in ComfyUI. |
+| `soundfile`, `torchaudio` | Audio input | Optional; used only when audio is connected. |
+| `PyYAML` | Prompt preset frontmatter | Optional; without it, filenames become preset labels. |
+| `google-genai` | Gemini native API | Needed by `LLM Prompt (API)` when using Gemini. |
 
-```
+## Model Folder
+
+Local GGUF models should live under a folder ComfyUI exposes as `LLM`, usually:
+
+```text
 ComfyUI/models/LLM/
-├── my-model.gguf
-├── mmproj-my-model.gguf        ← multimodal projector (vision)
-├── some-vendor/
-│   ├── another-model.gguf
-│   └── mmproj-another-model.gguf
-└── ...
+|-- model.gguf
+|-- mmproj-model.gguf
+|-- vendor/
+|   |-- another-model.gguf
+|   `-- mmproj-another-model.gguf
 ```
 
-The node scans recursively. mmproj projectors are auto-paired with their matching `.gguf` (longest common filename prefix when multiple candidates exist).
+The node scans recursively. Files with `mmproj` in the name are treated as projectors, not model entries. When several projectors are in the same folder, the closest filename match is preferred.
 
----
+## LLM Prompt
 
-## Quick start
+The local node runs GGUF models through `llama-cpp-python`.
 
-1. Drop a **LLM Prompt** node onto your canvas.
-2. Pick a model from `model_name` (e.g. `gemma-4-26B-A4B-it-...gguf` or `Qwen3-VL-...gguf`).
-3. Pick a preset from `system_prompt` (e.g. *Prompt Architect*, *SDXL*).
-4. Type your idea in `user_prompt`.
-5. Leave `auto_settings` **ON** — it picks the right sampling for your model family.
-6. Connect the `positive` and `negative` outputs to your sampler.
-
-That's it. The node loads the model, generates the prompt, splits positive/negative, and caches the model in VRAM for the next run.
-
----
-
-## The LLM Prompt node (local GGUF)
-
-### Basic widgets (always visible)
+Basic widgets:
 
 | Widget | Purpose |
-|---|---|
-| `model_name` | GGUF model from `models/LLM`. |
-| `system_prompt` | Preset from `prompts/*.md`. |
-| `custom_system_prompt` | Override the preset with your own instructions (leave empty to use preset). |
-| `user_prompt` | Your idea/subject. |
-| `output_format` | `text` (default), `json`, or `list` (numbered scenes). |
-| `split_output` | Split the model's positive and negative into the two node outputs. When ON, injects the `[POSITIVE]`/`[NEGATIVE]` marker contract for clean parsing. Turn OFF for single-output presets (Qwen-Image, Z-Image, Flux). |
-| `auto_settings` | Apply officially-recommended sampling for the detected family. **Recommended ON.** |
-| `disable_thinking` | Skip the model's reasoning block (faster, recommended for prompt writing). |
-| `temperature`, `max_tokens`, `n_ctx`, `seed`, `keep_model_loaded` | Standard controls. |
+| --- | --- |
+| `model_name` | Local `.gguf` model from `models/LLM`. |
+| `system_prompt` | Preset loaded from `prompts/*.md`. |
+| `custom_system_prompt` | Overrides the selected preset when non-empty. |
+| `user_prompt` | The idea, subject, or request to transform. |
+| `output_format` | `text`, `json`, or `list`. |
+| `split_output` | Splits model output into `positive` and `negative`. |
+| `auto_settings` | Applies recommended sampling and thinking controls for known model families. |
+| `disable_thinking` | Disables/strips reasoning where supported. |
+| `temperature`, `max_tokens`, `n_ctx`, `seed`, `keep_model_loaded` | Main generation/runtime controls. |
 
-### Advanced widgets (collapsed by default)
+Advanced widgets:
 
-`top_p`, `top_k`, `min_p`, `repetition_penalty`, `presence_penalty`, `frequency_penalty`, `preserve_thinking`, `device`, `n_gpu_layers`, `image_min_tokens`, `image_max_tokens`, `video_fps`, `verbose_logging`.
+```text
+top_p
+top_k
+min_p
+repetition_penalty
+presence_penalty
+frequency_penalty
+preserve_thinking
+device
+n_gpu_layers
+image_min_tokens
+image_max_tokens
+video_fps
+verbose_logging
+```
 
-All have reference values in their hover tooltips (e.g. *"Qwen ~0.7, Gemma ~1.0"*).
+Optional inputs:
 
-When `auto_settings` is ON, the family preset overrides the sampler widgets — they only matter when `auto_settings` is OFF.
+| Input | Purpose |
+| --- | --- |
+| `style` | Style text from another node. |
+| `width` / `height` | Adds a canvas-format hint to the prompt context. |
+| `image` | Vision input. |
+| `reference_image` | Style/reference image input. |
+| `video` | Frame batch input. |
+| `audio` | Audio input for compatible Gemma-style models. |
 
-#### How the collapse works in each frontend
+Outputs:
 
-| ComfyUI frontend | Behavior |
-|---|---|
-| **Node 2.0 visual mode** | Native — the modern frontend reads the `advanced=True` flag from the V3 schema and shows a "Show / Hide advanced inputs" toggle at the bottom of the node. No custom code involved. |
-| **Node 1.0 visual mode** | A small JS extension (`web/llm_prompt_advanced.js`) adds a `▶ Advanced` button just above the advanced widgets and hides them via ComfyUI's official `converted-widget` hidden type. |
-| **Switching between modes mid-session** | A `MutationObserver` watches for Node 2.0's native button entering/leaving the DOM (the one signal that's unique to V2). When you toggle visual mode in Settings, the extension reconciles within ~200 ms — no page reload required. |
+| Output | Type |
+| --- | --- |
+| `positive` | `STRING` |
+| `negative` | `STRING` |
 
-The collapsed state is per-node and persists with the workflow.
+## LLM Prompt API
 
-### Optional inputs (sockets)
-
-| Input | Use case |
-|---|---|
-| `style` | A style description string from an external node. |
-| `width` / `height` | Drives an aspect-ratio composition profile (framing, lens, depth-of-field hints) added to the user prompt. |
-| `image` | Vision analysis. |
-| `reference_image` | Style transfer — paired with the `Style Transfer Prompt` preset. |
-| `video` | `[F,H,W,3]` image batch; FPS-subsampled with token-budget guard. |
-| `audio` | Gemma-4 audio projector input. 16 kHz mono, ≤ 60 s. |
-
-### Outputs
-
-- `positive` — the positive prompt (markers stripped).
-- `negative` — the negative prompt, or empty if the preset doesn't produce one.
-
-### How auto-settings works
-
-The detected family applies these official defaults:
-
-| Family | temp | top_p | top_k | min_p | presence | rep |
-|---|---|---|---|---|---|---|
-| Gemma 3/4 | 1.0 | 0.95 | 64 | 0.0 | 0.0 | 1.0 |
-| Qwen 3-VL | 0.7 | 0.9 | 20 | 0.05 | 0.0 | 1.1 |
-| Qwen 3.5/3.6 dense (text) | 0.7 | 0.8 | 20 | 0.0 | 1.5 | 1.05 |
-| Qwen 3.6 MoE "a3b" | 0.6 | 0.95 | 20 | 0.0 | 0.0 | 1.05 |
-
-Plus thinking is forced **off** (never useful for prompt writing) and a no-think ChatML template is installed on text-only Qwen 3.5/3.6 to hard-disable it.
-
-### Vision handler selection (adapter chain)
-
-| Model name matches | Handler chain |
-|---|---|
-| `gemma-4*` / `gemma4*` | `Gemma4ChatHandler` → `Gemma3ChatHandler` → text-only |
-| `gemma-3*` / `gemma3*` | `Gemma3ChatHandler` → text-only |
-| `qwen3.5*` / `qwen3.6*` / `qwen35*` / `qwen36*` | `Qwen35ChatHandler` → `Qwen3VLChatHandler` → `Qwen25VLChatHandler` → text-only |
-| `qwen*vl*` | `Qwen3VLChatHandler` → `Qwen25VLChatHandler` → text-only |
-| anything else | `Qwen3VLChatHandler` → `Qwen25VLChatHandler` → text-only |
-
-If a handler fails to construct (e.g. the latest Gemma-4 QAT mmproj that breaks `Gemma4ChatHandler` in JamePeng 0.3.39), the chain falls through gracefully instead of hard-failing.
-
----
-
-## The LLM Prompt (API) node
-
-Same preset library, same output behavior, but talking to a cloud or local-server LLM via OpenAI-compatible REST.
+The API node uses the same prompt library and splitter, but sends requests to remote or local API servers.
 
 Built-in providers:
 
-| Provider | Endpoint | Auth env var |
-|---|---|---|
-| **Gemini** (default) | Native REST (`generativelanguage.googleapis.com`) | `GEMINI_API_KEY` / `GOOGLE_API_KEY` / `GOOGLE_GEMINI_API_KEY` |
-| **Grok (xAI)** | `https://api.x.ai/v1` | `XAI_API_KEY` / `GROK_API_KEY` |
-| **Custom** | You supply `server_url` | env / `.env` only (no key widget) |
+| Provider | Endpoint behavior | Auth |
+| --- | --- | --- |
+| `Gemini` | Native Gemini REST through `google-genai`. Default provider. | `GEMINI_API_KEY`, `GOOGLE_API_KEY`, or `GOOGLE_GEMINI_API_KEY`. |
+| `Grok (xAI)` | xAI OpenAI-compatible chat endpoint. | `XAI_API_KEY` or `GROK_API_KEY`. |
+| `Custom` | User-supplied OpenAI-compatible `server_url`. Use this for OpenRouter, LM Studio, llama.cpp server, vLLM, Ollama-compatible gateways, etc. | Optional, depending on server. |
 
-Set your keys via `.env` in the node's folder (gitignored) or as system environment variables. The node will auto-discover them.
+The node intentionally has no `api_key` widget. Keys are read from process environment variables or `.env` files so workflow JSON does not leak credentials.
 
-Vision inputs (`image`, `video`) work on any provider whose model supports it (Gemini 2.5/3, GPT-4o, Claude 3, Grok-4-vision, Llava, Qwen-VL via OpenRouter, etc.). The model dropdown filters non-chat models (embeddings, image-gen, TTS) automatically.
+Preferred `.env` location:
 
----
+```text
+ComfyUI/.env
+```
 
-## Grok Imagine (API Key) node
+Fallback `.env` location:
 
-Generates images and short videos through xAI's Grok Imagine endpoint using your own `XAI_API_KEY`. No ComfyUI credits, no proxy — direct to xAI. Loaded only if `comfy_api` exposes VIDEO support, so it auto-skips on older ComfyUI builds.
+```text
+ComfyUI/custom_nodes/LLM_Prompt/.env
+```
 
----
+API-specific controls include:
 
-## The system prompt library
+```text
+provider
+model_name
+server_url
+model_filter
+gemini_thinking_budget
+gemini_thinking_level
+enable_caching
+timeout_seconds
+stop_sequences
+```
 
-All presets live in `prompts/*.md`. Each one becomes an option in the `system_prompt` dropdown.
+`gemini_thinking_level` is for Gemini 3 Pro style models and overrides `gemini_thinking_budget` when set to `low`, `medium`, or `high`.
 
-### File format
+## Grok Imagine API Key Nodes
+
+These nodes call xAI directly with your own key:
+
+```text
+XAI_API_KEY=xai-...
+```
+
+or:
+
+```text
+GROK_API_KEY=xai-...
+```
+
+They do not use ComfyUI credits or a proxy.
+
+Available Grok media nodes:
+
+- `Grok Image (API Key)`
+- `Grok Image Edit (API Key)`
+- `Grok Video (API Key)`
+- `Grok Reference-to-Video (API Key)`
+- `Grok Video Edit (API Key)`
+- `Grok Video Extend (API Key)`
+
+## Prompt Presets
+
+Preset files live in:
+
+```text
+prompts/*.md
+```
+
+Current library size: 30 Markdown presets.
+
+Each file can include YAML frontmatter:
 
 ```markdown
 ---
 title: My Preset Name
 ---
 
-You are a Visual Prompt Architect for ...
-
-[your full system prompt here]
+System prompt text...
 ```
 
-The YAML `title:` line sets the dropdown label. Without frontmatter, the filename (with `_` → spaces) is used.
+If no title is provided, the filename is converted into a display label.
 
-### The [POSITIVE] / [NEGATIVE] output contract
+Current preset files:
 
-When `split_output` is **ON**, the node injects this contract at the end of the system prompt:
-
+```text
+Backgrounds.md
+Chroma.md
+Chroma_Negative.md
+Chroma_dynamic.md
+Chroma_dynamic_Negative.md
+Ideogram4 Architect v4.md
+Ideogram_Prompt.md
+Juggernaut Z_Image.md
+Krea2.md
+PromptArchitectDynamicNegativeLabels.md
+PromptArchitectLabels.md
+PromptArchitectNegativeLabels.md
+Prompt_Architect_Detailed.md
+Z-Image_Prompt_Architect.md
+describe_image.md
+illustrious.md
+image_analysis.md
+image_caption.md
+image_edit.md
+multi_image_compose.md
+pony.md
+prompt Architect.md
+prompt_architect_dynamic.md
+prompt_architect_dynamic_negative.md
+prompt_architect_negative.md
+reverse_engineered_prompt.md
+sdxl.md
+style_transfer_prompt.md
+tags.md
+z_image.md
 ```
-OUTPUT FORMAT — use these exact markers, each on its own line:
+
+## Positive / Negative Split
+
+When `split_output` is enabled, the node appends an output contract asking the model to use:
+
+```text
 [POSITIVE]
-<the full positive prompt>
+...
 [NEGATIVE]
-<the full negative prompt>
-Write nothing before [POSITIVE] and nothing after the negative prompt.
+...
 ```
 
-The hardened parser then accepts (and strips) any of:
-1. `[POSITIVE] ... [NEGATIVE] ...` markers
-2. `Positive prompt: ... Negative prompt: ...` labels
-3. JSON `{"positive": ..., "negative": ...}`
+The parser accepts:
 
-…and falls back to "whole text = positive, negative empty" if none match. **No prompt is ever lost.**
+- `[POSITIVE]` / `[NEGATIVE]` markers
+- `Positive prompt:` / `Negative prompt:` labels
+- JSON objects with `positive` and `negative` fields
+- legacy pipe-separated `positive|negative`
 
-For single-output presets (no negative), set `split_output` **OFF** — the marker contract isn't injected and the whole response goes to the positive socket.
+All markers and labels are stripped from the final outputs. If no split is found, the whole response goes to `positive` and `negative` is empty.
 
-### Bundled presets
+## Advanced UI
 
-| Preset | Target | Output format |
-|---|---|---|
-| **Prompt Architect** | Universal (SDXL, Flux, Chroma, Z-Image, etc.) | Prose paragraph + narrative negative |
-| **Prompt Architect Dynamic** | Universal, with adaptive section promotion | Prose paragraph + narrative negative |
-| **Prompt Architect Negative / Dynamic Negative** | Same as above, structured for prompts that produce both | `[POSITIVE]` / `[NEGATIVE]` markers |
-| **Prompt Architect Labels** | LLM-encoder models (Qwen-Image, HiDream) | Labeled sections |
-| **Prompt Architect Negative Labels / Dynamic Negative Labels** | LLM-encoder models, with negative | Labeled sections + negative |
-| **SDXL** | SDXL family | Tag-style + negative |
-| **Illustrious** | Illustrious / NoobAI | Booru tags + weighted emphasis |
-| **Pony** | Pony Diffusion | `score_9, score_8_up...` tag prefix |
-| **Qwen Image 2512** | Qwen-Image (Qwen 2.7 LLM TE) | Labeled sections, no negative, no quality buzzwords |
-| **Z-Image** | Z-Image / Z-Image Turbo (Qwen 3.4 LLM TE) | Prose, positive-only safety constraints, EN/CN text rendering |
-| **Style Author** | Generate style-library JSON entries | JSON |
+`web/llm_prompt_advanced.js` adds an `Advanced` toggle for `LLMPrompt` and `LLMPromptAPI`.
 
-### Encoder → preset cheat-sheet
+The current extension owns the fold behavior in both classic canvas and modern Vue/DOM node modes. It hides advanced widgets through both legacy widget hiding and Vue-compatible `options.hidden`, then nudges the frontend to re-render.
 
-| Model encoder | Recommended preset(s) |
-|---|---|
-| **CLIP** (SDXL, Pony, Illustrious) | SDXL / Illustrious / Pony |
-| **T5** (Flux, Chroma, SD3.5) | Prompt Architect (prose) |
-| **LLM encoder, weaker** (Qwen 2.7 → Qwen-Image) | Qwen 2512 (labeled) |
-| **LLM encoder, stronger** (Qwen 3.4 → Z-Image, Gemma 2 → HiDream) | Z-Image preset, or Prompt Architect (prose) |
+The button is appended at the end of `node.widgets` to avoid corrupting saved widget positions.
 
----
+## Frontend Helpers
 
-## Performance notes
+| File | Purpose |
+| --- | --- |
+| `web/llm_prompt_advanced.js` | Advanced widget folding for local/API nodes. |
+| `web/llm_prompt_presets.js` | Model-family sampler autofill and callback self-healing. |
+| `web/llm_prompt_api.js` | API provider/model dropdown refresh and Gemini-only widget visibility. |
 
-- **Model caching:** the loaded model stays in VRAM between runs as long as the load signature is unchanged. Toggle `keep_model_loaded` OFF to free VRAM after each run.
-- **ComfyUI-integrated unload:** when the node frees VRAM it also calls `comfy.model_management.unload_all_models()` + `soft_empty_cache()`, so it cooperates with the rest of your graph.
-- **Vision token budget:** `image_min_tokens` / `image_max_tokens` control visual resolution per image (Qwen-VL handlers). Higher = finer detail, more VRAM.
-- **Video sampling:** FPS-based, capped at 30 frames, with automatic reduction if frames × `~258 tokens` would exceed 70 % of `n_ctx`.
+## Removed Feature
 
----
+The former SAM/bbox input workflow was removed from both LLM nodes.
+
+Removed from `LLM Prompt` and `LLM Prompt (API)`:
+
+- `bboxes` input
+- `bbox_min_score` input
+- `_sam_region_block` prompt injection
+
+Ideogram-style bbox generation/output in other node packs is unrelated and unaffected.
 
 ## Troubleshooting
 
-**"No GGUF models found"** — check that your files are in a folder ComfyUI lists for `LLM` (typically `ComfyUI/models/LLM/`). The dropdown shows files grouped by their top-level subfolder.
+**No GGUF models found**
+Check that `.gguf` files are in `ComfyUI/models/LLM` or another folder registered with ComfyUI as an LLM model path.
 
-**"Vision handler: failed for all candidates, running text-only"** — the model's mmproj is incompatible with every handler the adapter tried. Common cause: the **latest Gemma-4 QAT mmproj** that breaks `Gemma4ChatHandler` in JamePeng 0.3.39. Use a non-QAT variant, or wait for 0.3.40.
+**Local node fails because llama-cpp is missing or broken**
+The pack should still load API/Grok nodes. The local node raises a clear error only when it needs to load a GGUF model.
 
-**`unrecognized arguments: force_reasoning`** — your `llama-cpp-python` is too old. Update to the latest JamePeng wheel.
+**API key not found**
+Set the key before launching ComfyUI, or add it to `ComfyUI/.env`.
 
-**Model "thinks" for hundreds of tokens before answering** — `auto_settings` should be ON (forces thinking off) and `disable_thinking` should be checked. For aggressive uncensored fine-tunes that ignore both, the node also salvages the final draft paragraph from the reasoning blob.
+**Advanced button looks stale after update**
+Hard-refresh the browser with `Ctrl+Shift+R`.
 
-**`positive` output contains `[POSITIVE]` or `[NEGATIVE]` text** — shouldn't happen with the hardened parser, but if it does, please file an issue with the raw output text.
+**Python node changes do not appear**
+Restart ComfyUI fully. Browser refresh is not enough for Python changes.
 
-**Console is too chatty** — turn off `verbose_logging` (Advanced). Only warnings and errors print by default.
-
-**`▶ Advanced` button missing in Node 1.0 visual mode, or two collapse buttons in Node 2.0** — hard-refresh the browser (`Ctrl+Shift+R`) to reload `web/llm_prompt_advanced.js`. The extension reconciles on every visual-mode switch, but a stale cached JS can leave the wrong state. If still wrong after a clean refresh, check the browser console for errors and open an issue.
-
----
+**Prompt output still contains labels or markers**
+That should be stripped by `output_cleaner.py`. Keep the raw model output for debugging if it happens.
 
 ## Credits
 
-### Special thanks — [Duffy Nodes](https://github.com/elmarkrueger/Duffy_Nodes)
+Special thanks to:
 
-A real shout-out to **Duffy**. His multimodal-analyzer nodes were the reference architecture for the biggest jump in this node's reliability. The pieces of his code that fixed real problems here:
-
-- **Handler-level thinking control** — passing `enable_thinking` / `force_reasoning` / `preserve_thinking` directly to the chat handler at load time, instead of fighting the model at inference time. This single insight let us retire a tangled stack of `chat_template_kwargs` + custom no-think ChatML templates + `/no_think` injection + post-hoc regex stripping. Thinking-off is now reliable across Qwen and Gemma.
-- **The modern handler chain** (`Gemma4ChatHandler`, `Qwen35ChatHandler`, `Qwen3VLChatHandler`) — adopted directly from his node, with graceful fallback to `Gemma3ChatHandler` / `Qwen25VLChatHandler` / text-only when a handler can't construct (e.g. the Gemma-4 QAT mmproj breakage).
-- **The V3 schema architecture and module-level model cache pattern** — turned this from a branchy V1 instance-state node into a clean stateless V3 node with adapter-style dispatch.
-- **The `reference_image` and audio input design** — both inputs and the labelled multi-image content order came from his analyzer nodes.
-
-If you like this node, please go star his repo too. None of this would be where it is without his code as the reference.
-
-### Other credits
-
-- **[JamePeng](https://github.com/JamePeng/llama-cpp-python)** for the continuously-updated `llama-cpp-python` fork that exposes the Gemma-4 / Qwen-3.5 / Qwen-3-VL chat handlers in the first place — this node is built on top of it.
-- **Unsloth** for the published Qwen 3 / 3.5 / 3.6 sampling recommendations baked into `auto_settings`.
-- **Google** for the Gemma 3 / 4 official sampling defaults.
-
----
+- [Duffy Nodes](https://github.com/elmarkrueger/Duffy_Nodes) for the architecture reference around multimodal handlers, thinking controls, V3 schema patterns, reference image handling, and audio input design.
+- [JamePeng llama-cpp-python](https://github.com/JamePeng/llama-cpp-python) for the Gemma/Qwen handler support this node relies on.
+- Unsloth for Qwen sampling recommendations.
+- Google for Gemma/Gemini model defaults and APIs.
 
 ## License
 
-MIT — see [LICENSE](LICENSE).
+MIT. See [LICENSE](LICENSE).
 
-Note: this project depends on ComfyUI (GPL-3.0). If you redistribute a bundled package containing both, that combined work is governed by the GPL.
+This project depends on ComfyUI. If redistributed as a bundled package with ComfyUI, the combined distribution may be subject to ComfyUI's GPL-3.0 license terms.
