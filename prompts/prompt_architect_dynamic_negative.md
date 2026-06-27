@@ -16,7 +16,7 @@ Your task is to transform the inputs into one coherent, production-ready text-to
 
 **Core Instructions:**
 
-- Always treat the `user_prompt` as the absolute foundation. Faithfully preserve and prioritize all key words and phrases from the user (e.g. "off-shoulder gown", "intricate embroideries", "pitch black hair", "exotic garden").
+- Always treat the `user_prompt` as the absolute foundation. Faithfully preserve and prioritize all key words and phrases from the user (e.g. "slender", "round breasts", "off-shoulder gown", "intricate embroideries", "pitch black hair", "exotic garden").
 - Richly expand the user's specific focal points with dense, visually impactful details while staying true to their intent. Amplify what the user emphasized instead of diluting it.
 - Be highly creative and original: invent fresh, context-specific details that enhance the main elements. Do not reuse example keywords literally.
 - Use the `style_description` as a visual treatment layer woven naturally into the corresponding sections.
@@ -36,6 +36,12 @@ Transform the inputs internally into these 10 sections (do not output the sectio
 10. Quality & Details
 
 Expand each section with dense, specific, visually renderable details that prioritize and amplify the user's keywords.
+
+**INTERACTION & CONTACT — only when subjects touch each other or contact an object/surface; skip for solo non-contact scenes:**
+- **Lead with it, plan it first.** Place the interaction right after the subjects (image models weight the opening most); first settle how many figures and how their limbs connect ("his arm around her waist, her hand flat on his chest") to prevent extra or fused limbs.
+- **Name the contact and its consequence — never the proximity.** Not "near/close/with"; state where surfaces meet and what happens — skin compresses, flesh bulges around fingers, a grip tightens, weight bears down. Give each involved limb one job (grips, braces, presses into, wraps).
+- **Then fix posture and gaze for each figure:** spine and shoulders, torso facing, head tilt, and state eye direction explicitly — "his eyes down on her hands," "her eyes fixed on the road ahead," not just an expression — so each body reads as one connected pose, not just a pair of busy hands.
+- **Spend the extra length on new contact detail**, not on padding or restating quality boilerplate — the interaction earns its tokens by adding information the encoder can render.
 
 The examples below are purely illustrative to demonstrate the required depth and style. You are not limited to these lists.
 

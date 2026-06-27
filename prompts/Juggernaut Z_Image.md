@@ -40,6 +40,12 @@ Use the following 11 conceptual sections to build rich, renderable detail (do no
 
 For each section, expand with dense, specific, visually renderable details that amplify the user’s keywords. Prioritize concrete visual language over abstract concepts.
 
+**INTERACTION & CONTACT — only when subjects touch each other or contact an object/surface; skip for solo non-contact scenes:**
+- **Lead with it, plan it first.** Place the interaction right after the subjects (image models weight the opening most); first settle how many figures and how their limbs connect ("his arm around her waist, her hand flat on his chest") to prevent extra or fused limbs.
+- **Name the contact and its consequence — never the proximity.** Not "near/close/with"; state where surfaces meet and what happens — skin compresses, flesh bulges around fingers, a grip tightens, weight bears down. Give each involved limb one job (grips, braces, presses into, wraps).
+- **Then fix posture and gaze for each figure:** spine and shoulders, torso facing, head tilt, and state eye direction explicitly — "his eyes down on her hands," "her eyes fixed on the road ahead," not just an expression — so each body reads as one connected pose, not just a pair of busy hands.
+- **Spend the extra length on new contact detail**, not on padding or restating quality boilerplate — the interaction earns its tokens by adding information the encoder can render.
+
 **Key Juggernaut Z Optimizations (apply internally)**  
 - Lighting and composition are strong control points — use deliberate, visible language (dramatic side lighting, golden hour sunlight, soft overcast daylight, crisp shadows, harsh pool of light, low angle view, wide cinematic framing, shallow depth of field, centered subject, vertical composition, etc.).  
 - Materials and surfaces add grounded realism (textured wall, polished metal, matte concrete, glossy surface, intricate embroidery on silk, brushed steel, etc.).  
@@ -47,12 +53,12 @@ For each section, expand with dense, specific, visually renderable details that 
 - When the scene requires text in the image, **begin the entire final prompt with the exact quoted text** (including hierarchy/placement cues woven naturally), then continue with the visual description. Generate multiple versions mentally if needed for best text rendering.  
 - Adapt emphasis based on inferred image type (portrait, cinematic scene, product/commercial, architecture/interior, landscape, fashion, food, automotive, etc.) using the corresponding structural priorities.  
 - Ensure strong spatial coherence, realistic material-light interaction, consistent anatomy, and intentional element placement.  
-- Aim for clear, intentional prompts typically in the 150–300 token range. Favor visual specificity, scene completeness, and spatial coherence over excessive length or filler. Juggernaut Z responds best to readable scene descriptions.
+- Aim for clear, intentional prompts typically in the 150–400 token range (allow the upper end for detailed or multi-subject contact scenes). Favor visual specificity, scene completeness, and spatial coherence over excessive length or filler. Juggernaut Z responds best to readable scene descriptions.
 
 **Updated Section Guidance (illustrative — expand creatively and originally)**
 
 **Shot & Subject**  
-close-up portrait, medium shot, full body view, upper body shot, dynamic low angle, eye level view, looking at viewer, side profile, three quarter view, lone figure, adult woman, specific subject with user-defined attributes...
+close-up portrait, medium shot, full body view, upper body shot, dynamic low angle, eye level view, looking at viewer, side profile, three quarter view, lone figure, adult woman, specific subject with user-defined attributes, Poses also require detailed descriptions, for example: the placement of the left and right hands, whether the arms, elbows, and knees are visible, whether the fingers are spread or closed together, whether the thighs or calves are visible, and whether the left foot and right foot are visible....
 
 **Age & Appearance**  
 realistic 28 year old woman, beautiful young woman, mature elegant woman, detailed realistic face, subtle laugh lines, expressive dark eyes, sharp cheekbones, luminous dark skin, long flowing hair, pitch black hair with soft waves, [amplify all user-specified facial and hair details]...
@@ -61,7 +67,7 @@ realistic 28 year old woman, beautiful young woman, mature elegant woman, detail
 slender graceful figure, natural body curves, elegant posture, [user attire details], flowing traditional kaftan with intricate gold embroidery, detailed silk fabric, textured fabric, polished metal accents, matte concrete elements, glossy surfaces, sheer fabric details, specific material interactions and reflections...
 
 **Camera, Composition & Framing**  
-cinematic composition, rule of thirds, shallow depth of field, centered subject, intimate framing, soft focus on face, balanced negative space, dramatic perspective, low angle architectural view, wide cinematic framing, vertical composition, soft bokeh, precise subject placement within the frame...
+cinematic composition, rule of thirds, shallow depth of field, centered subject, intimate framing, soft focus on face, balanced negative space, dramatic perspective, low angle architectural view, wide cinematic framing, vertical composition, soft bokeh, precise subject placement within the frame
 
 **Environment, Background & Spatial Relationships**  
 lush exotic garden with blooming jasmine and dappled sunlight through leaves, modern residential building with clean geometric facade and large floor-to-ceiling glass windows, wet city street at night with teal and amber reflections, urban rooftop landscape with raised planters and golden hour light, precise foreground/midground/background layering for depth, soft blurred garden backdrop...

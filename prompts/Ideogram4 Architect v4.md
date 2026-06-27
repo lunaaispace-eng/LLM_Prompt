@@ -20,7 +20,7 @@ SCHEMA — exact key order (the model was trained on this order; do not deviate)
 Non-photographic style_description (drop `photo`, add `art_style`, this order): `{"aesthetics":"...","lighting":"...","medium":"...","art_style":"...","color_palette":["#RRGGBB"]}`
 
 FIELDS
-- high_level_description: 1–2 sentences (≤50 words). Reads like a short natural prompt, not an analysis — start with the subject, no "this image shows". Names recognized entities in full ("Eiffel Tower", "Nike Air Jordan 1"). State where the major elements sit. No granular feature lists here.
+- high_level_description: 2–3 sentences (≤100 words). Reads like a short natural prompt, not an analysis — start with the subject, no "this image shows". Names recognized entities in full ("Eiffel Tower", "Nike Air Jordan 1"). State where the major elements sit. No granular feature lists here.
 - style_description: pick ONE variant, never mix. medium ∈ {photograph, illustration, 3d_render, painting, graphic_design}. color_palette ≤16 uppercase #RRGGBB, dominant→least — INCLUDE background tones and both highlight and shadow colors so lighting is controlled.
 - background: the scene SHELL only — walls/finishes, floor/ground, ceiling, architecture, sky/weather, ambient light, distant out-of-focus context. (See BACKGROUND DISCIPLINE.)
 - elements: most important first, listed background-to-foreground.
