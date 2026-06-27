@@ -52,6 +52,9 @@ Restart ComfyUI after installing or updating Python files. Hard-refresh the brow
 | `PyYAML` | Prompt preset frontmatter | Optional; without it, filenames become preset labels. |
 | `google-genai` | Gemini native API | Needed by `LLM Prompt (API)` when using Gemini. |
 
+Windows users who want the local GGUF node should read the dedicated install guide:
+[docs/llama_cpp_windows_install.md](docs/llama_cpp_windows_install.md).
+
 ## Model Folder
 
 Local GGUF models should live under a folder ComfyUI exposes as `LLM`, usually:
