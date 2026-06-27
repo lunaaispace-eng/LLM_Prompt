@@ -162,7 +162,7 @@ Built-in providers:
 |---|---|---|
 | **Gemini** (default) | Native REST (`generativelanguage.googleapis.com`) | `GEMINI_API_KEY` / `GOOGLE_API_KEY` / `GOOGLE_GEMINI_API_KEY` |
 | **Grok (xAI)** | `https://api.x.ai/v1` | `XAI_API_KEY` / `GROK_API_KEY` |
-| **Custom** | You supply `server_url` | optional `api_key` widget |
+| **Custom** | You supply `server_url` | env / `.env` only (no key widget) |
 
 Set your keys via `.env` in the node's folder (gitignored) or as system environment variables. The node will auto-discover them.
 

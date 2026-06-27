@@ -1,4 +1,4 @@
-﻿"""Output cleaner for LLM responses.
+"""Output cleaner for LLM responses.
 
 Same interface as QwenVL-Mod's AILab_OutputCleaner â€” strips thinking tags,
 code fences, planning paragraphs, role prefixes, JSON wrappers, and

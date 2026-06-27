@@ -1,16 +1,16 @@
-// LLM_Prompt - "Advanced" collapse toggle for the LLMPrompt node.
+// LLM_Prompt — "Advanced" collapse toggle for the LLMPrompt / LLMPromptAPI nodes.
 //
-// Diagnostic finding (Node 1.0 visual mode):
-//   - top_p widget: type="number", element=undefined (canvas-drawn)
-//   - top_p widget: options.advanced === true (V3 schema flag preserved here)
-//   - node.showAdvanced exists as a property
-//   - V2 native "Show/Hide advanced inputs" button found in DOM as a styled DIV
+// Frontend-compat fix (Node 2.0 / Vue):
+//   The modern Vue frontend decides whether to render a widget from
+//   `w.options.hidden` and needs a reactivity nudge to re-render. The legacy
+//   canvas frontend honored `w.hidden` + `computeSize`. A ComfyUI frontend
+//   update moved hiding to the Vue path, which is why the fold silently broke in
+//   Node 2.0 while still working in Node 1.0.
 //
-// The reliable V1-vs-V2 discriminator: a *number* widget's `.element`.
-//   V1: canvas-drawn → element is undefined
-//   V2: DOM-rendered → element is an HTMLElement
-// (Multiline string widgets have a DOM textarea in BOTH modes, so probing them
-// gives a false positive. Number/combo widgets are mode-specific.)
+//   This version sets BOTH paths (w.hidden + w.options.hidden) and notifies Vue
+//   after a change — the same technique the working Eclipse pack uses — so the
+//   fold works in Node 1.0 (canvas) AND Node 2.0 (Vue). The custom button owns
+//   the fold in both modes; it no longer defers to native handling.
 
 import { app } from "/scripts/app.js";
 
@@ -23,31 +23,20 @@ const ADVANCED = [
 ];
 const ADVANCED_SET = new Set(ADVANCED);
 
-function isV2VisualMode(node) {
-    // Diagnostic-confirmed discriminator: the modern frontend ONLY adds the
-    // V2 native "Show/Hide advanced inputs" button to the DOM when V2 visual
-    // mode is active. In V1 visual mode it's not in the DOM at all.
-    //
-    // We check existence, NOT visibility — getBoundingClientRect returns
-    // positive dimensions for elements with z-index: -1, so visibility checks
-    // false-positive in V1.
-    //
-    // Widget-element probing turned out unreliable too: the modern frontend
-    // sometimes attaches .element to widgets it isn't visibly rendering.
-    try {
-        for (const el of document.querySelectorAll("div, button")) {
-            const t = (el.textContent || "").trim();
-            if (t.length < 30 && /^(show|hide)\s*advanced\s*inputs?$/i.test(t)) {
-                return true;
-            }
-        }
-    } catch (_) { /* swallow */ }
-    return false;
+// Reliable Node 1.0 (canvas) vs Node 2.0 (Vue/DOM) discriminator.
+function isVueMode() {
+    try { return !!LiteGraph.vueNodesMode; } catch (_) { return false; }
+}
+
+// Nudge Vue's reactivity so a visibility change re-renders. Mutating the widgets
+// array (pop+push the last entry) is what the frontend watches. Cheap, no-op-safe.
+function notifyVue(node) {
+    const ws = node.widgets;
+    if (ws?.length) { const last = ws.pop(); ws.push(last); }
 }
 
 function isAdvancedWidget(w) {
     if (!w) return false;
-    // Diagnostic confirmed the schema flag arrives on options.advanced
     return ADVANCED_SET.has(w.name) ||
            w.advanced === true ||
            w.options?.advanced === true;
@@ -58,12 +47,11 @@ function hideWidget(w) {
     w.__origType = w.type;
     w.__origComputeSize = w.computeSize;
     w.__origHidden = w.hidden;
-    // Three-pronged hide: cover every render path the modern frontend uses,
-    // so booleans (verbose_logging, preserve_thinking) don't escape like they
-    // did with single-signal approaches.
-    w.type = "converted-widget";    // official "hidden" type for canvas path
-    w.computeSize = () => [0, -4];  // collapse the row in layout calc
-    w.hidden = true;                 // the boolean / DOM render path checks this
+    w.__origOptHidden = w.options ? w.options.hidden : undefined;
+    w.type = "converted-widget";              // canvas (Node 1.0) hide path
+    w.computeSize = () => [0, -4];
+    w.hidden = true;
+    if (w.options) w.options.hidden = true;   // Vue (Node 2.0) hide path  ← the fix
     w.__llmHidden = true;
 }
 
@@ -72,6 +60,7 @@ function showWidget(w) {
     w.type = w.__origType;
     w.computeSize = w.__origComputeSize;
     w.hidden = w.__origHidden;
+    if (w.options) w.options.hidden = w.__origOptHidden;
     w.__llmHidden = false;
 }
 
@@ -86,112 +75,84 @@ function applyAdvanced(node, show) {
     const newH = node.computeSize()[1];
     node.setSize([node.size[0], newH]);
     node.setDirtyCanvas(true, true);
+    if (isVueMode()) notifyVue(node);   // re-render in Vue mode
 }
 
 function attachButton(node) {
     if (node.__advBtn) return;
-
     node.properties = node.properties || {};
     if (typeof node.properties.advancedShown !== "boolean") {
         node.properties.advancedShown = false;
     }
-
+    // Keep the button at the END of node.widgets — never splice it between the
+    // basic and advanced widgets. ComfyUI's widgets_values save/load is
+    // positional and a mid-array button shifts every later widget's index, so
+    // values land in the wrong widgets across tab switches.
     const btn = node.addWidget("button", "▶  Advanced", null, () => {
         node.properties.advancedShown = !node.properties.advancedShown;
         applyAdvanced(node, node.properties.advancedShown);
     });
     btn.serialize = false;
     node.__advBtn = btn;
-
-    // CRITICAL: do NOT splice the button into the middle of node.widgets.
-    // ComfyUI's widgets_values array is positional, and an earlier version
-    // that spliced the button between the basic and advanced widgets shifted
-    // every advanced widget's position by one. ComfyUI's tab-switch save/load
-    // path doesn't fully honour `serialize: false` on re-deserialise, so
-    // values from widgets_values would land in the wrong widgets (showing up
-    // as "Value not in list", "smaller than min", or NoneType conversion
-    // errors). Leaving the button at the end of node.widgets keeps every
-    // existing widget at its original index — values stay correctly aligned
-    // through any number of tab switches. Visual trade-off: the button
-    // appears at the bottom of the node instead of above the advanced
-    // widgets.
-
     applyAdvanced(node, node.properties.advancedShown);
 }
 
-function tearDown(node) {
-    // V2 mode was detected late — undo our button + restore widgets.
-    if (!node.__advBtn) return;
-    const idx = node.widgets.indexOf(node.__advBtn);
-    if (idx > -1) node.widgets.splice(idx, 1);
-    node.__advBtn = null;
-    for (const w of node.widgets) {
-        if (isAdvancedWidget(w)) showWidget(w);
-    }
-    const newH = node.computeSize()[1];
-    node.setSize([node.size[0], newH]);
-    node.setDirtyCanvas(true, true);
-}
-
-// Reconcile a single node's state with the current visual mode. Idempotent —
-// only acts when the actual state differs from what the current mode wants.
-// V1: should have our button, advanced widgets hidden.
-// V2: should NOT have our button, advanced widgets unhidden (V2 native owns it).
-function syncNodeWithMode(node) {
+// Re-assert the current fold state (used on create, configure, and mode switch).
+function reapply(node) {
     if (!node || !Array.isArray(node.widgets)) return;
-    if (isV2VisualMode(node)) {
-        if (node.__advBtn) tearDown(node);
-        // Also unhide any widgets we hid in a previous V1 lifecycle
-        for (const w of node.widgets) {
-            if (isAdvancedWidget(w) && w.__llmHidden) showWidget(w);
-        }
-    } else {
-        if (!node.__advBtn) attachButton(node);
-    }
+    if (!node.__advBtn) attachButton(node);
+    else applyAdvanced(node, !!node.properties?.advancedShown);
 }
 
 function setupNode(node) {
     if (node.__advSetup) return;
     node.__advSetup = true;
-    // 250 ms initial defer so V2 has time to populate its DOM markers.
-    setTimeout(() => syncNodeWithMode(node), 250);
+    setTimeout(() => reapply(node), 100);
 }
 
-// Visual-mode change handler: the user can switch Node 1.0 <-> Node 2.0 in
-// Settings without reloading, which leaves per-node state stale (V1 button
-// still attached when V2 takes over, or no button when V1 returns).
-//
-// Event-based, not polling: a MutationObserver watches document.body for DOM
-// changes. When V2's "Show/Hide advanced inputs" button gets added/removed by
-// a mode switch, the observer fires. Debounced 200 ms so rapid DOM churn from
-// other ComfyUI work coalesces into one sync. Zero work in steady state.
-let _observer = null;
-function startSyncObserver() {
-    if (_observer) return;
-    let debounce = null;
-    const tick = () => {
-        try {
-            const nodes = window?.app?.graph?._nodes;
-            if (!Array.isArray(nodes)) return;
-            for (const n of nodes) {
-                if (n?.type === "LLMPrompt") syncNodeWithMode(n);
-            }
-        } catch (_) { /* swallow */ }
-    };
-    _observer = new MutationObserver(() => {
-        if (debounce) clearTimeout(debounce);
-        debounce = setTimeout(tick, 200);
-    });
-    _observer.observe(document.body, { childList: true, subtree: true });
-    // One immediate tick to cover any state the observer missed before starting.
-    setTimeout(tick, 300);
+// Cooperative Node 1.0 <-> 2.0 switch watcher. Shares the SAME window keys
+// Eclipse uses, so the two packs reuse a single property watcher on
+// LiteGraph.vueNodesMode instead of clobbering each other. Fires only on an
+// actual mode toggle — no DOM polling, no widget-mutation feedback loop.
+const _VMC_KEY = "__comfy_vueModeCallbacks";
+const _VMC_LOCK = "__comfy_vueModeWatcherInstalled";
+function installVueModeWatcher() {
+    if (!window[_VMC_KEY]) window[_VMC_KEY] = new Set();
+    if (window[_VMC_LOCK]) return;
+    window[_VMC_LOCK] = true;
+    try {
+        let _value = !!LiteGraph.vueNodesMode;
+        Object.defineProperty(LiteGraph, "vueNodesMode", {
+            get() { return _value; },
+            set(v) {
+                const prev = _value; _value = !!v;
+                if (prev !== _value) {
+                    for (const cb of (window[_VMC_KEY] || [])) {
+                        try { cb(_value, prev); } catch (e) { console.error("vueModeChange cb error", e); }
+                    }
+                }
+            },
+            configurable: true, enumerable: true,
+        });
+    } catch (_) { /* swallow */ }
+}
+function onVueModeChange(cb) {
+    installVueModeWatcher();
+    window[_VMC_KEY].add(cb);
 }
 
 app.registerExtension({
     name: "LLM_Prompt.AdvancedToggle",
     async setup() {
-        // Kick off the mode-change reconciler. Idempotent — safe to call once.
-        startSyncObserver();
+        onVueModeChange(() => {
+            const nodes = window?.app?.graph?._nodes;
+            if (!Array.isArray(nodes)) return;
+            for (const n of nodes) {
+                if (n?.type === "LLMPrompt" || n?.type === "LLMPromptAPI") {
+                    setTimeout(() => reapply(n), 50);
+                }
+            }
+        });
     },
     async beforeRegisterNodeDef(nodeType, nodeData) {
         if (nodeData.name !== "LLMPrompt" && nodeData.name !== "LLMPromptAPI") return;
@@ -203,15 +164,12 @@ app.registerExtension({
             return r;
         };
 
-        // Re-apply after a saved workflow restores node.properties. The button
-        // may not exist yet (setupNode is deferred), so retry slightly later.
+        // Re-apply after a saved workflow restores node.properties.
         const onConfigure = nodeType.prototype.onConfigure;
         nodeType.prototype.onConfigure = function (info) {
             const r = onConfigure?.apply(this, arguments);
             const node = this;
-            setTimeout(() => {
-                if (node.__advBtn) applyAdvanced(node, !!node.properties?.advancedShown);
-            }, 150);
+            setTimeout(() => reapply(node), 150);
             return r;
         };
     },

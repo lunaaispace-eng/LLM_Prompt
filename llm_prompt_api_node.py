@@ -1045,8 +1045,6 @@ class LLMPromptAPINode(io.ComfyNode):
                                  tooltip="Strips any <think> reasoning from the OUTPUT as a safety net. For Gemini, set the thinking budget/level to 0/None to disable at the source."),
                 io.Int.Input("timeout_seconds", default=120, min=5, max=600, advanced=True,
                              tooltip="HTTP timeout for the chat call. Raise to 180+ for big reasoning models."),
-                io.Float.Input("bbox_min_score", default=0.0, min=0.0, max=1.0, step=0.05, advanced=True,
-                               tooltip="Filter pre-detected bboxes by detection score before injecting. 0 = keep all."),
 
                 # ===== Optional connections =====
                 io.String.Input("style", optional=True, force_input=True,
@@ -1057,12 +1055,6 @@ class LLMPromptAPINode(io.ComfyNode):
                              tooltip="Image height - drives an aspect-ratio composition profile."),
                 io.Image.Input("image", optional=True, tooltip="Input image for vision-capable models."),
                 io.Video.Input("video", optional=True, tooltip="Input video for vision-capable models."),
-                io.BoundingBox.Input("bboxes", optional=True, force_input=True,
-                                     tooltip="Optional pre-detected regions (e.g. SAM 3.1), pixel-space "
-                                             "[[{x,y,width,height,score}]]. When present, they're injected into the "
-                                             "prompt as FIXED regions the model must describe in context and reuse "
-                                             "verbatim (image-to-image layout). Needs the image dims — wire width/height "
-                                             "or connect the reference image."),
             ],
             outputs=[
                 io.String.Output("positive", display_name="positive"),
@@ -1110,8 +1102,6 @@ class LLMPromptAPINode(io.ComfyNode):
         height: int = 0,
         image=None,
         video=None,
-        bboxes=None,
-        bbox_min_score: float = 0.0,
     ):
         cfg = PROVIDERS.get(provider)
         if not cfg:
@@ -1218,46 +1208,6 @@ class LLMPromptAPINode(io.ComfyNode):
                         "If there is no negative prompt, write [POSITIVE] then your prompt and stop."
                     )
 
-        # Pre-detected regions (e.g. SAM 3.1): pixel [[{x,y,width,height,score}]] ->
-        # a fixed [ymin,xmin,ymax,xmax] 0-1000 block the model must reuse verbatim.
-        def _sam_region_block():
-            if not bboxes:
-                return ""
-            nw, nh = width, height
-            if (nw <= 0 or nh <= 0) and image is not None:
-                try:
-                    nh, nw = int(image.shape[1]), int(image.shape[2])
-                except Exception:
-                    nw = nh = 0
-            if nw <= 0 or nh <= 0:
-                return ""
-            if isinstance(bboxes, dict):
-                frame = [bboxes]
-            elif isinstance(bboxes, (list, tuple)) and bboxes and isinstance(bboxes[0], (list, tuple)):
-                frame = bboxes[0]
-            else:
-                frame = bboxes
-            def c(v, m):
-                return max(0, min(1000, round(v / m * 1000)))
-            rows = []
-            for bb in frame or []:
-                if not isinstance(bb, dict):
-                    continue
-                if bbox_min_score and float(bb.get("score", 1.0)) < bbox_min_score:
-                    continue
-                x, y = bb.get("x", 0), bb.get("y", 0)
-                w, h = bb.get("width", 0), bb.get("height", 0)
-                rows.append([c(y, nh), c(x, nw), c(y + h, nh), c(x + w, nw)])
-            if not rows:
-                return ""
-            lines = "\n".join(f"  - Region {i + 1}: bbox {b}" for i, b in enumerate(rows))
-            return (
-                "PRE-DETECTED REGIONS (from image segmentation). Use these EXACT bboxes "
-                "verbatim — do NOT move, resize, add, or drop any. For each region, describe "
-                "what occupies it in the context of the image, and assemble the output using "
-                "exactly these bboxes (format [ymin,xmin,ymax,xmax] on a 0-1000 grid):\n" + lines
-            )
-
         # Effective canvas dims: wired width/height, else the input image's dims,
         # so composition is ALWAYS aspect-ratio-driven.
         eff_w, eff_h = width, height
@@ -1268,7 +1218,7 @@ class LLMPromptAPINode(io.ComfyNode):
                 pass
 
         # Build user prompt — STABLE FIRST, VARIABLE LAST for cache friendliness.
-        # LEAD with the aspect-ratio canvas profile, then STYLE -> REGIONS / USER REQUEST.
+        # LEAD with the aspect-ratio canvas profile, then STYLE -> USER REQUEST.
         stable_parts: list[str] = []
         if eff_w > 0 and eff_h > 0:
             canvas_block = _build_canvas_profile(eff_w, eff_h)
@@ -1277,11 +1227,7 @@ class LLMPromptAPINode(io.ComfyNode):
         if style and style.strip():
             stable_parts.append(f"STYLE:\n{style.strip()}")
 
-        region_block = _sam_region_block()
-
         variable_parts: list[str] = []
-        if region_block:
-            variable_parts.append(region_block)
         if user_prompt and user_prompt.strip():
             variable_parts.append(f"USER REQUEST:\n{user_prompt.strip()}")
 

@@ -263,11 +263,24 @@ app.registerExtension({
             // Backstop: re-assert both hooks shortly after creation (widgets may
             // still be building) and periodically (cheap identity checks bail
             // immediately when already hooked). Self-healing if anything
-            // replaces a callback later.
+            // replaces a callback later. The interval is tracked per-node and
+            // cleared in onRemoved so deleted nodes don't leak timers.
             setTimeout(() => { hookModelWidget(node); hookProviderWidget(node); }, 150);
-            setInterval(() => { hookModelWidget(node); hookProviderWidget(node); }, 1500);
+            node.__llmPresetInterval = setInterval(() => {
+                hookModelWidget(node);
+                hookProviderWidget(node);
+            }, 1500);
 
             return r;
+        };
+
+        const onRemoved = nodeType.prototype.onRemoved;
+        nodeType.prototype.onRemoved = function () {
+            if (this.__llmPresetInterval) {
+                clearInterval(this.__llmPresetInterval);
+                this.__llmPresetInterval = null;
+            }
+            return onRemoved?.apply(this, arguments);
         };
     },
 });

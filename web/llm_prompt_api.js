@@ -12,7 +12,7 @@ import { app } from "/scripts/app.js";
 // Keeps the JS independent of the backend for client-side decisions.
 const PROVIDERS = {
     "Gemini": {
-        defaultUrl: "https://generativelanguage.googleapis.com/v1beta/openai",
+        defaultUrl: "https://generativelanguage.googleapis.com/v1beta",
         liveModels: true,
         needsAuth: true,
         envVar: "GEMINI_API_KEY",
