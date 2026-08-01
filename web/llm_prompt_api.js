@@ -2,11 +2,14 @@
 //
 // Responsibilities:
 //   - Refresh the model_name dropdown when provider / server_url change
-//   - Live-query /v1/models for Gemini / Custom (cached 60s)
+//   - Fetch the LIVE model list from the server route (the server holds the
+//     API keys; the browser does not), so new provider models appear
+//     automatically without editing any hardcoded list
 //   - Apply capability filter (text / vision / multimodal) before showing
 //   - Show/hide Gemini-only widgets (thinking budget, caching)
 
 import { app } from "/scripts/app.js";
+import { api } from "/scripts/api.js";
 
 // Mirror of the Python-side PROVIDERS table — just enough for live querying.
 // Keeps the JS independent of the backend for client-side decisions.
@@ -35,7 +38,7 @@ const PROVIDERS = {
     },
     "Grok (xAI)": {
         defaultUrl: "https://api.x.ai/v1",
-        liveModels: false,
+        liveModels: true,
         needsAuth: true,
         envVar: "XAI_API_KEY",
         fallback: [
@@ -77,24 +80,18 @@ function shouldShow(modelId, filterMode) {
     return true;
 }
 
-// Live-query a /v1/models endpoint with optional auth.
-async function fetchLiveModels(baseUrl, apiKey) {
-    if (!baseUrl) return [];
+// Ask the SERVER for the live model list. The server route runs
+// _get_models_for_provider() with the API key resolved from env / .env, so
+// this returns the provider's current models (Gemini native, Grok & Custom
+// via OpenAI-compatible /v1/models). Returns [] on any failure.
+async function fetchServerModels(provider, serverUrl) {
     try {
-        const url = baseUrl.replace(/\/$/, "") + "/models";
-        const headers = { "Accept": "application/json" };
-        if (apiKey) headers["Authorization"] = `Bearer ${apiKey}`;
-        const resp = await fetch(url, {
-            method: "GET", headers,
-            signal: AbortSignal.timeout(3000),
-        });
+        const params = new URLSearchParams({ provider: provider || "" });
+        if (serverUrl) params.set("server_url", serverUrl);
+        const resp = await api.fetchApi(`/llm_prompt_api/models?${params.toString()}`);
         if (!resp.ok) return [];
         const json = await resp.json();
-        const data = json?.data;
-        if (!Array.isArray(data)) return [];
-        return data
-            .map((e) => e?.id || e?.name)
-            .filter((s) => typeof s === "string" && s);
+        return Array.isArray(json?.models) ? json.models : [];
     } catch (e) {
         return [];
     }
@@ -131,27 +128,20 @@ async function refreshModels(node) {
     const cfg = PROVIDERS[provider];
     if (!cfg) return;
 
-    const baseUrl = (urlW?.value?.trim() || cfg.defaultUrl).replace(/\/$/, "");
+    const serverUrl = urlW?.value?.trim() || "";
     const filterMode = filterW?.value || "all";
 
-    // We never have the API key in the browser — it lives in os.environ or
-    // .env on the ComfyUI server side. So for providers that require auth,
-    // the browser-side live query is expected to fail; the dropdown is
-    // populated from the Python-side INPUT_TYPES instead (which DOES have
-    // env access). Show the fallback list as a sensible default here.
-    let all = [];
-    let source = "fallback";
-    if (cfg.liveModels && baseUrl && !cfg.needsAuth) {
-        all = await fetchLiveModels(baseUrl, null);
-        if (all.length > 0) source = "live /v1/models";
-    }
+    // The browser has no API keys (env / .env live on the server), so we ask
+    // the server route for the live list. It runs _get_models_for_provider()
+    // with credentials and returns the provider's current models — that's what
+    // makes new Gemini / Grok models show up automatically.
+    let source = "server route (live)";
+    let all = await fetchServerModels(provider, serverUrl);
     if (all.length === 0) {
+        // Route unreachable (server not up, no key, offline) — show the
+        // hardcoded snapshot so the dropdown is never empty.
         all = [...cfg.fallback];
-        if (cfg.needsAuth) {
-            source = `fallback (browser has no key — server-side dropdown uses ${cfg.envVar} from env or .env)`;
-        } else {
-            source = "fallback (live query failed or returned empty)";
-        }
+        source = `fallback (server route unavailable — server resolves ${cfg.envVar || "server_url"} from env / .env)`;
     }
 
     const filtered = all.filter((m) => shouldShow(m, filterMode));

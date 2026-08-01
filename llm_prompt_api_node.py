@@ -77,8 +77,10 @@ PROVIDERS = {
         "base_url": "https://api.x.ai/v1",
         "env_var": ["XAI_API_KEY", "GROK_API_KEY"],
         "needs_auth": True,
-        # No /models endpoint per xAI docs — always use the curated list
-        "live_models": False,
+        # xAI exposes an OpenAI-compatible GET /v1/models (Bearer auth), so we
+        # live-query it just like any other OpenAI-compat provider. The curated
+        # list below is only the no-key / offline fallback.
+        "live_models": True,
         "fallback_models": [
             "grok-4.3",
             "grok-4.20-0309-reasoning",
@@ -269,6 +271,35 @@ def _get_models_for_provider(
     _MODEL_LIST_CACHE[cache_key] = deduped
     _MODEL_LIST_CACHE_TS[cache_key] = now
     return deduped
+
+
+# ---------------------------------------------------------------------------
+# Server route: let the browser fetch the LIVE per-provider model list.
+#
+# The browser never holds the API keys (they live in env / .env on the ComfyUI
+# server), so the client-side JS cannot query Gemini/Grok directly. Instead the
+# JS calls this route; the SERVER runs _get_models_for_provider() with the
+# resolved credentials and returns the current list. This is what makes the
+# dropdown auto-populate with new models the moment a provider ships them —
+# no hardcoded list to keep in sync.
+# ---------------------------------------------------------------------------
+try:
+    from server import PromptServer
+    from aiohttp import web as _aiohttp_web
+
+    @PromptServer.instance.routes.get("/llm_prompt_api/models")
+    async def _llm_prompt_api_models_route(request):
+        provider = request.query.get("provider", "")
+        server_url = request.query.get("server_url", "")
+        try:
+            models = _get_models_for_provider(provider, server_url)
+        except Exception as exc:  # never 500 the frontend — degrade to fallback
+            return _aiohttp_web.json_response(
+                {"provider": provider, "models": [], "error": str(exc)}
+            )
+        return _aiohttp_web.json_response({"provider": provider, "models": models})
+except Exception as _route_exc:  # pragma: no cover — server unavailable at import
+    print(f"[LLM_Prompt_API] model-list route not registered: {_route_exc}")
 
 
 def _comfyui_root() -> Path:

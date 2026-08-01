@@ -23,6 +23,19 @@ from .llm_prompt_api_node import (
 NODE_CLASS_MAPPINGS = {**_GGUF_NODES, **_API_NODES}
 NODE_DISPLAY_NAME_MAPPINGS = {**_GGUF_NAMES, **_API_NAMES}
 
+# Dataset captioning nodes (Load Image For Caption + Save Caption). Optional —
+# only register if the import succeeds, so a failure here never takes down the
+# core LLM nodes.
+try:
+    from .dataset_caption_nodes import (
+        NODE_CLASS_MAPPINGS as _CAPTION_NODES,
+        NODE_DISPLAY_NAME_MAPPINGS as _CAPTION_NAMES,
+    )
+    NODE_CLASS_MAPPINGS.update(_CAPTION_NODES)
+    NODE_DISPLAY_NAME_MAPPINGS.update(_CAPTION_NAMES)
+except Exception as e:  # pragma: no cover
+    print(f"[LLM_Prompt] Dataset captioning nodes not loaded: {e}")
+
 # Grok Imagine (BYO key) nodes — optional; only register if the import succeeds
 # (keeps the core LLM nodes loading even if comfy_api/VIDEO support is missing).
 try:
