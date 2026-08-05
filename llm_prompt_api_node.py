@@ -197,7 +197,12 @@ def _fetch_models_from_server(base_url: str, api_key: str | None, native: str = 
             name = entry.get("name") or ""
             if name.startswith("models/"):
                 name = name[len("models/"):]
-            if not name.startswith("gemini-"):
+            # Google serves more than the gemini-* family on this key: Gemma
+            # (gemma-3-27b-it and friends) and LearnLM are chat models on the
+            # same endpoint. The supportedGenerationMethods check below is the
+            # real filter — this prefix list only keeps out obvious non-chat
+            # families, so it must not be narrowed back to "gemini-" alone.
+            if not name.startswith(("gemini-", "gemma-", "learnlm-")):
                 continue
             # Skip non-chat methods (embeddings, tuning, etc.)
             methods = entry.get("supportedGenerationMethods") or []
@@ -719,18 +724,33 @@ def _send_gemini_native(
     # high) instead of a token budget; the two are mutually exclusive. When a
     # level is set AND the model is a Gen-3 Pro, send the level; otherwise fall
     # back to the token budget (0 = disabled, recommended for prompt gen).
-    _is_gen3_pro = "gemini-3" in model.lower() and "pro" in model.lower()
-    if thinking_level and thinking_level != "None" and _is_gen3_pro:
+    # The split is by MAJOR FAMILY, not by Pro/Flash tier. Probed against the
+    # live API 2026-08-05:
+    #
+    #   model                    budget=0   level=low   omitted
+    #   gemini-3.6-flash         400        OK          OK
+    #   gemini-3.5-flash         OK         OK          OK
+    #   gemini-3.5-flash-lite    400        OK          OK
+    #   gemini-3.1-pro-preview   400        OK          OK
+    #   gemini-3-flash-preview   OK         OK          OK
+    #   gemini-2.5-flash         OK         400         OK
+    #
+    # So: every Gemini 3 accepts thinking_level and several reject
+    # thinking_budget; 2.5 is the reverse. Do NOT narrow this back to a
+    # "pro" check — that was the bug, and it made gemini-3.6-flash fail with
+    # HTTP 400 INVALID_ARGUMENT on every call.
+    _is_gen3 = "gemini-3" in model.lower()
+    if _is_gen3:
+        # No true "off" on Gen-3; "low" is the nearest to disabled.
+        _level = thinking_level if (thinking_level and thinking_level != "None") else "low"
         try:
             config_kwargs["thinking_config"] = types.ThinkingConfig(
-                thinking_level=thinking_level,
+                thinking_level=_level,
             )
         except Exception:
-            # SDK too old for thinking_level — fall back to the token budget.
-            if thinking_budget >= 0:
-                config_kwargs["thinking_config"] = types.ThinkingConfig(
-                    thinking_budget=int(thinking_budget),
-                )
+            # SDK too old for thinking_level — omit the config entirely, which
+            # every model accepts, rather than sending a budget it may reject.
+            pass
     elif thinking_budget >= 0:
         config_kwargs["thinking_config"] = types.ThinkingConfig(
             thinking_budget=int(thinking_budget),
@@ -1067,9 +1087,9 @@ class LLMPromptAPINode(io.ComfyNode):
                 io.String.Input("stop_sequences", default="", advanced=True,
                                 tooltip="Comma-separated strings that stop generation. Example: 'END,---,EOF'. Empty = default."),
                 io.Int.Input("gemini_thinking_budget", default=0, min=0, max=24576, advanced=True,
-                             tooltip="Gemini flash/2.5 only. Reasoning tokens before answering. 0 = no thinking (recommended for prompts). Ignored on Gemini 3 Pro (use gemini_thinking_level)."),
+                             tooltip="Gemini 2.5 and older only. Reasoning tokens before answering. 0 = no thinking (recommended for prompts). Ignored on every Gemini 3 model — several reject it outright."),
                 io.Combo.Input("gemini_thinking_level", options=["None", "low", "medium", "high"], default="None", advanced=True,
-                               tooltip="Gemini 3 Pro only. Reasoning depth — the Gen-3 Pro replacement for thinking_budget. When set (not None) on a Gemini 3 Pro model it overrides the budget. Leave None for prompts."),
+                               tooltip="Gemini 3 only (all tiers, not just Pro). Reasoning depth. None = 'low', the nearest thing to off. Gemini 2.5 rejects this — it uses the token budget instead."),
                 io.Boolean.Input("enable_caching", default=False, advanced=True,
                                  tooltip="Gemini only. Caches the stable prefix (system + style + canvas) to cut cost on repeated variations. Needs a ~1024+ token prefix."),
                 io.Boolean.Input("disable_thinking", default=True, advanced=True,
@@ -1080,6 +1100,8 @@ class LLMPromptAPINode(io.ComfyNode):
                 # ===== Optional connections =====
                 io.String.Input("style", optional=True, force_input=True,
                                 tooltip="Style description from an external node."),
+                io.String.Input("context", optional=True, force_input=True,
+                                tooltip="Upstream analysis from another node (e.g. a vision-reader LLM Prompt). Appended as its own labelled block ahead of your request."),
                 io.Int.Input("width", optional=True, force_input=True,
                              tooltip="Image width - drives an aspect-ratio composition profile."),
                 io.Int.Input("height", optional=True, force_input=True,
@@ -1129,6 +1151,7 @@ class LLMPromptAPINode(io.ComfyNode):
         disable_thinking: bool,
         timeout_seconds: int,
         style: str = "",
+        context: str = "",
         width: int = 0,
         height: int = 0,
         image=None,
@@ -1259,6 +1282,10 @@ class LLMPromptAPINode(io.ComfyNode):
             stable_parts.append(f"STYLE:\n{style.strip()}")
 
         variable_parts: list[str] = []
+        # Upstream analysis (stage 1 of a two-stage graph). Variable, not stable:
+        # it changes every run, so it must stay OUT of the Gemini cache prefix.
+        if context and context.strip():
+            variable_parts.append(f"REFERENCE CONTEXT:\n{context.strip()}")
         if user_prompt and user_prompt.strip():
             variable_parts.append(f"USER REQUEST:\n{user_prompt.strip()}")
 

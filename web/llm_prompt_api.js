@@ -97,28 +97,39 @@ async function fetchServerModels(provider, serverUrl) {
     }
 }
 
-// Replace the model_name widget's options list, keeping the current value
-// selected when possible.
-function updateModelDropdown(node, options) {
+// Replace the model_name widget's options list.
+//
+// preserveValue is the difference between a workflow LOAD and a user changing
+// provider. On load the saved model must survive even if it belongs to another
+// provider — the Python side validates against a superset of every provider's
+// models, so keeping it is always safe, and resetting it silently corrupts the
+// saved workflow. On a deliberate provider change, resetting is what the user
+// expects.
+function updateModelDropdown(node, options, preserveValue = false) {
     const w = node.widgets?.find((widget) => widget.name === "model_name");
     if (!w) return;
 
-    if (Array.isArray(w.options?.values)) {
-        w.options.values = options;
-    } else if (w.options) {
-        w.options.values = options;
-    } else {
-        w.options = { values: options };
+    let values = options;
+    const current = w.value;
+
+    if (preserveValue && current && !values.includes(current)) {
+        values = [current, ...values];
     }
 
-    if (options.length > 0 && !options.includes(w.value)) {
-        w.value = options[0];
+    if (w.options) {
+        w.options.values = values;
+    } else {
+        w.options = { values: values };
+    }
+
+    if (!preserveValue && values.length > 0 && !values.includes(w.value)) {
+        w.value = values[0];
     }
 
     node.setDirtyCanvas(true, true);
 }
 
-async function refreshModels(node) {
+async function refreshModels(node, preserveValue = false) {
     const providerW = node.widgets?.find((w) => w.name === "provider");
     const urlW = node.widgets?.find((w) => w.name === "server_url");
     const filterW = node.widgets?.find((w) => w.name === "model_filter");
@@ -147,7 +158,7 @@ async function refreshModels(node) {
     const filtered = all.filter((m) => shouldShow(m, filterMode));
     const final = filtered.length > 0 ? filtered : all;
 
-    updateModelDropdown(node, final);
+    updateModelDropdown(node, final, preserveValue);
     console.log(
         `[LLM_Prompt_API] ${provider}: ${final.length}/${all.length} models | source: ${source} | filter: ${filterMode}`
     );
@@ -225,6 +236,20 @@ app.registerExtension({
             watch("server_url", () => refreshModels(node));
             watch("model_filter", () => refreshModels(node));
 
+            return r;
+        };
+
+        // onNodeCreated fires BEFORE ComfyUI restores saved widget values, so
+        // the refresh it kicks off reads the DEFAULT provider and resolves
+        // after the restore — overwriting the saved model with one from the
+        // wrong provider. onConfigure runs after the values are in place, so
+        // refresh again here, preserving what was loaded.
+        const onConfigure = nodeType.prototype.onConfigure;
+        nodeType.prototype.onConfigure = function () {
+            const r = onConfigure?.apply(this, arguments);
+            const node = this;
+            refreshModels(node, true);
+            updateProviderSpecificVisibility(node);
             return r;
         };
     },
