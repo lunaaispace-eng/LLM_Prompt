@@ -36,6 +36,7 @@ from .llm_prompt_node import (
     _build_canvas_profile,
     _tensor_to_base64_png,
     _sample_video_frames,
+    _resolve_model_settings,
 )
 from .output_cleaner import OutputCleanConfig, clean_model_output, normalize_prompt_separator, split_positive_negative
 from .h3_validate import validate_h3, format_log
@@ -740,8 +741,15 @@ def _send_gemini_native(
     # thinking_budget; 2.5 is the reverse. Do NOT narrow this back to a
     # "pro" check — that was the bug, and it made gemini-3.6-flash fail with
     # HTTP 400 INVALID_ARGUMENT on every call.
+    # Gemma is served by the same key and endpoint but has no thinking config at
+    # all — sending either field is a 400. Must be checked before the Gemini
+    # branches, because a Gemma name matches neither and would fall through to
+    # thinking_budget below.
+    _is_gemma = "gemma" in model.lower()
     _is_gen3 = "gemini-3" in model.lower()
-    if _is_gen3:
+    if _is_gemma:
+        pass
+    elif _is_gen3:
         # No true "off" on Gen-3; "low" is the nearest to disabled.
         _level = thinking_level if (thinking_level and thinking_level != "None") else "low"
         try:
@@ -1066,31 +1074,33 @@ class LLMPromptAPINode(io.ComfyNode):
                 io.Boolean.Input("split_output", default=True,
                                  tooltip="ON splits a 'positive | negative' result into the two outputs. OFF = full text on positive, negative empty. Uses the same bulletproof marker contract as the GGUF node."),
                 io.Int.Input("max_tokens", default=4096, min=64, max=32000,
-                             tooltip="Maximum tokens to generate. 4096 handles single prompts and short lists. Raise for long LTX video tracks."),
+                             tooltip="Ceiling on the reply length, not a target — the model stops when it is done. Rough sizes: an H3 prompt at 350-500 words is ~800-1200 tokens; a Vision Reader block is ~150 per image. 4096 covers both with room to spare. Raise it only for long multi-scene lists. Too LOW is the dangerous direction — the reply is cut off mid-sentence."),
                 io.Int.Input("seed", default=0, min=0, max=2**32 - 1,
                              tooltip="Random seed. 0 = non-deterministic (the provider picks). Cloud APIs treat this as best-effort."),
 
                 # ===== ADVANCED (collapsed by default) =====
+                io.Boolean.Input("auto_settings", default=True, advanced=True,
+                                 tooltip="ON = the node sets temperature / top_p / top_k / min_p / penalties to the official values for the chosen model family, every run, ignoring the sliders below. Gemma 4: 1.0 / 0.95 / 64. Qwen 3 instruct: 0.7 / 0.8 / 20. Qwen-VL: 0.7 / 0.9 / 20. Gemini and Grok have no published table — for those the sliders are used as-is and the console says so. OFF = your slider values always."),
                 io.Float.Input("temperature", default=0.7, min=0.0, max=2.0, step=0.05, advanced=True,
-                               tooltip="Sampling randomness. Lower = focused, higher = creative. Auto-fills when you pick a model from a known family."),
+                               tooltip="Sampling randomness. Lower = focused, higher = creative. 0.7 is the sane default for prompt writing; 1.0 means the same brief writes a different prompt every run. Overridden when auto_settings is ON and the model family is known."),
                 io.Float.Input("top_p", default=0.9, min=0.0, max=1.0, step=0.05, advanced=True,
-                               tooltip="Nucleus sampling. Ref: Qwen ~0.8, Gemma ~0.95. Auto-fills with the model preset."),
+                               tooltip="Nucleus sampling. Gemma 4: 0.95. Qwen 3 instruct: 0.8. Qwen-VL: 0.9. Overridden when auto_settings is ON."),
                 io.Int.Input("top_k", default=0, min=0, max=200, advanced=True,
-                             tooltip="Top-K. 0 = disabled. Qwen 20, Gemma 64. Grok / OpenAI reject it — stripped automatically."),
+                             tooltip="Top-K. 0 = disabled. Gemma 4: 64. Qwen: 20. Gemini accepts it; Grok / OpenAI reject it and it is stripped automatically. Overridden when auto_settings is ON."),
                 io.Float.Input("min_p", default=0.0, min=0.0, max=1.0, step=0.01, advanced=True,
-                               tooltip="Min-P. 0.0 = disabled (Unsloth default). Some cloud APIs reject it — stripped automatically."),
+                               tooltip="Min-P. 0.0 = disabled. IGNORED BY EVERY CLOUD PROVIDER — a llama.cpp setting that only does something on the local LLM Prompt node. Leave it alone here."),
                 io.Float.Input("presence_penalty", default=0.0, min=-2.0, max=2.0, step=0.1, advanced=True,
-                               tooltip="Discourages reusing tokens. Unsloth recommends 1.5 for Qwen instruct, 0.0 for Gemma 4."),
+                               tooltip="Discourages reusing tokens. 0.0 for Gemma 4. Gemini's native API ignores it; only OpenAI-compatible endpoints honour it."),
                 io.Float.Input("frequency_penalty", default=0.0, min=-2.0, max=2.0, step=0.1, advanced=True,
-                               tooltip="Discourages repeating frequent tokens. 0.0 = disabled."),
+                               tooltip="Discourages repeating frequent tokens. 0.0 = disabled. Gemini's native API ignores it; only OpenAI-compatible endpoints honour it."),
                 io.Float.Input("repetition_penalty", default=1.0, min=0.5, max=2.0, step=0.05, advanced=True,
-                               tooltip="Repetition penalty. 1.0 = disabled. Many cloud APIs ignore or reject it."),
+                               tooltip="Repetition penalty. 1.0 = disabled. IGNORED OR REJECTED BY EVERY CLOUD PROVIDER — a llama.cpp setting, stripped before sending. Leave it alone here."),
                 io.String.Input("stop_sequences", default="", advanced=True,
                                 tooltip="Comma-separated strings that stop generation. Example: 'END,---,EOF'. Empty = default."),
                 io.Int.Input("gemini_thinking_budget", default=0, min=0, max=24576, advanced=True,
-                             tooltip="Gemini 2.5 and older only. Reasoning tokens before answering. 0 = no thinking (recommended for prompts). Ignored on every Gemini 3 model — several reject it outright."),
+                             tooltip="GEMINI 2.5 AND OLDER ONLY. Reasoning tokens before answering; 0 = no thinking, which is what you want for prompt writing. The node picks the right field for you: Gemini 2.5 gets this, Gemini 3 gets thinking_level below, Gemma gets neither (it rejects both). Nothing to guess — this widget is simply ignored unless the model is a 2.5."),
                 io.Combo.Input("gemini_thinking_level", options=["None", "low", "medium", "high"], default="None", advanced=True,
-                               tooltip="Gemini 3 only (all tiers, not just Pro). Reasoning depth. None = 'low', the nearest thing to off. Gemini 2.5 rejects this — it uses the token budget instead."),
+                               tooltip="GEMINI 3 ONLY, all tiers. Reasoning depth; None = 'low', the nearest thing to off and the right choice for prompt writing. Ignored unless the model is a Gemini 3 — see the budget widget above."),
                 io.Boolean.Input("enable_caching", default=False, advanced=True,
                                  tooltip="Gemini only. Caches the stable prefix (system + style + canvas) to cut cost on repeated variations. Needs a ~1024+ token prefix."),
                 io.Boolean.Input("disable_thinking", default=True, advanced=True,
@@ -1158,6 +1168,7 @@ class LLMPromptAPINode(io.ComfyNode):
         enable_caching: bool,
         disable_thinking: bool,
         timeout_seconds: int,
+        auto_settings: bool = True,
         vision_mp: float = 0.0,
         validate: str = "off",
         style: str = "",
@@ -1171,6 +1182,30 @@ class LLMPromptAPINode(io.ComfyNode):
         cfg = PROVIDERS.get(provider)
         if not cfg:
             raise RuntimeError(f"Unknown provider: {provider!r}")
+
+        # Official sampling values for the model family, applied server-side on
+        # every run. The frontend cannot do this job: a JS preset only fires on a
+        # manual dropdown click, so on workflow load the sliders keep stale
+        # values — the same bug the local node was fixed for.
+        if auto_settings:
+            resolved = _resolve_model_settings((model_name or "").lower())
+            if resolved:
+                temperature = resolved["temperature"]
+                top_p = resolved["top_p"]
+                top_k = resolved["top_k"]
+                min_p = resolved["min_p"]
+                repetition_penalty = resolved["repetition_penalty"]
+                presence_penalty = resolved["presence_penalty"]
+                print(
+                    f"[LLM_Prompt_API] auto_settings -> temp={temperature}, top_p={top_p}, "
+                    f"top_k={top_k}, min_p={min_p}, presence_penalty={presence_penalty}, "
+                    f"rep={repetition_penalty}"
+                )
+            else:
+                print(
+                    f"[LLM_Prompt_API] auto_settings ON but no published preset for "
+                    f"'{model_name}' — using the slider values as-is."
+                )
 
         base_url = _resolve_base_url(provider, server_url)
         # Keys are NEVER passed via node widgets — read only from env / .env
