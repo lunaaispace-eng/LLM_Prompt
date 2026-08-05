@@ -75,6 +75,15 @@ def validate_h3(text: str, frames: int | None = None) -> tuple[str, list[str]]:
         expected = THREE_FIELD
 
     present = _sections_present(text, expected)
+
+    # Not an H3 prompt at all -- a vision/analysis stage, most likely. Say that
+    # once instead of listing every H3 section as missing.
+    if not present and "[Shot" not in text:
+        return text, [
+            "this is not an H3 prompt (no H3 sections, no [Shot N] markers). "
+            "If this node is a vision or analysis stage, set validate=off on it."
+        ]
+
     missing = [s for s in expected if s not in present]
     if missing:
         findings.append(f"missing section(s): {', '.join(missing)}")
