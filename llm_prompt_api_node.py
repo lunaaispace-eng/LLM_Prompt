@@ -1107,13 +1107,13 @@ class LLMPromptAPINode(io.ComfyNode):
                              tooltip="HTTP timeout for the chat call. Raise to 180+ for big reasoning models."),
                 io.Float.Input("vision_mp", default=0.0, min=0.0, max=8.0, step=0.1, advanced=True,
                                tooltip="Downscale input images to at most this many megapixels before encoding. 0 = off (send at full size). ~1.0 is plenty for reference reading and saves context and time."),
+                io.Combo.Input("validate", options=["off", "h3"], default="off", advanced=True,
+                               tooltip="Check the output's format and report findings on the `log` output. 'h3' checks MiniMax H3 prompts: section names and order, no mixing of the 3-field and 6-section formats, shot numbering, cut timestamps, labels, dialogue tags. Only the S.SS in an alignment line is repaired, and only when `frames` is wired."),
                 # NEW WIDGETS GO AT THE END OF THIS LIST, NEVER IN THE MIDDLE.
                 # Saved workflows store widget values positionally, so inserting
                 # one shifts every value after it and corrupts existing graphs.
                 io.Boolean.Input("auto_settings", default=True, advanced=True,
-                                 tooltip="ON = the node sets temperature / top_p / top_k / min_p / penalties to the official values for the chosen model family, every run, ignoring the sliders above. Gemma 4: 1.0 / 0.95 / 64. Qwen 3 instruct: 0.7 / 0.8 / 20. Qwen-VL: 0.7 / 0.9 / 20. Gemini and Grok have no published table — for those the sliders are used as-is and the console says so. OFF = your slider values always."),
-                io.Combo.Input("validate", options=["off", "h3"], default="off", advanced=True,
-                               tooltip="Check the output's format and report findings on the `log` output. 'h3' checks MiniMax H3 prompts: section names and order, no mixing of the 3-field and 6-section formats, shot numbering, cut timestamps, labels, dialogue tags. Only the S.SS in an alignment line is repaired, and only when `frames` is wired."),
+                                 tooltip="ON = the node sets temperature / top_p / top_k / min_p / penalties to the official values for the chosen model family, every run, ignoring the sliders above. Gemma 4: 1.0 / 0.95 / 64. Qwen 3 instruct: 0.7 / 0.8 / 20. Qwen-VL: 0.7 / 0.9 / 20. Gemini and Grok have no published table - for those the sliders are used as-is and the console says so. OFF = your slider values always."),
 
                 # ===== Optional connections =====
                 io.String.Input("style", optional=True, force_input=True,
