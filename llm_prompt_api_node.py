@@ -38,6 +38,7 @@ from .llm_prompt_node import (
     _sample_video_frames,
 )
 from .output_cleaner import OutputCleanConfig, clean_model_output, normalize_prompt_separator, split_positive_negative
+from .h3_validate import validate_h3, format_log
 from comfy_api.latest import io
 
 
@@ -1096,6 +1097,10 @@ class LLMPromptAPINode(io.ComfyNode):
                                  tooltip="Strips any <think> reasoning from the OUTPUT as a safety net. For Gemini, set the thinking budget/level to 0/None to disable at the source."),
                 io.Int.Input("timeout_seconds", default=120, min=5, max=600, advanced=True,
                              tooltip="HTTP timeout for the chat call. Raise to 180+ for big reasoning models."),
+                io.Float.Input("vision_mp", default=0.0, min=0.0, max=8.0, step=0.1, advanced=True,
+                               tooltip="Downscale input images to at most this many megapixels before encoding. 0 = off (send at full size). ~1.0 is plenty for reference reading and saves context and time."),
+                io.Combo.Input("validate", options=["off", "h3"], default="off", advanced=True,
+                               tooltip="Check the output's format and report findings on the `log` output. 'h3' checks MiniMax H3 prompts: section names and order, no mixing of the 3-field and 6-section formats, shot numbering, cut timestamps, labels, dialogue tags. Only the S.SS in an alignment line is repaired, and only when `frames` is wired."),
 
                 # ===== Optional connections =====
                 io.String.Input("style", optional=True, force_input=True,
@@ -1108,10 +1113,13 @@ class LLMPromptAPINode(io.ComfyNode):
                              tooltip="Image height - drives an aspect-ratio composition profile."),
                 io.Image.Input("image", optional=True, tooltip="Input image for vision-capable models."),
                 io.Video.Input("video", optional=True, tooltip="Input video for vision-capable models."),
+                io.Int.Input("frames", optional=True, force_input=True,
+                             tooltip="The clip's real frame count, for `validate`. Lets S.SS and the cut times be checked against the actual duration instead of just their format."),
             ],
             outputs=[
                 io.String.Output("positive", display_name="positive"),
                 io.String.Output("negative", display_name="negative"),
+                io.String.Output("log", display_name="log"),
             ],
         )
 
@@ -1150,12 +1158,15 @@ class LLMPromptAPINode(io.ComfyNode):
         enable_caching: bool,
         disable_thinking: bool,
         timeout_seconds: int,
+        vision_mp: float = 0.0,
+        validate: str = "off",
         style: str = "",
         context: str = "",
         width: int = 0,
         height: int = 0,
         image=None,
         video=None,
+        frames: int = 0,
     ):
         cfg = PROVIDERS.get(provider)
         if not cfg:
@@ -1300,12 +1311,12 @@ class LLMPromptAPINode(io.ComfyNode):
         images_b64: list[str] = []
         if image is not None and getattr(image, "shape", (0,))[0] > 0:
             for i in range(image.shape[0]):
-                img = _tensor_to_base64_png(image[i])
+                img = _tensor_to_base64_png(image[i], max_mp=vision_mp)
                 if img:
                     images_b64.append(img)
         if video is not None:
             for frame in _sample_video_frames(video, 16):
-                img = _tensor_to_base64_png(frame)
+                img = _tensor_to_base64_png(frame, max_mp=vision_mp)
                 if img:
                     images_b64.append(img)
 
@@ -1404,7 +1415,14 @@ class LLMPromptAPINode(io.ComfyNode):
         # Split 'positive|negative' into the two outputs (or full text on
         # positive + empty negative when split_output is off / no pipe).
         positive, negative = split_positive_negative(cleaned, split_output)
-        return io.NodeOutput(positive, negative)
+
+        log = ""
+        if validate == "h3":
+            positive, findings = validate_h3(positive, frames or None)
+            log = format_log(positive, frames or None, findings)
+            print(f"[LLM_Prompt_API] {log}")
+
+        return io.NodeOutput(positive, negative, log)
 
 
 # ---------------------------------------------------------------------------

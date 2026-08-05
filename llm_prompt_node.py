@@ -39,6 +39,7 @@ from comfy_api.latest import io
 
 # Bundled output cleaner â€” no external dependencies
 from .output_cleaner import OutputCleanConfig, clean_model_output, normalize_prompt_separator, split_positive_negative
+from .h3_validate import validate_h3, format_log
 
 logger = logging.getLogger(__name__)
 
@@ -450,13 +451,31 @@ def _filter_kwargs_for_callable(fn, kwargs: dict) -> dict:
     return {k: v for k, v in kwargs.items() if k in allowed}
 
 
-def _tensor_to_base64_png(tensor) -> str | None:
+def _downscale_pil_to_mp(pil_img, max_mp: float):
+    """Shrink a PIL image to at most max_mp megapixels. 0 or less = unchanged.
+
+    Reference sheets and plates arrive at whatever size the loader produced;
+    encoding them at full size costs context and time for detail the vision
+    encoder discards anyway. Aspect ratio is preserved.
+    """
+    if not max_mp or max_mp <= 0:
+        return pil_img
+    w, h = pil_img.size
+    budget = max_mp * 1_000_000
+    area = w * h
+    if area <= budget:
+        return pil_img
+    scale = (budget / area) ** 0.5
+    return pil_img.resize((max(1, int(w * scale)), max(1, int(h * scale))), Image.LANCZOS)
+
+
+def _tensor_to_base64_png(tensor, max_mp: float = 0.0) -> str | None:
     if tensor is None:
         return None
     if tensor.ndim == 4:
         tensor = tensor[0]
     array = (tensor * 255).clamp(0, 255).to(torch.uint8).cpu().numpy()
-    pil_img = Image.fromarray(array, mode="RGB")
+    pil_img = _downscale_pil_to_mp(Image.fromarray(array, mode="RGB"), max_mp)
     buf = BytesIO()
     pil_img.save(buf, format="PNG")
     return base64.b64encode(buf.getvalue()).decode("utf-8")
@@ -757,7 +776,7 @@ MAX_VIDEO_FRAMES = 30
 MAX_AUDIO_DURATION_SECONDS = 60
 
 
-def _image_tensor_to_content(image: torch.Tensor) -> dict:
+def _image_tensor_to_content(image: torch.Tensor, max_mp: float = 0.0) -> dict:
     """A single ComfyUI image tensor -> an OpenAI-compatible image_url dict.
 
     Encodes JPEG quality 95 (much smaller base64 than PNG; the vision encoder
@@ -767,7 +786,7 @@ def _image_tensor_to_content(image: torch.Tensor) -> dict:
     if image.ndim == 4:
         image = image[0]
     arr = (image.cpu().numpy() * 255).clip(0, 255).astype(np.uint8)
-    pil = Image.fromarray(arr, mode="RGB")
+    pil = _downscale_pil_to_mp(Image.fromarray(arr, mode="RGB"), max_mp)
     buf = BytesIO()
     pil.save(buf, format="JPEG", quality=95)
     b64 = base64.b64encode(buf.getvalue()).decode("utf-8")
@@ -1524,6 +1543,8 @@ class _LLMRunner:
         image_max_tokens: int = 4096,
         video_fps: float = 1.0,
         verbose_logging: bool = False,
+        vision_mp: float = 0.0,
+        validate: str = "off",
         style: str = "",
         context: str = "",
         width: int = 0,
@@ -1532,6 +1553,7 @@ class _LLMRunner:
         reference_image=None,
         video=None,
         audio=None,
+        frames: int = 0,
     ):
         # Gate the chatty status prints for this run (warnings/errors still show).
         self._verbose = bool(verbose_logging)
@@ -1664,17 +1686,18 @@ class _LLMRunner:
         # Main image(s). When a reference image is also present, label this one so
         # the model knows which is the content source vs the style source.
         if image is not None:
-            frames = [image[i] for i in range(image.shape[0])] if image.ndim == 4 else [image]
-            if reference_image is not None and frames:
+            # NB: not `frames` — that name is the clip's frame-count input.
+            img_frames = [image[i] for i in range(image.shape[0])] if image.ndim == 4 else [image]
+            if reference_image is not None and img_frames:
                 media_content.append({"type": "text", "text": "Input Image:"})
-            for fr in frames:
-                media_content.append(_image_tensor_to_content(fr))
+            for fr in img_frames:
+                media_content.append(_image_tensor_to_content(fr, max_mp=vision_mp))
 
         # Reference image for style-transfer prompts.
         if reference_image is not None:
             media_content.append({"type": "text", "text": "Reference Image:"})
             ref_frame = reference_image[0] if reference_image.ndim == 4 else reference_image
-            media_content.append(_image_tensor_to_content(ref_frame))
+            media_content.append(_image_tensor_to_content(ref_frame, max_mp=vision_mp))
 
         # Video frames, FPS-subsampled and context-budget aware.
         if video is not None:
@@ -1736,7 +1759,14 @@ class _LLMRunner:
             # Split 'positive|negative' into the two outputs (or full text on
             # positive + empty negative when split_output is off / no pipe).
             positive, negative = split_positive_negative(result, split_output)
-            return (positive, negative)
+
+            log = ""
+            if validate == "h3":
+                positive, findings = validate_h3(positive, frames or None)
+                log = format_log(positive, frames or None, findings)
+                print(f"[LLM_Prompt] {log}")
+
+            return (positive, negative, log)
 
         finally:
             if not keep_model_loaded:
@@ -1863,6 +1893,10 @@ class LLMPromptNode(io.ComfyNode):
                 io.Boolean.Input("verbose_logging", default=False, advanced=True,
                                  tooltip="Print detailed step-by-step info to the console. OFF = quiet log; "
                                          "ON to troubleshoot. (Does not affect generation.)"),
+                io.Float.Input("vision_mp", default=0.0, min=0.0, max=8.0, step=0.1, advanced=True,
+                               tooltip="Downscale input images to at most this many megapixels before encoding. 0 = off (send at full size). ~1.0 is plenty for reference reading and saves context and time."),
+                io.Combo.Input("validate", options=["off", "h3"], default="off", advanced=True,
+                               tooltip="Check the output's format and report findings on the `log` output. 'h3' checks MiniMax H3 prompts: section names and order, no mixing of the 3-field and 6-section formats, shot numbering, cut timestamps, labels, dialogue tags. Only the S.SS in an alignment line is repaired, and only when `frames` is wired."),
 
                 # ===== Optional connections (input sockets) =====
                 io.String.Input("style", optional=True, force_input=True,
@@ -1878,10 +1912,13 @@ class LLMPromptNode(io.ComfyNode):
                                tooltip="Reference image for style-transfer prompts (the style source)."),
                 io.Image.Input("video", optional=True, tooltip="Video frames [F,H,W,3] for vision analysis."),
                 io.Audio.Input("audio", optional=True, tooltip="Audio input (Gemma-4 audio projector only)."),
+                io.Int.Input("frames", optional=True, force_input=True,
+                             tooltip="The clip's real frame count, for `validate`. Lets S.SS and the cut times be checked against the actual duration instead of just their format."),
             ],
             outputs=[
                 io.String.Output("positive", display_name="positive"),
                 io.String.Output("negative", display_name="negative"),
+                io.String.Output("log", display_name="log"),
             ],
         )
 
@@ -1889,8 +1926,8 @@ class LLMPromptNode(io.ComfyNode):
     def execute(cls, **kwargs) -> io.NodeOutput:
         # Drop any framework-injected extras the runner doesn't expect, then run.
         call_kwargs = _filter_kwargs_for_callable(_LLMRunner.generate, kwargs)
-        positive, negative = _RUNNER.generate(**call_kwargs)
-        return io.NodeOutput(positive, negative)
+        positive, negative, log = _RUNNER.generate(**call_kwargs)
+        return io.NodeOutput(positive, negative, log)
 
 
 # ---------------------------------------------------------------------------
