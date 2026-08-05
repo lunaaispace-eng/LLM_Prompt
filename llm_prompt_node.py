@@ -1525,6 +1525,7 @@ class _LLMRunner:
         video_fps: float = 1.0,
         verbose_logging: bool = False,
         style: str = "",
+        context: str = "",
         width: int = 0,
         height: int = 0,
         image=None,
@@ -1636,6 +1637,10 @@ class _LLMRunner:
             canvas_block = _build_canvas_profile(eff_w, eff_h)
             if canvas_block:
                 parts.append(canvas_block)
+        # Upstream analysis (stage 1 of a two-stage graph) reads before the request,
+        # so the bulky reference material lands first and the instruction lands last.
+        if context and context.strip():
+            parts.append(f"REFERENCE CONTEXT:\n{context.strip()}")
         if user_prompt and user_prompt.strip():
             parts.append(f"USER PROMPT:\n{user_prompt.strip()}")
         if style and style.strip():
@@ -1862,6 +1867,8 @@ class LLMPromptNode(io.ComfyNode):
                 # ===== Optional connections (input sockets) =====
                 io.String.Input("style", optional=True, force_input=True,
                                 tooltip="Style description from an external node."),
+                io.String.Input("context", optional=True, force_input=True,
+                                tooltip="Upstream analysis from another node (e.g. a vision-reader LLM Prompt). Appended as its own labelled block ahead of your prompt."),
                 io.Int.Input("width", optional=True, force_input=True,
                              tooltip="Image width - auto-detected as an aspect-ratio composition profile."),
                 io.Int.Input("height", optional=True, force_input=True,
