@@ -15,6 +15,7 @@ import inspect
 import logging
 import os
 import re
+import struct
 import time
 from io import BytesIO
 from pathlib import Path
@@ -926,13 +927,81 @@ def _build_vision_handler(name: str, mmproj_path, disable_thinking: bool,
         return None
 
 
+# Architecture is read from the GGUF header rather than guessed from the file
+# name. Repackaged quants often carry no family name at all — e.g. the Qwen3.8
+# heretic ships as "RVN-Q5_K_M-multilingual.gguf", which used to miss every
+# adapter and fall through to the generic Qwen-VL chain. The name heuristics are
+# kept as a fallback for headers we cannot read.
+_GGUF_ARCH_CACHE: dict[str, str] = {}
+
+# GGUF scalar value types -> struct format char / byte width. 8 (string) and
+# 9 (array) are handled separately.
+_GGUF_FMT = {0: "B", 1: "b", 2: "H", 3: "h", 4: "I", 5: "i",
+             6: "f", 7: "?", 10: "Q", 11: "q", 12: "d"}
+_GGUF_SIZE = {0: 1, 1: 1, 2: 2, 3: 2, 4: 4, 5: 4,
+              6: 4, 7: 1, 10: 8, 11: 8, 12: 8}
+
+
+def _read_gguf_arch(model_path) -> str:
+    """Return general.architecture from a GGUF header, lowercased, or "".
+
+    Reads only the metadata block and stops at the architecture key, so this
+    costs a few KB regardless of how large the model file is.
+    """
+    cache_key = str(model_path)
+    if cache_key in _GGUF_ARCH_CACHE:
+        return _GGUF_ARCH_CACHE[cache_key]
+
+    arch = ""
+    try:
+        with open(model_path, "rb") as f:
+            if f.read(4) != b"GGUF":
+                raise ValueError("missing GGUF magic")
+            f.read(4)                                    # version
+            f.read(8)                                    # tensor count
+            n_kv = struct.unpack("<Q", f.read(8))[0]
+
+            def _read_str() -> str:
+                n = struct.unpack("<Q", f.read(8))[0]
+                return f.read(n).decode("utf-8", "replace")
+
+            for _ in range(n_kv):
+                key = _read_str()
+                vtype = struct.unpack("<I", f.read(4))[0]
+                if vtype == 8:
+                    value = _read_str()
+                elif vtype == 9:
+                    elem_type = struct.unpack("<I", f.read(4))[0]
+                    length = struct.unpack("<Q", f.read(8))[0]
+                    if elem_type == 8:
+                        # Skip each string by its own length prefix.
+                        for _ in range(length):
+                            f.seek(struct.unpack("<Q", f.read(8))[0], 1)
+                    else:
+                        f.seek(_GGUF_SIZE[elem_type] * length, 1)
+                    value = None
+                else:
+                    value = struct.unpack(
+                        "<" + _GGUF_FMT[vtype], f.read(_GGUF_SIZE[vtype])
+                    )[0]
+                if key == "general.architecture":
+                    arch = str(value).strip().lower()
+                    break
+    except Exception as e:
+        logger.warning("[LLM_Prompt] Could not read architecture from %s: %s",
+                       model_path, e)
+
+    _GGUF_ARCH_CACHE[cache_key] = arch
+    return arch
+
+
 class ModelAdapter:
     """Base adapter: generic Qwen-VL-style fallback chain, no audio."""
     family = "generic"
     supports_audio = False
 
     @staticmethod
-    def matches(name_lower: str) -> bool:
+    def matches(name_lower: str, arch: str = "") -> bool:
         return False
 
     def candidates(self, name_lower: str) -> list[str]:
@@ -944,8 +1013,15 @@ class GemmaAdapter(ModelAdapter):
     supports_audio = True   # Gemma-4 mmproj can carry an audio projector
 
     @staticmethod
-    def matches(name_lower: str) -> bool:
-        return "gemma" in name_lower and "supergemma" not in name_lower
+    def matches(name_lower: str, arch: str = "") -> bool:
+        # supergemma reports arch "gemma4" but is deliberately kept OFF this
+        # adapter, so the exclusion has to be checked before the arch shortcut —
+        # otherwise routing by architecture would silently re-include it.
+        if "supergemma" in name_lower:
+            return False
+        if arch.startswith("gemma"):
+            return True
+        return "gemma" in name_lower
 
     def candidates(self, name_lower: str) -> list[str]:
         # Gemma-3 has no Gemma4 handler; newer / unspecified Gemma -> try Gemma4
@@ -958,8 +1034,13 @@ class GemmaAdapter(ModelAdapter):
 class Qwen35Adapter(ModelAdapter):
     family = "qwen35"
 
+    # Qwen 3.5 / 3.6 / 3.8 all report themselves as "qwen35" in the GGUF header.
+    ARCHES = ("qwen35", "qwen35moe")
+
     @staticmethod
-    def matches(name_lower: str) -> bool:
+    def matches(name_lower: str, arch: str = "") -> bool:
+        if arch in Qwen35Adapter.ARCHES:
+            return True
         return "qwen" in name_lower and any(
             t in name_lower for t in
             ("qwen3.5", "qwen3-5", "qwen35", "qwen3.6", "qwen3-6", "qwen36")
@@ -973,8 +1054,12 @@ class Qwen35Adapter(ModelAdapter):
 class Qwen3VLAdapter(ModelAdapter):
     family = "qwen3vl"
 
+    ARCHES = ("qwen3vl", "qwen3vlmoe")
+
     @staticmethod
-    def matches(name_lower: str) -> bool:
+    def matches(name_lower: str, arch: str = "") -> bool:
+        if arch in Qwen3VLAdapter.ARCHES:
+            return True
         return "qwen" in name_lower and "vl" in name_lower
 
     def candidates(self, name_lower: str) -> list[str]:
@@ -990,9 +1075,9 @@ _ADAPTERS: list[ModelAdapter] = [
 ]
 
 
-def pick_adapter(name_lower: str) -> ModelAdapter:
+def pick_adapter(name_lower: str, arch: str = "") -> ModelAdapter:
     for adapter in _ADAPTERS:
-        if adapter.matches(name_lower):
+        if adapter.matches(name_lower, arch):
             return adapter
     return ModelAdapter()
 
@@ -1014,6 +1099,10 @@ class _LLMRunner:
         self.chat_handler = None
         self.current_signature = None
         self.loaded_model_name_lower = ""
+        # GGUF general.architecture of the loaded model. Repackaged quants carry
+        # no family name in the filename, so the thinking controls below must key
+        # off this rather than the name.
+        self.loaded_model_arch = ""
         # Set per-run from the verbose_logging widget. Gates the chatty status
         # prints (handler choice, load lines, token/speed); warnings and errors
         # are always printed regardless.
@@ -1050,6 +1139,7 @@ class _LLMRunner:
 
         self.current_signature = None
         self.loaded_model_name_lower = ""
+        self.loaded_model_arch = ""
         gc.collect()
 
         # Let ComfyUI's model manager release its own VRAM too, so unloading here
@@ -1067,7 +1157,7 @@ class _LLMRunner:
     def _load_model(self, model_name: str, device: str, n_ctx: int = 32768, n_gpu_layers: int = -1,
                     disable_thinking: bool = True, want_vision: bool = True,
                     preserve_thinking: bool = False, image_min_tokens: int = 1024,
-                    image_max_tokens: int = 4096):
+                    image_max_tokens: int = 4096, load_mmproj: str = "auto"):
         # Resolve paths directly from the scanned folder list â€” no JSON catalog needed
         model_path, mmproj_path = _resolve_model_paths(model_name)
 
@@ -1078,23 +1168,41 @@ class _LLMRunner:
             mmproj_path = None
 
         m_name_lower_sig = model_path.name.lower()
-        is_vl = "vl" in m_name_lower_sig
+        model_arch = _read_gguf_arch(model_path)
+        is_vl = "vl" in m_name_lower_sig or model_arch in Qwen3VLAdapter.ARCHES
         # The no-think template targets NON-VL Qwen 3.5/3.6 (Qwen35ChatHandler
         # does not suppress thinking). VL models are EXCLUDED: their vision
         # handler (Qwen3VLChatHandler / Qwen25VLChatHandler) applies
         # force_reasoning=False, which already disables thinking and makes them
         # work well — so we never strip their handler or touch their template.
-        is_qwen_35_36 = bool(
-            re.search(r"qwen3\.?5|qwen3-5|qwen35|qwen3\.?6|qwen3-6|qwen36", m_name_lower_sig)
+        is_qwen_35_36 = (
+            model_arch in Qwen35Adapter.ARCHES
+            or bool(re.search(r"qwen3\.?5|qwen3-5|qwen35|qwen3\.?6|qwen3-6|qwen36",
+                              m_name_lower_sig))
         ) and not is_vl
 
-        # Force text-only (when no image) ONLY for non-VL Qwen 3.5/3.6, so the
-        # no-think template can engage. EVERY OTHER model keeps its normal
-        # loading â€” crucially, VL models keep their vision handler even with no
-        # image connected (that's how Qwen-VL works fast and without thinking).
-        if not want_vision and is_qwen_35_36 and mmproj_path is not None:
-            self._vprint("[LLM_Prompt] Qwen 3.5/3.6 text prompt â€” loading text-only so the no-think template engages.")
-            mmproj_path = None
+        # Whether to pair the model with its projector at all.
+        #
+        # "auto" (default) drops it whenever no media is connected. Carrying a
+        # projector on a text-only run is not free: the vision handler reserves
+        # image_min_tokens of context per generation on top of the prompt, and it
+        # costs ~0.6-1.1 GB of VRAM. Dropping it also lets Qwen's no-think
+        # template engage.
+        #
+        # VL models are always exempt - they keep their handler even with no
+        # image connected (that is how Qwen-VL works fast and without thinking).
+        #
+        # "always" pins the projector so bypassing an image node does not change
+        # the load signature and force a full model reload. "never" is text-only
+        # regardless, for maximum context headroom on a tight card.
+        if mmproj_path is not None and not is_vl:
+            if load_mmproj == "never":
+                self._vprint("[LLM_Prompt] load_mmproj=never - loading text-only.")
+                mmproj_path = None
+            elif load_mmproj == "auto" and not want_vision:
+                self._vprint("[LLM_Prompt] No media connected - loading text-only "
+                             "(frees VRAM, no reserved image-token budget).")
+                mmproj_path = None
 
         device_kind = _pick_device(device)
         # CPU always 0; on GPU use the user-supplied value (-1 = all layers, N = partial offload)
@@ -1138,7 +1246,7 @@ class _LLMRunner:
         #   - user-controlled image_min/max_tokens.
         self.chat_handler = None
         if has_mmproj:
-            adapter = pick_adapter(model_path.name.lower())
+            adapter = pick_adapter(model_path.name.lower(), model_arch)
             for cand in adapter.candidates(model_path.name.lower()):
                 handler = _build_vision_handler(
                     cand, mmproj_path, disable_thinking, preserve_thinking,
@@ -1264,6 +1372,7 @@ class _LLMRunner:
         self.llm = Llama(**llm_kwargs_filtered)
         self.current_signature = signature
         self.loaded_model_name_lower = model_path.name.lower()
+        self.loaded_model_arch = model_arch
         self._vprint(f"[LLM_Prompt] Model loaded: {model_path.name}")
 
     # ------------------------------------------------------------------
@@ -1337,7 +1446,17 @@ class _LLMRunner:
         # kwarg is simply ignored — harmless. Stray thinking is still stripped
         # from the output by _strip_think_blocks() as the safety net.
         name_lower = self.loaded_model_name_lower or ""
-        if disable_thinking and ("qwen" in name_lower or "gemma" in name_lower):
+        arch = self.loaded_model_arch or ""
+        # Arch first: repackaged quants (e.g. "RVN-Q5_K_M-multilingual.gguf") have
+        # no family name to match on, and their embedded template defaults to
+        # thinking ON — so a name-only check silently leaves reasoning enabled.
+        is_thinking_family = (
+            arch in Qwen35Adapter.ARCHES
+            or arch.startswith("gemma")
+            or "qwen" in name_lower
+            or "gemma" in name_lower
+        )
+        if disable_thinking and is_thinking_family:
             completion_kwargs["chat_template_kwargs"] = {"enable_thinking": False}
 
         completion_kwargs = _filter_kwargs_for_callable(
@@ -1541,6 +1660,7 @@ class _LLMRunner:
         preserve_thinking: bool = False,
         image_min_tokens: int = 1024,
         image_max_tokens: int = 4096,
+        load_mmproj: str = "auto",
         video_fps: float = 1.0,
         verbose_logging: bool = False,
         vision_mp: float = 0.0,
@@ -1636,7 +1756,8 @@ class _LLMRunner:
         # Uses self.loaded_model_name_lower set at model load time â€” no signature parsing.
         m_name_lower = self.loaded_model_name_lower
         is_qwen35 = (
-            "qwen3.5" in m_name_lower
+            (self.loaded_model_arch or "") in Qwen35Adapter.ARCHES
+            or "qwen3.5" in m_name_lower
             or "qwen3-5" in m_name_lower
             or "qwen35" in m_name_lower
         )
@@ -1722,6 +1843,7 @@ class _LLMRunner:
                 disable_thinking=disable_thinking, want_vision=want_vision,
                 preserve_thinking=preserve_thinking,
                 image_min_tokens=image_min_tokens, image_max_tokens=image_max_tokens,
+                load_mmproj=load_mmproj,
             )
 
             if media_content and self.chat_handler is None:
@@ -1880,6 +2002,14 @@ class LLMPromptNode(io.ComfyNode):
                              tooltip="Model layers on GPU. Ref: -1 = all (best). Lower (20-40) only if a big model "
                                      "runs out of VRAM. CPU forces 0."),
                 # --- Vision / video ---
+                io.Combo.Input("load_mmproj", options=["auto", "always", "never"],
+                               default="auto", advanced=True,
+                               tooltip="Whether to load the vision projector alongside the model. "
+                                       "'auto' = only when an image/video/audio is connected — saves "
+                                       "0.6-1.1 GB VRAM and the reserved image-token budget on text runs. "
+                                       "'always' keeps it loaded so bypassing an image node doesn't force "
+                                       "a full model reload. 'never' = text-only, most context headroom. "
+                                       "VL models ignore this and always keep their projector."),
                 io.Int.Input("image_min_tokens", default=1024, min=256, max=4096, step=64, advanced=True,
                              tooltip="Min visual tokens per image (Qwen VL). Ref: 256 light, 1024 default, "
                                      "up to 4096 fine detail. Higher = more VRAM."),

@@ -12,7 +12,7 @@ You receive three inputs:
 
 Always treat the `user_prompt` as the absolute foundation: faithfully preserve and prioritize the user's key words and phrases.
 
-Transform these inputs into one coherent, production-ready positive prompt for an adult NSFW image: a single continuous paragraph of natural, visually precise prose, roughly 250–400 tokens — scaled to the scene, and never longer than the image needs.
+Transform these inputs into one coherent, production-ready positive prompt for an adult NSFW image: a single continuous paragraph of natural, visually precise prose, roughly 360–400 tokens — dense throughout, and never padded.
 
 ## Rules
 
@@ -80,4 +80,4 @@ A raw photo, full-body shot of a slender woman with large breasts on all fours o
 
 ## Output Contract
 
-Output only the final positive prompt — one continuous natural-prose paragraph, using commas and semicolons to organize the visual information. Keep the prompt to roughly 250–400 tokens — the shortest length that fully resolves the image; every clause must add new visual information, never restate. Do not output planning, explanations, alternatives, notes, markdown, JSON, a negative prompt, or any echo of the user prompt. Do not name the aspect ratio unless the user explicitly asked.
+Output only the final positive prompt — one continuous natural-prose paragraph, using commas and semicolons to organize the visual information. Keep the prompt to roughly 360–400 tokens — use the full length; every clause must add new visual information, never restate. Do not output planning, explanations, alternatives, notes, markdown, JSON, a negative prompt, or any echo of the user prompt. Do not name the aspect ratio unless the user explicitly asked.
