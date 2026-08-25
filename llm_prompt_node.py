@@ -660,6 +660,26 @@ def _looks_like_reasoning(text: str) -> bool:
     return False
 
 
+def _extract_reasoning(text: str) -> str:
+    """Return the reasoning the cleaner is about to throw away, or "".
+
+    The chat template pre-fills the opening tag into the PROMPT, so a thinking
+    response looks like "[reasoning]</think>[answer]" with no opening tag in the
+    output at all. Everything before the last closing delimiter is the model's
+    scratchpad. Gemma 4 uses <|channel>thought ... <channel|> instead of
+    <think>...</think>, so both are handled.
+    """
+    if not text:
+        return ""
+    for pat in (r"</think\s*>", r"<channel\|?>"):
+        if re.search(pat, text, flags=re.IGNORECASE):
+            head = re.split(pat, text, flags=re.IGNORECASE)[0]
+            head = re.sub(r"<think[^>]*>|<\|?channel>thought", "", head,
+                          flags=re.IGNORECASE)
+            return head.strip()
+    return ""
+
+
 def _strip_think_blocks(text: str) -> str:
     """Strip thinking content from model output.
 
@@ -1103,6 +1123,7 @@ class _LLMRunner:
         # no family name in the filename, so the thinking controls below must key
         # off this rather than the name.
         self.loaded_model_arch = ""
+        self.last_reasoning = ""
         # Set per-run from the verbose_logging widget. Gates the chatty status
         # prints (handler choice, load lines, token/speed); warnings and errors
         # are always printed regardless.
@@ -1499,6 +1520,10 @@ class _LLMRunner:
         raw = str((result.get("choices") or [{}])[0].get("message", {}).get("content", "") or "")
         # Strip think blocks here, before any caller sees the output.
         # This covers both JSON and text paths â€” no downstream path needs to handle it.
+        # Keep the reasoning so it can be surfaced on the log output instead of
+        # being silently discarded - with thinking on there was previously no
+        # way to see what the model actually planned.
+        self.last_reasoning = _extract_reasoning(raw)
         stripped = _strip_think_blocks(raw)
 
         # SALVAGE: aggressive uncensored fine-tunes (e.g. *-HauhauCS-Aggressive)
@@ -1887,6 +1912,14 @@ class _LLMRunner:
                 positive, findings = validate_h3(positive, frames or None)
                 log = format_log(positive, frames or None, findings)
                 print(f"[LLM_Prompt] {log}")
+
+            # With thinking on, the reasoning is stripped from the prompt but is
+            # the most useful thing to inspect - surface it here rather than
+            # discarding it. Appended so an h3 validation report keeps the lead.
+            reasoning = getattr(self, "last_reasoning", "") or ""
+            if reasoning:
+                block = f"--- reasoning ({len(reasoning.split())} words) ---\n{reasoning}"
+                log = f"{log}\n\n{block}" if log else block
 
             return (positive, negative, log)
 
