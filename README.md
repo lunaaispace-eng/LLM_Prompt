@@ -25,7 +25,9 @@ This pack is aimed at image and video generation workflows where an LLM turns a 
 - Robust output cleaner for thinking blocks, code fences, role prefixes, planning text, JSON wrappers, and prompt labels.
 - Automatic local model scanning from ComfyUI `models/LLM`.
 - Automatic mmproj pairing for local vision GGUF models.
+- Model family detected from the GGUF `general.architecture` header, not the filename, so repackaged quants route correctly.
 - Model-family sampling presets for Qwen, Gemma, Gemini, Grok, SuperGemma, and Llama.
+- Reasoning is surfaced on the `log` output when thinking is enabled, instead of being silently discarded.
 - Guarded `llama_cpp` import so API/Grok nodes can still load if the local GGUF wheel is missing or broken.
 - API keys are read from environment variables or `.env`; they are not saved in workflow JSON.
 - Basic/Advanced UI split for both local and API nodes.
@@ -89,6 +91,7 @@ Basic widgets:
 | `auto_settings` | Applies recommended sampling and thinking controls for known model families. |
 | `disable_thinking` | Disables/strips reasoning where supported. |
 | `temperature`, `max_tokens`, `n_ctx`, `seed`, `keep_model_loaded` | Main generation/runtime controls. |
+| `load_mmproj` | Whether to pair the model with its vision projector. `auto` (default) loads it only when image/video/audio is connected, which frees ~0.6-1.1 GB of VRAM and the reserved image-token budget on text-only runs. `always` keeps it loaded so bypassing an image node does not change the load signature and force a full model reload. `never` is text-only regardless. VL models always keep their projector. |
 
 Advanced widgets:
 
@@ -125,6 +128,7 @@ Outputs:
 | --- | --- |
 | `positive` | `STRING` |
 | `negative` | `STRING` |
+| `log` | `STRING` - h3 validation report when `validate=h3`, and the model's reasoning when thinking is enabled. Empty otherwise. |
 
 ## LLM Prompt API
 
