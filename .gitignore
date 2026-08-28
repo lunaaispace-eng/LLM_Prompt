@@ -9,3 +9,7 @@ __pycache__/
 .env.*.local
 *.key
 *_api_key*
+
+# Local context files — not for git
+CLAUDE.md
+STATUS.md
