@@ -142,12 +142,26 @@ async function refreshModels(node, preserveValue = false) {
     const serverUrl = urlW?.value?.trim() || "";
     const filterMode = filterW?.value || "all";
 
+    // Generation token — the fix for the "model resets to another provider's
+    // model when switching windows/tabs" bug.
+    //
+    // Several refreshes can be in flight at once (onNodeCreated fires one before
+    // saved values are restored, onConfigure fires another after). They await a
+    // network fetch, so the LAST one to RESOLVE wins — not the last one started.
+    // Backgrounded tabs throttle fetches, which is why switching windows made a
+    // stale refresh land last and overwrite the loaded model with values[0] of
+    // the DEFAULT provider. Stamp each call and drop any result that has been
+    // superseded.
+    node.__llmRefreshGen = (node.__llmRefreshGen || 0) + 1;
+    const gen = node.__llmRefreshGen;
+
     // The browser has no API keys (env / .env live on the server), so we ask
     // the server route for the live list. It runs _get_models_for_provider()
     // with credentials and returns the provider's current models — that's what
     // makes new Gemini / Grok models show up automatically.
     let source = "server route (live)";
     let all = await fetchServerModels(provider, serverUrl);
+    if (gen !== node.__llmRefreshGen) return;   // superseded by a newer refresh
     if (all.length === 0) {
         // Route unreachable (server not up, no key, offline) — show the
         // hardcoded snapshot so the dropdown is never empty.
@@ -212,8 +226,14 @@ app.registerExtension({
             const r = onCreated?.apply(this, arguments);
             const node = this;
 
-            // Initial refresh — populate dropdown with the default provider's models
-            refreshModels(node);
+            // Initial refresh — populate dropdown with the default provider's
+            // models. preserveValue=true because on a workflow LOAD this fires
+            // BEFORE the saved values are restored: if it were allowed to reset,
+            // a late-resolving fetch would clobber the loaded model. For a
+            // genuinely new node there is nothing to preserve, so it costs
+            // nothing. Belt-and-braces with the generation token in
+            // refreshModels().
+            refreshModels(node, true);
             updateProviderSpecificVisibility(node);
 
             // Wire up callbacks on provider / server_url / model_filter

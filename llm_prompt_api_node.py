@@ -1135,8 +1135,8 @@ class LLMPromptAPINode(io.ComfyNode):
                 # one shifts every value after it and corrupts existing graphs.
                 io.Boolean.Input("auto_settings", default=True, advanced=True,
                                  tooltip="ON = the node sets temperature / top_p / top_k / min_p / penalties to the official values for the chosen model family, every run, ignoring the sliders above. Gemma 4: 1.0 / 0.95 / 64. Qwen 3 instruct: 0.7 / 0.8 / 20. Qwen-VL: 0.7 / 0.9 / 20. Gemini and Grok have no published table - for those the sliders are used as-is and the console says so. OFF = your slider values always."),
-                io.Combo.Input("grok_reasoning_effort", options=["default", "low", "medium", "high", "xhigh"], default="default", advanced=True,
-                               tooltip="GROK 4.5 / 4.6 / 4.20-multi-agent ONLY. How deep Grok thinks before answering. Reasoning CANNOT be turned off on these models - 'low' is as close to off as you get, and it's the right pick for prompt writing. 'xhigh' needs grok-4.6 or newer; on 4.5 the node sends 'high' instead. 'default' sends nothing, and xAI's own default is 'high'. Ignored for every other model and provider."),
+                io.Combo.Input("grok_reasoning_effort", options=["low", "medium", "high", "xhigh", "default"], default="low", advanced=True,
+                               tooltip="GROK 4.5 / 4.6 / 4.20-multi-agent ONLY. How deep Grok thinks before answering. Reasoning CANNOT be turned off on these models - 'low' is as close to off as you get, and it's the right pick for prompt writing, so it is the default here. 'xhigh' needs grok-4.6 or newer; on 4.5 the node sends 'high' instead. 'default' sends NOTHING and lets xAI pick, which is 'high' - that cost 75-110s per prompt on grok-4.6 (2026-08-29), so only choose it deliberately. Ignored for every other model and provider."),
 
                 # ===== Optional connections =====
                 io.String.Input("style", optional=True, force_input=True,
@@ -1195,7 +1195,9 @@ class LLMPromptAPINode(io.ComfyNode):
         disable_thinking: bool,
         timeout_seconds: int,
         auto_settings: bool = True,
-        grok_reasoning_effort: str = "default",
+        # "low" so workflows saved BEFORE this widget existed also get the fast
+        # path — they send no value, so this Python default is what they use.
+        grok_reasoning_effort: str = "low",
         vision_mp: float = 0.0,
         validate: str = "off",
         style: str = "",
