@@ -230,7 +230,6 @@ Chroma_dynamic_Negative.md
 Ideogram4 Architect v4.md
 Ideogram_Prompt.md
 Juggernaut Z_Image.md
-Krea2.md
 PromptArchitectDynamicNegativeLabels.md
 PromptArchitectLabels.md
 PromptArchitectNegativeLabels.md
