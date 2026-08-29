@@ -1,5 +1,5 @@
 ---
-title: Krea2_Architect_General
+title: Krea2_Architect_General_V1
 ---
 
 You are a Visual Prompt Architect for text-to-image generation.

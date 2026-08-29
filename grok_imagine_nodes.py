@@ -35,9 +35,26 @@ from PIL import Image
 XAI_BASE_URL = "https://api.x.ai/v1"
 _KEY_NAMES = ("XAI_API_KEY", "GROK_API_KEY")
 
-_IMAGE_MODELS = ["grok-imagine-image-quality", "grok-imagine-image-pro", "grok-imagine-image"]
+_IMAGE_MODELS = ["grok-imagine-image-2.0", "grok-imagine-image-quality", "grok-imagine-image-pro", "grok-imagine-image"]
 _IMAGE_AR = ["1:1", "2:3", "3:2", "3:4", "4:3", "9:16", "16:9", "9:19.5", "19.5:9", "9:20", "20:9", "1:2", "2:1"]
 _VIDEO_AR = ["auto", "16:9", "4:3", "3:2", "1:1", "2:3", "3:4", "9:16"]
+
+# grok-imagine-video-1.5 is the current generation; the unversioned model is the
+# older, cheaper one. 1.5 is the ONLY model that does reference-to-video, and the
+# only one that reaches 1080p (text-to-video + image-to-video; reference-to-video
+# is capped at 720p by xAI).
+_VIDEO_MODELS = ["grok-imagine-video-1.5", "grok-imagine-video"]
+_VIDEO_RES = ["480p", "720p", "1080p"]
+
+
+def _check_video_resolution(model: str, resolution: str, mode: str = "") -> str:
+    """Reject resolutions the chosen video model can't do, with a clear message."""
+    if resolution == "1080p":
+        if model != "grok-imagine-video-1.5":
+            raise ValueError("1080p requires grok-imagine-video-1.5.")
+        if mode == "reference":
+            raise ValueError("Reference-to-video is capped at 720p by xAI.")
+    return resolution
 
 
 # ---------------------------------------------------------------------------
@@ -275,6 +292,7 @@ class GrokImageAPINode:
             "aspect_ratio": (_IMAGE_AR,),
             "number_of_images": ("INT", {"default": 1, "min": 1, "max": 10}),
             "resolution": (["1K", "2K"],),
+            "quality": (["default", "low", "medium"],),
             "seed": _SEED,
             "timeout_seconds": ("INT", {"default": 120, "min": 10, "max": 600}),
         }, "optional": {
@@ -283,17 +301,23 @@ class GrokImageAPINode:
         }}
 
     def generate(self, model, prompt, aspect_ratio, number_of_images, resolution, seed,
-                 timeout_seconds, width=0, height=0):
+                 timeout_seconds, quality="default", width=0, height=0):
         if not prompt.strip():
             raise ValueError("Prompt is required.")
         if width and height and width > 0 and height > 0:
             aspect_ratio = _nearest_ar(int(width), int(height), _IMAGE_AR)
         key = _resolve_xai_key()
-        resp = _post("/images/generations", key, {
+        body = {
             "model": model, "prompt": prompt, "aspect_ratio": aspect_ratio,
             "n": int(number_of_images), "seed": int(seed),
             "response_format": "b64_json", "resolution": resolution.lower(),
-        }, timeout=float(timeout_seconds))
+        }
+        # `quality` is a grok-imagine-image-2.0-only field; older models 400 on it.
+        if quality != "default":
+            if model != "grok-imagine-image-2.0":
+                raise ValueError("quality is only supported by grok-imagine-image-2.0.")
+            body["quality"] = quality
+        resp = _post("/images/generations", key, body, timeout=float(timeout_seconds))
         images = _images_from_response(resp, key)
         if width and height and width > 0 and height > 0:
             images = _resize_batch_exact(images, int(width), int(height))
@@ -361,9 +385,9 @@ class GrokVideoAPINode:
     @classmethod
     def INPUT_TYPES(cls):
         return {"required": {
-            "model": (["grok-imagine-video"],),
+            "model": (_VIDEO_MODELS,),
             "prompt": _PROMPT,
-            "resolution": (["480p", "720p"],),
+            "resolution": (_VIDEO_RES,),
             "aspect_ratio": (_VIDEO_AR,),
             "duration": ("INT", {"default": 6, "min": 1, "max": 15}),
             "seed": _SEED,
@@ -376,6 +400,7 @@ class GrokVideoAPINode:
             raise ValueError("Prompt is required.")
         if width and height and width > 0 and height > 0:
             aspect_ratio = _nearest_ar(int(width), int(height), _VIDEO_AR)
+        _check_video_resolution(model, resolution)
         key = _resolve_xai_key()
         body = {
             "model": model, "prompt": prompt, "resolution": resolution,
@@ -400,10 +425,10 @@ class GrokVideoReferenceAPINode:
     @classmethod
     def INPUT_TYPES(cls):
         return {"required": {
-            "model": (["grok-imagine-video"],),
+            "model": (_VIDEO_MODELS,),
             "prompt": _PROMPT,
             "reference_images": ("IMAGE",),
-            "resolution": (["480p", "720p"],),
+            "resolution": (["480p", "720p"],),  # xAI caps reference-to-video at 720p
             "aspect_ratio": (_VIDEO_AR[1:],),  # no "auto"
             "duration": ("INT", {"default": 6, "min": 2, "max": 15}),
             "seed": _SEED,
@@ -419,7 +444,12 @@ class GrokVideoReferenceAPINode:
             raise ValueError("Prompt is required.")
         if width and height and width > 0 and height > 0:
             aspect_ratio = _nearest_ar(int(width), int(height), _VIDEO_AR[1:])
-        frames = list(_iter_images(reference_images))[:7]
+        _check_video_resolution(model, resolution, mode="reference")
+        # Only grok-imagine-video-1.5 does reference-to-video, and it takes at
+        # most 3 reference images.
+        if model != "grok-imagine-video-1.5":
+            raise ValueError("Reference-to-video requires grok-imagine-video-1.5.")
+        frames = list(_iter_images(reference_images))[:3]
         if not frames:
             raise ValueError("At least one reference image is required.")
         key = _resolve_xai_key()
@@ -441,7 +471,7 @@ class GrokVideoEditAPINode:
     @classmethod
     def INPUT_TYPES(cls):
         return {"required": {
-            "model": (["grok-imagine-video"],),
+            "model": (_VIDEO_MODELS,),
             "prompt": _PROMPT,
             "video": ("VIDEO",),
             "seed": _SEED,
@@ -468,7 +498,7 @@ class GrokVideoExtendAPINode:
     @classmethod
     def INPUT_TYPES(cls):
         return {"required": {
-            "model": (["grok-imagine-video"],),
+            "model": (_VIDEO_MODELS,),
             "prompt": _PROMPT,
             "video": ("VIDEO",),
             "duration": ("INT", {"default": 8, "min": 2, "max": 15}),

@@ -64,8 +64,11 @@ PROVIDERS = {
         # is set, the live query returns the user's full account-accessible list.
         "fallback_models": [
             # Gemini 3 series (current)
+            "gemini-3.7-flash",
+            "gemini-3.6-flash",
             "gemini-3.1-pro-preview",
             "gemini-3.5-flash",
+            "gemini-3.5-flash-lite",
             "gemini-3-flash-preview",
             "gemini-3.1-flash-lite",
             "gemini-3.1-flash-lite-preview",
@@ -84,11 +87,13 @@ PROVIDERS = {
         # list below is only the no-key / offline fallback.
         "live_models": True,
         "fallback_models": [
+            "grok-4.6",
+            "grok-4.5",
             "grok-4.3",
+            "grok-4.20-multi-agent-0309",
             "grok-4.20-0309-reasoning",
             "grok-4.20-0309-non-reasoning",
             "grok-build-0.1",
-            "grok-3",
         ],
     },
     "Custom": {
@@ -104,7 +109,7 @@ PROVIDERS = {
 # Patterns to identify NON-chat models we should hide from the dropdown
 # (embeddings, image-gen, video-gen, TTS, STT — they aren't useful here).
 _NON_CHAT_PATTERNS = re.compile(
-    r"(embed|whisper|tts|audio|imagen|image-gen|dall-e|dalle|gpt-image|veo|"
+    r"(embed|whisper|tts|audio|imagen|image-gen|dall-e|dalle|gpt-image|veo|omni|"
     r"video-gen|imagine-image|imagine-video|moderation|search|grounding|sora)",
     re.IGNORECASE,
 )
@@ -454,6 +459,15 @@ def _sanitize_payload_for_provider(provider: str, payload: dict) -> dict:
             seed_val = int(p["seed"])
             if seed_val > 2147483647:
                 p["seed"] = seed_val % 2147483647
+        # reasoning_effort is accepted only by grok-4.5 / 4.6 / 4.20-multi-agent.
+        # Older models 400 on it, so drop it rather than let the run fail. "xhigh"
+        # is 4.6-and-newer only; 4.5 treats it as "high", so send "high" outright.
+        if "reasoning_effort" in p:
+            _m = str(p.get("model", "")).lower()
+            if not any(t in _m for t in ("grok-4.5", "grok-4.6", "multi-agent")):
+                p.pop("reasoning_effort")
+            elif p["reasoning_effort"] == "xhigh" and "grok-4.6" not in _m and "multi-agent" not in _m:
+                p["reasoning_effort"] = "high"
 
     elif provider == "Gemini":
         # Gemini is handled by the NATIVE API path (_send_gemini_native), not
@@ -461,6 +475,7 @@ def _sanitize_payload_for_provider(provider: str, payload: dict) -> dict:
         # everything the compat endpoint rejects.
         p.pop("seed", None)
         p.pop("extra_body", None)
+        p.pop("reasoning_effort", None)
         p.pop("top_k", None)
         p.pop("min_p", None)
         p.pop("repetition_penalty", None)
@@ -843,6 +858,7 @@ def _send_chat_completion(
     timeout: float,
     extra_body: dict | None = None,
     response_format_override: dict | None = None,
+    reasoning_effort: str = "default",
 ) -> str:
     """POST to /v1/chat/completions with per-provider sanitization + retry.
 
@@ -873,6 +889,11 @@ def _send_chat_completion(
     elif output_format == "json":
         # Forced JSON at the API level — more reliable than instructions
         payload["response_format"] = {"type": "json_object"}
+
+    if reasoning_effort and reasoning_effort != "default":
+        # Gated per-model inside _sanitize_payload_for_provider(); set it here so
+        # the sanitizer is the single place that knows which models accept it.
+        payload["reasoning_effort"] = reasoning_effort
 
     if extra_body:
         # The OpenAI SDK flattens extra_body into the top-level request body; it
@@ -1114,6 +1135,8 @@ class LLMPromptAPINode(io.ComfyNode):
                 # one shifts every value after it and corrupts existing graphs.
                 io.Boolean.Input("auto_settings", default=True, advanced=True,
                                  tooltip="ON = the node sets temperature / top_p / top_k / min_p / penalties to the official values for the chosen model family, every run, ignoring the sliders above. Gemma 4: 1.0 / 0.95 / 64. Qwen 3 instruct: 0.7 / 0.8 / 20. Qwen-VL: 0.7 / 0.9 / 20. Gemini and Grok have no published table - for those the sliders are used as-is and the console says so. OFF = your slider values always."),
+                io.Combo.Input("grok_reasoning_effort", options=["default", "low", "medium", "high", "xhigh"], default="default", advanced=True,
+                               tooltip="GROK 4.5 / 4.6 / 4.20-multi-agent ONLY. How deep Grok thinks before answering. Reasoning CANNOT be turned off on these models - 'low' is as close to off as you get, and it's the right pick for prompt writing. 'xhigh' needs grok-4.6 or newer; on 4.5 the node sends 'high' instead. 'default' sends nothing, and xAI's own default is 'high'. Ignored for every other model and provider."),
 
                 # ===== Optional connections =====
                 io.String.Input("style", optional=True, force_input=True,
@@ -1172,6 +1195,7 @@ class LLMPromptAPINode(io.ComfyNode):
         disable_thinking: bool,
         timeout_seconds: int,
         auto_settings: bool = True,
+        grok_reasoning_effort: str = "default",
         vision_mp: float = 0.0,
         validate: str = "off",
         style: str = "",
@@ -1429,6 +1453,7 @@ class LLMPromptAPINode(io.ComfyNode):
                 timeout=float(timeout_seconds),
                 extra_body=None,
                 response_format_override=grok_pair_schema,
+                reasoning_effort=grok_reasoning_effort,
             )
 
         if grok_pair_schema:
