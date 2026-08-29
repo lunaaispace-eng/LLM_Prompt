@@ -205,7 +205,7 @@ Preset files live in:
 prompts/*.md
 ```
 
-Current library size: 30 Markdown presets.
+Current library size: 37 Markdown presets.
 
 Each file can include YAML frontmatter:
 
@@ -230,10 +230,18 @@ Chroma_dynamic_Negative.md
 Ideogram4 Architect v4.md
 Ideogram_Prompt.md
 Juggernaut Z_Image.md
+Krea2_Architect_Adult_NSFW.md
+Krea2_Architect_Adult_NSFW_V1.md
+Krea2_Architect_General.md
+Krea2_Architect_General_V1.md
+MinimaxH3_I2V_Architect.md
+MinimaxH3_Ref2VA_Architect.md
+MinimaxH3_T2V_Architect.md
+MinimaxH3_i2v_Vision.md
+MinimaxH3_ref2va_Vision.md
 PromptArchitectDynamicNegativeLabels.md
 PromptArchitectLabels.md
 PromptArchitectNegativeLabels.md
-Prompt_Architect_Detailed.md
 Z-Image_Prompt_Architect.md
 describe_image.md
 illustrious.md
