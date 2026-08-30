@@ -10,6 +10,7 @@ This pack is aimed at image and video generation workflows where an LLM turns a 
 | --- | --- |
 | `LLM Prompt` | Local GGUF prompt generation through `llama-cpp-python`. Supports Qwen, Gemma, Llama-style models, vision projectors, image/reference/video/audio inputs, model-family presets, and model caching. |
 | `LLM Prompt (API)` | API prompt generation through Gemini native REST, xAI Grok, or a custom OpenAI-compatible endpoint. Uses the same prompt presets and output splitter as the local node. |
+| `Gemini Image (API Key)` | Google Gemini image generation and editing (Nano Banana / Nano Banana Pro / Nano Banana 2) using your own `GEMINI_API_KEY`. Live model list, up to 4K, reference-image editing, multimodal text + thought-image outputs. |
 | `Grok Image (API Key)` | Direct xAI Grok Imagine text-to-image using your own `XAI_API_KEY`. |
 | `Grok Image Edit (API Key)` | Direct xAI Grok Imagine image edit. |
 | `Grok Video (API Key)` | Direct xAI Grok Imagine text/image-to-video. |
@@ -171,6 +172,53 @@ stop_sequences
 ```
 
 `gemini_thinking_level` is for Gemini 3 Pro style models and overrides `gemini_thinking_budget` when set to `low`, `medium`, or `high`.
+
+## Gemini Image (API Key)
+
+One node for every Google Gemini image model, calling Google directly with the same
+`GEMINI_API_KEY` the `LLM Prompt (API)` node uses — no ComfyUI credits, no proxy, and the key
+is never stored in the workflow. The `prompt` input is a plain string, so the text output of
+`LLM Prompt (API)` wires straight into it: write the prompt with Gemini, render it with Gemini.
+
+**Model list is live.** The dropdown is built from `ListModels` on your own key and cached for
+24 hours in `.gemini_models.json`; new Google image models appear on their own. `refresh_models`
+forces a re-query, and `model: auto` picks the best one your key can see.
+
+Models seen on a current key:
+
+| Model | Sizes | Reference images | Thinking |
+| --- | --- | --- | --- |
+| `gemini-3-pro-image` (Nano Banana Pro) | 1K / 2K / 4K | 14 | always on |
+| `gemini-3.1-flash-image` (Nano Banana 2) | 0.5K / 1K / 2K / 4K | 17 | `minimal` / `high` |
+| `gemini-3.1-flash-lite-image` | 1K | 14 | none |
+| `gemini-2.5-flash-image` (Nano Banana, legacy) | 1K | 3 | none |
+
+Aspect ratios: `1:1 2:3 3:2 3:4 4:3 4:5 5:4 9:16 16:9 21:9`, or `auto` to let the model decide
+(which also lets an edit inherit the aspect of its reference image). Asking a model for a size
+it does not support is clamped down with a console note instead of failing the run.
+
+**Safety.** `safety` defaults to `block_none`, sending `BLOCK_NONE` on all four configurable
+categories — the same setting the `LLM Prompt (API)` node uses for Gemini. Google's hard
+server-side filter still applies and cannot be changed from here; when it fires, the error
+carries `block_reason` (the prompt was rejected) and/or `finish_reason` (the image was).
+
+**Editing and reference images.** Connect a batch to `reference_images` (a second socket exists
+so references can come from two places without a Batch Images node). References are sent before
+the instruction, which is the order Google's own editing examples use.
+
+**Multimodal outputs.** A Gemini image response is a stream of parts, not an image: one call can
+return interleaved text and several images, and on the thinking models some of those images are
+interim drafts the model made while composing. They come out separately:
+
+| Output | Contents |
+| --- | --- |
+| `image` | The final render(s). |
+| `thought_images` | The interim composition drafts. Requires `include_thought_images` — without it the API sends none at all. Black 64×64 placeholder when empty. |
+| `text` | Anything the model said alongside the image. |
+| `info` | Model, settings actually sent, sizes, timings, and every clamp/ignore note. |
+
+`batch_count` is N sequential calls with the seed stepped by one, because Gemini returns one
+image per call — so N images cost N times as much.
 
 ## Grok Imagine API Key Nodes
 

@@ -48,6 +48,18 @@ try:
 except Exception as e:  # pragma: no cover
     print(f"[LLM_Prompt] Grok Imagine (API Key) nodes not loaded: {e}")
 
+# Gemini Image (BYO key) node — optional; only register if the import succeeds
+# (needs google-genai + torch/PIL, same as the rest of the pack).
+try:
+    from .gemini_image_node import (
+        NODE_CLASS_MAPPINGS as _GEMINI_IMG_NODES,
+        NODE_DISPLAY_NAME_MAPPINGS as _GEMINI_IMG_NAMES,
+    )
+    NODE_CLASS_MAPPINGS.update(_GEMINI_IMG_NODES)
+    NODE_DISPLAY_NAME_MAPPINGS.update(_GEMINI_IMG_NAMES)
+except Exception as e:  # pragma: no cover
+    print(f"[LLM_Prompt] Gemini Image (API Key) node not loaded: {e}")
+
 __all__ = ["NODE_CLASS_MAPPINGS", "NODE_DISPLAY_NAME_MAPPINGS"]
 
 WEB_DIRECTORY = "./web"
