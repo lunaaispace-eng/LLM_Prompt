@@ -23,17 +23,23 @@ const PROVIDERS = {
         // https://ai.google.dev/gemini-api/docs/models. The live /v1/models
         // query returns the user's full account-accessible list once an API
         // key is set.
+        // Kept in step with the Python fallback_models list.
         fallback: [
-            // Gemini 3 series (current)
+            // Gemini 3 series (current) — all verified callable 2026-08-31
+            "gemini-3.7-flash",
+            "gemini-3.6-flash",
             "gemini-3.1-pro-preview",
             "gemini-3.5-flash",
+            "gemini-3.5-flash-lite",
             "gemini-3-flash-preview",
             "gemini-3.1-flash-lite",
             "gemini-3.1-flash-lite-preview",
-            // Gemini 2.5 (legacy, still supported)
-            "gemini-2.5-pro",
-            "gemini-2.5-flash",
-            "gemini-2.5-flash-lite",
+            // Rolling aliases — never go stale.
+            "gemini-pro-latest",
+            "gemini-flash-latest",
+            // gemini-2.5-* removed 2026-08-31: ListModels still advertises
+            // them but generateContent 404s ("no longer available to new
+            // users") for pro, flash AND flash-lite.
         ],
     },
     "Grok (xAI)": {

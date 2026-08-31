@@ -72,10 +72,15 @@ PROVIDERS = {
             "gemini-3-flash-preview",
             "gemini-3.1-flash-lite",
             "gemini-3.1-flash-lite-preview",
-            # Gemini 2.5 (legacy, still supported)
-            "gemini-2.5-pro",
-            "gemini-2.5-flash",
-            "gemini-2.5-flash-lite",
+            # Rolling aliases — never go stale.
+            "gemini-pro-latest",
+            "gemini-flash-latest",
+            # The gemini-2.5-* entries were REMOVED 2026-08-31. ListModels still
+            # advertises them, but generateContent 404s: "This model is no longer
+            # available to new users." Verified on a live key for 2.5-pro,
+            # 2.5-flash AND 2.5-flash-lite. Every 3.x above was confirmed
+            # callable in the same pass. Do not restore them from the model list
+            # alone — being listed does not mean being callable.
         ],
     },
     "Grok (xAI)": {
