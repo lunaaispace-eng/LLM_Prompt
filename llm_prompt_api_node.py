@@ -110,8 +110,14 @@ PROVIDERS = {
         "needs_auth": True,
         # OpenAI exposes GET /v1/models with Bearer auth, same as xAI.
         "live_models": True,
-        # No-key fallback only. Restricted to the GPT-5.6 family on purpose —
-        # the live query returns ~124 models including a decade of legacy ones.
+        # Whitelist applied to the LIVE list too, not just the fallback. The
+        # /v1/models query returns ~124 models — a decade of legacy 3.5/4/4o/o1
+        # plus every dated snapshot — and Peti uses only the 5.6 family
+        # (2026-08-31). Widen this regex to admit a new family; there is no
+        # widget for it on purpose, because a dropdown of 124 models is worse
+        # than editing one line when 5.7 ships.
+        "model_pattern": r"^gpt-5\.6",
+        # No-key fallback only.
         "fallback_models": [
             "gpt-5.6-sol",    # highest quality
             "gpt-5.6-terra",  # mid
@@ -263,6 +269,26 @@ def _fetch_models_from_server(base_url: str, api_key: str | None, native: str = 
     return names
 
 
+def _apply_model_pattern(provider: str, models: list[str]) -> list[str]:
+    """Keep only the models a provider's `model_pattern` admits.
+
+    Used by BOTH the dropdown route and the schema's validation superset, so
+    the two can never disagree about what is selectable. Providers with no
+    `model_pattern` are returned untouched. If the pattern matches nothing
+    (a family rename), the unfiltered list is returned rather than an empty
+    dropdown — a wrong list beats no list.
+    """
+    pattern = (PROVIDERS.get(provider) or {}).get("model_pattern")
+    if not pattern:
+        return models
+    keep = [m for m in models if re.search(pattern, m, re.IGNORECASE)]
+    if not keep:
+        print(f"[LLM_Prompt_API] {provider}: model_pattern {pattern!r} matched "
+              f"nothing in {len(models)} models — showing the unfiltered list.")
+        return models
+    return keep
+
+
 def _get_models_for_provider(
     provider: str,
     custom_url: str = "",
@@ -301,6 +327,9 @@ def _get_models_for_provider(
     if not filtered:
         # If the filter ate everything (rare), keep the raw list so user can see something
         filtered = raw_models
+
+    # Per-provider whitelist (OpenAI keeps only the GPT-5.6 family).
+    filtered = _apply_model_pattern(provider, filtered)
 
     # Sort: keep stable order from the API, just dedupe
     seen = set()
@@ -1124,7 +1153,9 @@ class LLMPromptAPINode(io.ComfyNode):
                 continue  # Skip auth-required providers without a key
             try:
                 live = _fetch_models_from_server(base, key, prov_cfg.get("native_protocol", ""))
-                all_models.extend(live)
+                # Same whitelist the dropdown route applies, so the validation
+                # superset and the visible list agree.
+                all_models.extend(_apply_model_pattern(prov_name, live))
             except Exception:
                 pass
         # Dedupe while preserving order
