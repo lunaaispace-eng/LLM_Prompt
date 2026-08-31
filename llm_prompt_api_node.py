@@ -96,6 +96,23 @@ PROVIDERS = {
             "grok-build-0.1",
         ],
     },
+    "OpenAI": {
+        # Standard OpenAI Chat Completions. NOT the Responses API — OpenAI now
+        # recommends Responses for reasoning models, but Chat Completions is
+        # still supported and is the protocol this node already speaks.
+        "base_url": "https://api.openai.com/v1",
+        "env_var": ["OPENAI_API_KEY"],
+        "needs_auth": True,
+        # OpenAI exposes GET /v1/models with Bearer auth, same as xAI.
+        "live_models": True,
+        # No-key fallback only. Restricted to the GPT-5.6 family on purpose —
+        # the live query returns ~124 models including a decade of legacy ones.
+        "fallback_models": [
+            "gpt-5.6-sol",    # highest quality
+            "gpt-5.6-terra",  # mid
+            "gpt-5.6-luna",   # cheapest / fastest
+        ],
+    },
     "Custom": {
         "base_url": "",  # user supplies via the server_url widget
         "env_var": None,
@@ -110,7 +127,11 @@ PROVIDERS = {
 # (embeddings, image-gen, video-gen, TTS, STT — they aren't useful here).
 _NON_CHAT_PATTERNS = re.compile(
     r"(embed|whisper|tts|audio|imagen|image-gen|dall-e|dalle|gpt-image|veo|omni|"
-    r"video-gen|imagine-image|imagine-video|moderation|search|grounding|sora)",
+    r"video-gen|imagine-image|imagine-video|moderation|search|grounding|sora|"
+    # OpenAI-specific noise: agentic/codex endpoints, realtime + transcription
+    # sockets, and the ancient base-completion models (davinci/babbage) which
+    # are not chat models at all.
+    r"realtime|transcribe|codex|davinci|babbage|instruct)",
     re.IGNORECASE,
 )
 
@@ -177,8 +198,12 @@ def _fetch_models_from_server(base_url: str, api_key: str | None, native: str = 
             # Native Gemini models endpoint
             if not api_key:
                 return []
-            url = f"{base_url.rstrip('/')}/models?key={api_key}"
+            # Key in the x-goog-api-key HEADER, not `?key=` — the legacy query
+            # form is undocumented for Google's service-account-bound auth keys,
+            # which are the only kind the API accepts from September 2026.
+            url = f"{base_url.rstrip('/')}/models"
             req = urllib.request.Request(url, method="GET")
+            req.add_header("x-goog-api-key", api_key)
         else:
             url = base_url.rstrip("/") + "/models"
             req = urllib.request.Request(url, method="GET")
@@ -464,10 +489,48 @@ def _sanitize_payload_for_provider(provider: str, payload: dict) -> dict:
         # is 4.6-and-newer only; 4.5 treats it as "high", so send "high" outright.
         if "reasoning_effort" in p:
             _m = str(p.get("model", "")).lower()
+            # "none" exists for OpenAI but NOT for xAI — reasoning cannot be
+            # disabled on 4.5/4.6, "low" is the floor. Clamp instead of 400.
+            if p["reasoning_effort"] == "none":
+                p["reasoning_effort"] = "low"
             if not any(t in _m for t in ("grok-4.5", "grok-4.6", "multi-agent")):
                 p.pop("reasoning_effort")
             elif p["reasoning_effort"] == "xhigh" and "grok-4.6" not in _m and "multi-agent" not in _m:
                 p["reasoning_effort"] = "high"
+
+    elif provider == "OpenAI":
+        # Every rule below was established by live probe against gpt-5.6-luna /
+        # -terra / -sol on 2026-08-31, NOT from documentation — OpenAI does not
+        # document the reasoning/sampling interaction at all. See STATUS.md.
+        #
+        # Unknown to the OpenAI schema at any effort ("Unknown parameter").
+        for k in ("top_k", "min_p", "repetition_penalty", "repeat_penalty"):
+            p.pop(k, None)
+        # "'stop' is not supported with this model" — at every effort level.
+        p.pop("stop", None)
+        # "'max_tokens' is not supported with this model. Use
+        # 'max_completion_tokens' instead."
+        if "max_tokens" in p:
+            p["max_completion_tokens"] = p.pop("max_tokens")
+        # THE non-obvious one: temperature / top_p / presence_penalty /
+        # frequency_penalty are accepted ONLY at reasoning_effort="none".
+        # At low/medium/high/xhigh all four hard-400. Verified behaviourally
+        # too — at "none", temperature really does change the output
+        # (temp 0.0 -> 1 unique of 4 runs; temp 2.0 -> 4 unique of 4).
+        _effort = str(p.get("reasoning_effort", "")).lower()
+        if _effort and _effort != "none":
+            for k in ("temperature", "top_p", "presence_penalty", "frequency_penalty"):
+                p.pop(k, None)
+        # json_object mode requires the literal word "json" somewhere in the
+        # messages or OpenAI 400s. Drop the format rather than fail the run;
+        # the preset's own instructions still ask for JSON.
+        if isinstance(p.get("response_format"), dict) and \
+                p["response_format"].get("type") == "json_object":
+            _blob = json.dumps(p.get("messages", [])).lower()
+            if "json" not in _blob:
+                p.pop("response_format")
+                print("[LLM_Prompt_API] OpenAI: dropped response_format=json_object "
+                      "(the API requires the word 'json' in the messages).")
 
     elif provider == "Gemini":
         # Gemini is handled by the NATIVE API path (_send_gemini_native), not
@@ -554,7 +617,8 @@ def _gemini_create_cached_content(
             return name  # reuse, still valid for >1 minute
 
     # Gemini native cached-content endpoint
-    url = f"https://generativelanguage.googleapis.com/v1beta/cachedContents?key={api_key}"
+    # Key goes in the x-goog-api-key header below, not the query string.
+    url = "https://generativelanguage.googleapis.com/v1beta/cachedContents"
     body = {
         "model": f"models/{model}",
         "contents": [
@@ -567,6 +631,7 @@ def _gemini_create_cached_content(
         url, data=json.dumps(body).encode("utf-8"), method="POST",
     )
     req.add_header("Content-Type", "application/json")
+    req.add_header("x-goog-api-key", api_key)
     try:
         with urllib.request.urlopen(req, timeout=10.0) as resp:
             data = json.loads(resp.read().decode("utf-8"))
@@ -862,8 +927,10 @@ def _send_chat_completion(
 ) -> str:
     """POST to /v1/chat/completions with per-provider sanitization + retry.
 
-    sampling dict can contain: temperature, top_p, top_k, min_p,
-    repetition_penalty, presence_penalty, frequency_penalty, max_tokens, seed.
+    sampling dict can contain: temperature, top_p, top_k, presence_penalty,
+    frequency_penalty, max_tokens, seed. (min_p / repetition_penalty were
+    dropped 2026-08-31 — every cloud provider rejects them; they live on in
+    the local GGUF node where they do real work.)
 
     response_format_override: if set, used as-is for response_format (e.g. a
     json_schema dict). Takes priority over the output_format-derived default.
@@ -1105,15 +1172,11 @@ class LLMPromptAPINode(io.ComfyNode):
                 io.Float.Input("top_p", default=0.9, min=0.0, max=1.0, step=0.05, advanced=True,
                                tooltip="Nucleus sampling. Gemma 4: 0.95. Qwen 3 instruct: 0.8. Qwen-VL: 0.9. Overridden when auto_settings is ON."),
                 io.Int.Input("top_k", default=0, min=0, max=200, advanced=True,
-                             tooltip="Top-K. 0 = disabled. Gemma 4: 64. Qwen: 20. Gemini accepts it; Grok / OpenAI reject it and it is stripped automatically. Overridden when auto_settings is ON."),
-                io.Float.Input("min_p", default=0.0, min=0.0, max=1.0, step=0.01, advanced=True,
-                               tooltip="Min-P. 0.0 = disabled. IGNORED BY EVERY CLOUD PROVIDER — a llama.cpp setting that only does something on the local LLM Prompt node. Leave it alone here."),
+                             tooltip="Top-K. 0 = disabled. Gemini's native API genuinely honours it — that is why it survived the 2026-08-31 cleanup that removed min_p and repetition_penalty. Grok and OpenAI reject it and it is stripped automatically. OpenAI additionally only accepts sampling at reasoning_effort=none."),
                 io.Float.Input("presence_penalty", default=0.0, min=-2.0, max=2.0, step=0.1, advanced=True,
-                               tooltip="Discourages reusing tokens. 0.0 for Gemma 4. Gemini's native API ignores it; only OpenAI-compatible endpoints honour it."),
+                               tooltip="Discourages reusing tokens. Gemini's native API ignores it. On OpenAI GPT-5.6 it is accepted ONLY at reasoning_effort=none — at any other level it 400s, so the node strips it."),
                 io.Float.Input("frequency_penalty", default=0.0, min=-2.0, max=2.0, step=0.1, advanced=True,
-                               tooltip="Discourages repeating frequent tokens. 0.0 = disabled. Gemini's native API ignores it; only OpenAI-compatible endpoints honour it."),
-                io.Float.Input("repetition_penalty", default=1.0, min=0.5, max=2.0, step=0.05, advanced=True,
-                               tooltip="Repetition penalty. 1.0 = disabled. IGNORED OR REJECTED BY EVERY CLOUD PROVIDER — a llama.cpp setting, stripped before sending. Leave it alone here."),
+                               tooltip="Discourages repeating frequent tokens. 0.0 = disabled. Gemini's native API ignores it. On OpenAI GPT-5.6, same rule as presence_penalty — reasoning_effort=none only."),
                 io.String.Input("stop_sequences", default="", advanced=True,
                                 tooltip="Comma-separated strings that stop generation. Example: 'END,---,EOF'. Empty = default."),
                 io.Int.Input("gemini_thinking_budget", default=0, min=0, max=24576, advanced=True,
@@ -1134,9 +1197,9 @@ class LLMPromptAPINode(io.ComfyNode):
                 # Saved workflows store widget values positionally, so inserting
                 # one shifts every value after it and corrupts existing graphs.
                 io.Boolean.Input("auto_settings", default=True, advanced=True,
-                                 tooltip="ON = the node sets temperature / top_p / top_k / min_p / penalties to the official values for the chosen model family, every run, ignoring the sliders above. Gemma 4: 1.0 / 0.95 / 64. Qwen 3 instruct: 0.7 / 0.8 / 20. Qwen-VL: 0.7 / 0.9 / 20. Gemini and Grok have no published table - for those the sliders are used as-is and the console says so. OFF = your slider values always."),
-                io.Combo.Input("grok_reasoning_effort", options=["low", "medium", "high", "xhigh", "default"], default="low", advanced=True,
-                               tooltip="GROK 4.5 / 4.6 / 4.20-multi-agent ONLY. How deep Grok thinks before answering. Reasoning CANNOT be turned off on these models - 'low' is as close to off as you get, and it's the right pick for prompt writing, so it is the default here. 'xhigh' needs grok-4.6 or newer; on 4.5 the node sends 'high' instead. 'default' sends NOTHING and lets xAI pick, which is 'high' - that cost 75-110s per prompt on grok-4.6 (2026-08-29), so only choose it deliberately. Ignored for every other model and provider."),
+                                 tooltip="ON = the node sets temperature / top_p / top_k / presence_penalty to the official values for the chosen model family, every run, ignoring the sliders above. Gemma 4: 1.0 / 0.95 / 64. Qwen 3 instruct: 0.7 / 0.8 / 20. Qwen-VL: 0.7 / 0.9 / 20. Gemini, Grok and OpenAI have no published table - for those the sliders are used as-is and the console says so. OFF = your slider values always."),
+                io.Combo.Input("reasoning_effort", options=["none", "low", "medium", "high", "xhigh", "default"], default="low", advanced=True,
+                               tooltip="GROK 4.5 / 4.6 / 4.20-multi-agent and OPENAI GPT-5.6 only; ignored by Gemini and everything else.\n\nGROK: reasoning CANNOT be turned off - 'low' is the floor and the right pick for prompt writing, so it is the default. 'none' is clamped to 'low'. 'xhigh' needs grok-4.6+; on 4.5 the node sends 'high'. 'default' sends NOTHING and lets xAI pick, which is 'high' - that cost 75-110s per prompt on grok-4.6 (2026-08-29), so choose it deliberately.\n\nOPENAI GPT-5.6: accepts none/low/medium/high/xhigh (NOT 'minimal', NOT 'max' - both 400, whatever the guide says). IMPORTANT: temperature, top_p and the penalties are accepted ONLY at 'none'. Pick 'none' for plain prompt writing and keep your sliders; pick 'medium'/'high' for structured work like the MinimaxH3 presets and accept fixed sampling."),
 
                 # ===== Optional connections =====
                 io.String.Input("style", optional=True, force_input=True,
@@ -1183,10 +1246,8 @@ class LLMPromptAPINode(io.ComfyNode):
         temperature: float,
         top_p: float,
         top_k: int,
-        min_p: float,
         presence_penalty: float,
         frequency_penalty: float,
-        repetition_penalty: float,
         seed: int,
         stop_sequences: str,
         gemini_thinking_budget: int,
@@ -1197,7 +1258,9 @@ class LLMPromptAPINode(io.ComfyNode):
         auto_settings: bool = True,
         # "low" so workflows saved BEFORE this widget existed also get the fast
         # path — they send no value, so this Python default is what they use.
-        grok_reasoning_effort: str = "low",
+        # Renamed from grok_reasoning_effort on 2026-08-31 when OpenAI joined;
+        # the widget kept its position, so saved values still map correctly.
+        reasoning_effort: str = "low",
         vision_mp: float = 0.0,
         validate: str = "off",
         style: str = "",
@@ -1222,13 +1285,13 @@ class LLMPromptAPINode(io.ComfyNode):
                 temperature = resolved["temperature"]
                 top_p = resolved["top_p"]
                 top_k = resolved["top_k"]
-                min_p = resolved["min_p"]
-                repetition_penalty = resolved["repetition_penalty"]
                 presence_penalty = resolved["presence_penalty"]
+                # min_p / repetition_penalty are still in the preset table (the
+                # local GGUF node uses them) but this node no longer exposes or
+                # sends them — every cloud provider rejects both.
                 print(
                     f"[LLM_Prompt_API] auto_settings -> temp={temperature}, top_p={top_p}, "
-                    f"top_k={top_k}, min_p={min_p}, presence_penalty={presence_penalty}, "
-                    f"rep={repetition_penalty}"
+                    f"top_k={top_k}, presence_penalty={presence_penalty}"
                 )
             else:
                 print(
@@ -1400,10 +1463,8 @@ class LLMPromptAPINode(io.ComfyNode):
             "temperature": float(temperature),
             "top_p": float(top_p),
             "top_k": int(top_k),
-            "min_p": float(min_p),
             "presence_penalty": float(presence_penalty),
             "frequency_penalty": float(frequency_penalty),
-            "repetition_penalty": float(repetition_penalty),
             "max_tokens": int(max_tokens),
             "seed": int(seed),
         }
@@ -1455,7 +1516,7 @@ class LLMPromptAPINode(io.ComfyNode):
                 timeout=float(timeout_seconds),
                 extra_body=None,
                 response_format_override=grok_pair_schema,
-                reasoning_effort=grok_reasoning_effort,
+                reasoning_effort=reasoning_effort,
             )
 
         if grok_pair_schema:

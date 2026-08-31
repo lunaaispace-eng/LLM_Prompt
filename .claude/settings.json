@@ -1,0 +1,10 @@
+{
+  "hooks": {
+    "SessionStart": [
+      { "hooks": [ { "type": "command", "command": "echo '--- Only @imported files in CLAUDE.md are loaded. Do not create new memory/context .md files — update STATUS.md instead. ---'" } ] }
+    ],
+    "Stop": [
+      { "hooks": [ { "type": "command", "command": "if [ -n \"$(git status --porcelain STATUS.md)\" ]; then echo 'STATUS.md changed this session — good, confirm it is accurate.'; else echo 'STATUS.md was NOT updated this session — confirm nothing needs logging before ending.'; fi" } ] }
+    ]
+  }
+}

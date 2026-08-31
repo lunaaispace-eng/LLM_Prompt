@@ -151,8 +151,13 @@ DEFAULT_CAPS = {"label": "unknown", "sizes": ["1K", "2K", "4K"],
 MODEL_CACHE_FILE = Path(__file__).resolve().parent / ".gemini_models.json"
 MODEL_CACHE_TTL = 24 * 3600  # seconds
 
+# The key goes in the x-goog-api-key HEADER, never in the query string.
+# Google's auth keys (bound to a service account -- the only kind AI Studio
+# issues now, and the only kind the API accepts from September 2026) are
+# documented only with the header form; the legacy `?key=` query parameter
+# is undocumented for them. The header form works for both key types.
 LIST_MODELS_URL = ("https://generativelanguage.googleapis.com/v1beta/models"
-                   "?pageSize=1000&key={key}")
+                   "?pageSize=1000")
 
 
 def _caps_for(model: str) -> dict:
@@ -182,7 +187,8 @@ def _is_image_model(model_id: str, methods: list) -> bool:
 
 
 def _fetch_image_models(api_key: str, timeout: float = 15.0) -> list[str]:
-    req = urllib.request.Request(LIST_MODELS_URL.format(key=api_key))
+    req = urllib.request.Request(
+        LIST_MODELS_URL, headers={"x-goog-api-key": api_key})
     with urllib.request.urlopen(req, timeout=timeout) as resp:
         payload = json.loads(resp.read().decode("utf-8"))
     found = []
