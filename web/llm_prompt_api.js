@@ -41,12 +41,29 @@ const PROVIDERS = {
         liveModels: true,
         needsAuth: true,
         envVar: "XAI_API_KEY",
+        // Kept in step with the Python fallback_models list. grok-3 was
+        // dropped from xAI's model list (2026-08-29) and was still here.
         fallback: [
+            "grok-4.6",
+            "grok-4.5",
             "grok-4.3",
+            "grok-4.20-multi-agent-0309",
             "grok-4.20-0309-reasoning",
             "grok-4.20-0309-non-reasoning",
             "grok-build-0.1",
-            "grok-3",
+        ],
+    },
+    "OpenAI": {
+        defaultUrl: "https://api.openai.com/v1",
+        liveModels: true,
+        needsAuth: true,
+        envVar: "OPENAI_API_KEY",
+        // No-key fallback only — the live query returns ~124 models. Kept to
+        // the GPT-5.6 family deliberately; see STATUS.md 2026-08-31.
+        fallback: [
+            "gpt-5.6-sol",
+            "gpt-5.6-terra",
+            "gpt-5.6-luna",
         ],
     },
     "Custom": {
@@ -57,6 +74,12 @@ const PROVIDERS = {
         fallback: ["<set server_url and refresh>"],
     },
 };
+
+// NOTE: this map is not cosmetic — refreshModels() does `const cfg =
+// PROVIDERS[provider]; if (!cfg) return;`. A provider added to the Python
+// PROVIDERS dict but MISSING here silently never refreshes: the dropdown keeps
+// the previous provider's models and nothing is logged. Add both sides
+// together. (Cost one confused bug report on 2026-08-31.)
 
 // Patterns mirroring the Python-side classification — keep these in sync.
 const NON_CHAT_PATTERN = /(embed|whisper|tts|audio|imagen|image-gen|dall-e|dalle|gpt-image|veo|video-gen|imagine-image|imagine-video|moderation|search|grounding|sora)/i;
