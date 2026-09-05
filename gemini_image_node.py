@@ -137,7 +137,11 @@ CAPS = {
     },
     "gemini-3.1-flash-image": {
         "label": "Nano Banana 2",
-        "sizes": ["0.5K", "1K", "2K", "4K"], "max_refs": 17, "thinking": "level",
+        # 14 is the documented per-request ceiling, same as the rest of the
+        # family. The old 17 was the sum of the per-CATEGORY quality limits
+        # (10 objects + 4 character + 3 style) -- those are budgets WITHIN
+        # the 14, not additive. Affects the warning text only.
+        "sizes": ["0.5K", "1K", "2K", "4K"], "max_refs": 14, "thinking": "level",
     },
     "gemini-2.5-flash-image": {
         "label": "Nano Banana (legacy)",
@@ -147,6 +151,10 @@ CAPS = {
 
 DEFAULT_CAPS = {"label": "unknown", "sizes": ["1K", "2K", "4K"],
                 "max_refs": 14, "thinking": "level"}
+
+# Autogrow reference sockets. 14 = the highest documented per-request ceiling
+# in the family, so the UI never offers a slot no model could use.
+REF_SLOTS = 14
 
 MODEL_CACHE_FILE = Path(__file__).resolve().parent / ".gemini_models.json"
 MODEL_CACHE_TTL = 24 * 3600  # seconds
@@ -258,6 +266,30 @@ def _iter_images(image):
         yield image
 
 
+def _collect_refs(*sources) -> list:
+    """Flatten reference sockets into an ordered frame list.
+
+    Each source is whatever a socket handed us: an Autogrow dict keyed
+    `reference_image_<n>`, a plain IMAGE tensor (the pre-Autogrow sockets, and
+    what a saved v1 workflow still sends), or None. Autogrow dicts are walked
+    in numeric slot order rather than dict order, so the send order always
+    matches the socket order on screen.
+    """
+    frames = []
+    for src in sources:
+        if src is None:
+            continue
+        if isinstance(src, dict):
+            def _slot_index(name):
+                tail = str(name).rsplit("_", 1)[-1]
+                return int(tail) if tail.isdigit() else 0
+            for _, value in sorted(src.items(), key=lambda kv: _slot_index(kv[0])):
+                frames.extend(_iter_images(value))
+        else:
+            frames.extend(_iter_images(src))
+    return frames
+
+
 def _tensor_to_png_bytes(tensor: torch.Tensor) -> bytes:
     t = tensor[0] if tensor.ndim == 4 else tensor
     arr = (t.clamp(0, 1) * 255.0).to(torch.uint8).cpu().numpy()
@@ -353,15 +385,25 @@ class GeminiImageNode(io.ComfyNode):
                     "seed", default=0, min=0, max=0x7FFFFFFF, control_after_generate=True),
 
                 # ===== REFERENCE IMAGES (editing / character / style) =====
-                io.Image.Input(
+                # Autogrow: a fresh empty socket appears each time one is
+                # connected, up to 14 -- Google's documented per-request
+                # ceiling. min=0 so pure text-to-image still runs with none
+                # connected. Each slot ALSO accepts a batch, so >14 frames
+                # can still be sent; _build_contents warns rather than
+                # truncating, same as before.
+                io.Autogrow.Input(
                     "reference_images", optional=True,
-                    tooltip="Optional. Batch them (any Batch Images node) to send "
-                            "several — order is preserved. Budgets: 3 Pro Image 14, "
-                            "3.1 Flash Image 17, 3.1 Flash Lite 14, 2.5 Flash Image 3."),
-                io.Image.Input(
-                    "reference_images_2", optional=True,
-                    tooltip="Second reference socket, appended after the first — "
-                            "saves a Batch Images node when refs come from two places."),
+                    template=io.Autogrow.TemplatePrefix(
+                        input=io.Image.Input("ref"),
+                        prefix="reference_image_", min=0, max=REF_SLOTS,
+                    ),
+                    tooltip="Optional. Sockets grow as you connect them, up to "
+                            "14 — the hard ceiling per request (2.5 Flash Image: "
+                            "3). Order is top to bottom; a batch in one slot is "
+                            "expanded in place. Quality budgets sit INSIDE that "
+                            "14: 3 Pro Image = 6 objects + 5 characters, no style "
+                            "refs; 3.1 Flash Image = 10 objects + 4 characters + 3 "
+                            "style; 3.1 Flash Lite = objects only, no character/style."),
 
                 # ===== GENERATION SETTINGS =====
                 io.String.Input(
@@ -535,6 +577,9 @@ class GeminiImageNode(io.ComfyNode):
                 reference_images=None, reference_images_2=None) -> io.NodeOutput:
         # person_generation is accepted and ignored: workflows saved against the
         # first version of this node still carry the widget value. Vertex-only.
+        # reference_images_2 likewise: it was the second fixed socket before the
+        # Autogrow list replaced it. Still honoured, appended after the grown
+        # slots, so a v1/v2 workflow keeps sending both.
 
         try:
             from google import genai
@@ -567,7 +612,7 @@ class GeminiImageNode(io.ComfyNode):
 
         caps = _caps_for(model)
 
-        refs = list(_iter_images(reference_images)) + list(_iter_images(reference_images_2))
+        refs = _collect_refs(reference_images, reference_images_2)
 
         config = cls._build_config(types, model, caps, aspect_ratio, resolution,
                                    temperature, top_p, top_k, seed,

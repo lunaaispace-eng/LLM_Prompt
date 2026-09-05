@@ -189,7 +189,7 @@ Models seen on a current key:
 | Model | Sizes | Reference images | Thinking |
 | --- | --- | --- | --- |
 | `gemini-3-pro-image` (Nano Banana Pro) | 1K / 2K / 4K | 14 | always on |
-| `gemini-3.1-flash-image` (Nano Banana 2) | 0.5K / 1K / 2K / 4K | 17 | `minimal` / `high` |
+| `gemini-3.1-flash-image` (Nano Banana 2) | 0.5K / 1K / 2K / 4K | 14 | `minimal` / `high` |
 | `gemini-3.1-flash-lite-image` | 1K | 14 | none |
 | `gemini-2.5-flash-image` (Nano Banana, legacy) | 1K | 3 | none |
 
@@ -202,9 +202,19 @@ categories — the same setting the `LLM Prompt (API)` node uses for Gemini. Goo
 server-side filter still applies and cannot be changed from here; when it fires, the error
 carries `block_reason` (the prompt was rejected) and/or `finish_reason` (the image was).
 
-**Editing and reference images.** Connect a batch to `reference_images` (a second socket exists
-so references can come from two places without a Batch Images node). References are sent before
-the instruction, which is the order Google's own editing examples use.
+**Editing and reference images.** `reference_images` is a growing list of sockets: connect one
+and the next appears, up to 14 — the documented per-request ceiling. Each slot also accepts a
+batch, so a Batch Images node still works and its frames are expanded in place. References are
+sent before the instruction, which is the order Google's own editing examples use.
+
+The 14 above is the *total*; Google publishes tighter budgets per reference kind, inside that
+total. Exceeding one of these does not error — the result just degrades:
+
+| Model | Objects (high-fidelity) | Character consistency | Style references |
+| --- | --- | --- | --- |
+| `gemini-3-pro-image` | 6 | 5 | not supported |
+| `gemini-3.1-flash-image` | 10 | 4 | 3 |
+| `gemini-3.1-flash-lite-image` | 14 | not supported | not supported |
 
 **Multimodal outputs.** A Gemini image response is a stream of parts, not an image: one call can
 return interleaved text and several images, and on the thinking models some of those images are
