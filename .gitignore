@@ -16,3 +16,6 @@ STATUS.md
 
 # Live Gemini model-list cache (regenerated on demand)
 .gemini_models.json
+
+# Junction mirror of .claude/skills for Codex (would duplicate every skill in git)
+.agents/
