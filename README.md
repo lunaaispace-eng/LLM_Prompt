@@ -4,6 +4,34 @@ ComfyUI nodes for local and API-based prompt generation, built around a Markdown
 
 This pack is aimed at image and video generation workflows where an LLM turns a short idea, style block, image, video, or reference input into a cleaner generation prompt.
 
+### API video input
+
+Connect a ComfyUI **VIDEO** output to `LLM Prompt (API)`'s `video` socket. To
+assemble frames and a soundtrack, use **Create Video** with images, audio, and
+the correct source frame rate. An image batch alone contains no audio.
+
+- `video_input_mode = auto` sends native video to Gemini, including embedded
+  audio; other providers receive sampled still images. `native_video` explicitly
+  requires Gemini. `sampled_frames` sends silent stills with any provider.
+- `gemini_video_fps` controls Gemini's native visual sampling rate (default **2
+  fps**, range 0.1–24). It does not change playback speed or remove audio.
+- `video_sample_frames` caps the evenly spaced still frames in sampled mode
+  (default **32**, range 1–256). `vision_mp` applies to these stills and reference
+  images, not the native video.
+- The existing `frames` socket still describes the **target clip length for H3
+  validation**; it does not control input sampling.
+
+Native mode exports the logical clip as MP4/H.264, retaining its audio and trim,
+uploads it through Gemini Files, waits for processing, and deletes that temporary
+upload after generation (including error paths). Higher sampling rates/counts
+increase token use and cost. `timeout_seconds` also bounds the processing wait
+and individual SDK HTTP requests, rather than the entire export/upload/generation
+sequence. The `log` output identifies native video versus silent sampled frames.
+Image batches remain supported alongside video, in their original image order.
+
+Requires a video-capable Gemini model and `google-genai` with `VideoMetadata.fps`
+support. See [Google's video input documentation](https://ai.google.dev/gemini-api/docs/generate-content/video-understanding).
+
 ## Nodes
 
 | Node | What it does |

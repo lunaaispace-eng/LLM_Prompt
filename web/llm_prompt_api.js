@@ -240,6 +240,18 @@ function updateProviderSpecificVisibility(node) {
     setWidgetVisible(thinkingBudget, isGemini);
     const enableCaching = node.widgets?.find((w) => w.name === "enable_caching");
     setWidgetVisible(enableCaching, isGemini);
+    const mode = node.widgets?.find((w) => w.name === "video_input_mode")?.value || "auto";
+    const nativeVideo = isGemini && mode !== "sampled_frames";
+    for (const [name, visible] of [["gemini_video_fps", nativeVideo], ["video_sample_frames", !nativeVideo]]) {
+        const widget = node.widgets?.find((w) => w.name === name);
+        setWidgetVisible(widget, visible);
+        if (widget) {
+            widget.hidden = !visible;
+            if (widget.options) widget.options.hidden = !visible;
+        }
+    }
+    // Notify the Vue widget renderer as well as the legacy canvas.
+    if (node.widgets?.length) node.widgets.push(node.widgets.pop());
 
     node.setDirtyCanvas(true, true);
 }
@@ -284,6 +296,7 @@ app.registerExtension({
             });
             watch("server_url", () => refreshModels(node));
             watch("model_filter", () => refreshModels(node));
+            watch("video_input_mode", () => updateProviderSpecificVisibility(node));
 
             return r;
         };

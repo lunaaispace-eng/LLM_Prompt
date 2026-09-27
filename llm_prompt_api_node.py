@@ -21,6 +21,7 @@ Design principles:
 from __future__ import annotations
 
 import hashlib
+from contextlib import nullcontext
 import json
 import os
 import re
@@ -40,6 +41,7 @@ from .llm_prompt_node import (
 )
 from .output_cleaner import OutputCleanConfig, clean_model_output, normalize_prompt_separator, split_positive_negative
 from .h3_validate import validate_h3, format_log
+from .gemini_video import gemini_video_part
 from comfy_api.latest import io
 
 
@@ -756,7 +758,9 @@ def _send_gemini_native(
     thinking_budget: int,
     thinking_level: str,
     cached_content_name: str | None,
-    timeout: float,  # unused — SDK manages timeouts
+    timeout: float,
+    video=None,
+    video_fps: float = 2.0,
 ) -> str:
     """Send a chat request via google-genai SDK.
 
@@ -778,7 +782,7 @@ def _send_gemini_native(
     if not model or model.startswith("<"):
         raise RuntimeError(f"Invalid model: {model!r}.")
 
-    client = genai.Client(api_key=api_key)
+    client = genai.Client(api_key=api_key, http_options=types.HttpOptions(timeout=int(timeout * 1000)))
 
     # Convert messages: extract system, convert user content (including images)
     system_text = None
@@ -900,14 +904,24 @@ def _send_gemini_native(
 
     start = time.perf_counter()
     try:
-        response = client.models.generate_content(
-            model=model,
-            contents=contents,
-            config=gen_config,
-        )
+        media = (gemini_video_part(client, types, video, video_fps, timeout)
+                 if video is not None else nullcontext(None))
+        with media as video_part:
+            if video_part is not None:
+                if contents and contents[-1].role == "user":
+                    contents[-1].parts.append(video_part)
+                else:
+                    contents.append(types.Content(role="user", parts=[video_part]))
+            response = client.models.generate_content(
+                model=model,
+                contents=contents,
+                config=gen_config,
+            )
     except Exception as e:
         # SDK exception messages are usually descriptive enough
         raise RuntimeError(f"Gemini SDK error: {e}") from None
+    finally:
+        client.close()
     elapsed = max(time.perf_counter() - start, 1e-6)
 
     # Extract text from response
@@ -1247,9 +1261,15 @@ class LLMPromptAPINode(io.ComfyNode):
                 io.Int.Input("height", optional=True, force_input=True,
                              tooltip="Image height - drives an aspect-ratio composition profile."),
                 io.Image.Input("image", optional=True, tooltip="Input image for vision-capable models."),
-                io.Video.Input("video", optional=True, tooltip="Input video for vision-capable models."),
+                io.Video.Input("video", optional=True, tooltip="Gemini native mode sends the clip including its audio. Sampled-frame mode sends still images only."),
                 io.Int.Input("frames", optional=True, force_input=True,
                              tooltip="The clip's real frame count, for `validate`. Lets S.SS and the cut times be checked against the actual duration instead of just their format."),
+                io.Combo.Input("video_input_mode", options=["auto", "native_video", "sampled_frames"], default="auto",
+                               tooltip="auto: native video with embedded audio for Gemini; sampled stills for other providers. native_video requires Gemini and a VIDEO object. sampled_frames discards audio."),
+                io.Int.Input("video_sample_frames", default=32, min=1, max=256,
+                             tooltip="Maximum evenly spaced still frames in sampled_frames mode. Separate from the target clip's frames validation input. Higher counts increase request size and cost."),
+                io.Float.Input("gemini_video_fps", default=2.0, min=0.1, max=24.0, step=0.1,
+                               tooltip="Gemini native video sampling rate, in frames per second. Audio remains in the uploaded clip. Higher rates increase token use; ignored in sampled_frames mode."),
             ],
             outputs=[
                 io.String.Output("positive", display_name="positive"),
@@ -1306,10 +1326,20 @@ class LLMPromptAPINode(io.ComfyNode):
         image=None,
         video=None,
         frames: int = 0,
+        video_input_mode: str = "auto",
+        video_sample_frames: int = 32,
+        gemini_video_fps: float = 2.0,
     ):
         cfg = PROVIDERS.get(provider)
         if not cfg:
             raise RuntimeError(f"Unknown provider: {provider!r}")
+        if video_input_mode not in ("auto", "native_video", "sampled_frames"):
+            raise ValueError(f"Unknown video input mode: {video_input_mode!r}")
+        native_video = video is not None and video_input_mode != "sampled_frames" and cfg.get("native_protocol") == "gemini"
+        if video is not None and video_input_mode == "native_video" and not native_video:
+            raise ValueError("native_video is supported only by the Gemini provider; select sampled_frames for this provider.")
+        if native_video and "gemini" not in model_name.lower():
+            raise ValueError("Native video requires a Gemini video-capable model; select sampled_frames for Gemma.")
 
         # Official sampling values for the model family, applied server-side on
         # every run. The frontend cannot do this job: a JS preset only fires on a
@@ -1477,8 +1507,16 @@ class LLMPromptAPINode(io.ComfyNode):
                 img = _tensor_to_base64_png(image[i], max_mp=vision_mp)
                 if img:
                     images_b64.append(img)
-        if video is not None:
-            for frame in _sample_video_frames(video, 16):
+        media_log = ""
+        if native_video:
+            media_log = f"Video: native Gemini clip with embedded audio if present; sampling {gemini_video_fps:g} fps."
+        elif video is not None:
+            if not 1 <= int(video_sample_frames) <= 256:
+                raise ValueError("video_sample_frames must be between 1 and 256.")
+            video_images = video.get_components().images if callable(getattr(video, "get_components", None)) else video
+            sampled = _sample_video_frames(video_images, video_sample_frames)
+            media_log = f"Video: {len(sampled)} sampled still frames; audio is not sent."
+            for frame in sampled:
                 img = _tensor_to_base64_png(frame, max_mp=vision_mp)
                 if img:
                     images_b64.append(img)
@@ -1538,6 +1576,8 @@ class LLMPromptAPINode(io.ComfyNode):
                 thinking_level=gemini_thinking_level,
                 cached_content_name=cache_name,
                 timeout=float(timeout_seconds),
+                video=video if native_video else None,
+                video_fps=gemini_video_fps,
             )
         else:
             raw = _send_chat_completion(
@@ -1583,6 +1623,9 @@ class LLMPromptAPINode(io.ComfyNode):
             positive, findings = validate_h3(positive, frames or None)
             log = format_log(positive, frames or None, findings)
             print(f"[LLM_Prompt_API] {log}")
+        if media_log:
+            print(f"[LLM_Prompt_API] {media_log}")
+            log = "\n".join(part for part in (media_log, log) if part)
 
         return io.NodeOutput(positive, negative, log)
 
