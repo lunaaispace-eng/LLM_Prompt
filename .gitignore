@@ -19,3 +19,6 @@ STATUS.md
 
 # Junction mirror of .claude/skills for Codex (would duplicate every skill in git)
 .agents/
+AGENTS.md
+.claude/
+.codex/
