@@ -82,6 +82,17 @@ try:
 except Exception as e:  # pragma: no cover
     print(f"[LLM_Prompt] GPT Image (API Key) node not loaded: {e}")
 
+# Luna Image Studio (BYO keys) — every provider over luna_imaging/; optional like the rest.
+try:
+    from .luna_image_studio_node import (
+        NODE_CLASS_MAPPINGS as _STUDIO_NODES,
+        NODE_DISPLAY_NAME_MAPPINGS as _STUDIO_NAMES,
+    )
+    NODE_CLASS_MAPPINGS.update(_STUDIO_NODES)
+    NODE_DISPLAY_NAME_MAPPINGS.update(_STUDIO_NAMES)
+except Exception as e:  # pragma: no cover
+    print(f"[LLM_Prompt] Luna Image Studio (API Key) node not loaded: {e}")
+
 __all__ = ["NODE_CLASS_MAPPINGS", "NODE_DISPLAY_NAME_MAPPINGS"]
 
 WEB_DIRECTORY = "./web"

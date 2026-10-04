@@ -41,6 +41,7 @@ support. See [Google's video input documentation](https://ai.google.dev/gemini-a
 | `Gemini Image (API Key)` | Google Gemini image generation and editing (Nano Banana / Nano Banana Pro / Nano Banana 2) using your own `GEMINI_API_KEY`. Live model list, up to 4K, reference-image editing, multimodal text + thought-image outputs. |
 | `Gemini Omni Video (API Key)` | Google Gemini Omni text/image-to-video and video edit over the Interactions API, with your own `GEMINI_API_KEY`. |
 | `GPT Image (API Key)` | OpenAI GPT Image generation and editing (gpt-image-2.5 flare / sunburst, gpt-image-2, 1.x) with your own `OPENAI_API_KEY`: free sizes up to 3840x2160, multi-image edit, MASK inpainting, transparent background. |
+| `Luna Image Studio (API Key)` | One image node for OpenAI, Gemini and Grok on your own keys: generate, edit, compose, inpaint (MASK and/or bbox region, on every provider) and outpaint. Outside pixels always stay the original's; cost in `info`. |
 | `Grok Image (API Key)` | Direct xAI Grok Imagine text-to-image using your own `XAI_API_KEY`. |
 | `Grok Image Edit (API Key)` | Direct xAI Grok Imagine image edit. |
 | `Grok Video (API Key)` | Direct xAI Grok Imagine text/image-to-video. |
@@ -309,6 +310,36 @@ prompt and calls the image model as a tool; the rewrite is shown in `info`. In a
 on a text-heavy infographic it gave no measurable gain in text accuracy over a direct call and
 sometimes added unrequested detail, for extra mainline tokens and ~10 s — so it is a prompt
 expander, not a quality switch. Mask edits always go direct.
+
+## Luna Image Studio (API Key)
+
+One image node for every provider, on your own keys: OpenAI GPT Image (`OPENAI_API_KEY`),
+Gemini / Nano Banana (`GEMINI_API_KEY`) and Grok Imagine (`XAI_API_KEY`). The provider follows
+the `model`; keys are read from env / `.env` only. The provider logic lives in `luna_imaging/`,
+which has no ComfyUI or torch dependency.
+
+| `operation` | Needs | What happens |
+| --- | --- | --- |
+| `generate` | no image | Text-to-image. |
+| `edit` (default) | 1+ image | Whole-image edit; the other images are references. |
+| `compose` | 1+ image | Combine the connected images into one. |
+| `inpaint` | image + `mask` and/or `bboxes` | Change only the region of the first image. |
+| `outpaint` | image + an `outpaint_*` margin | Extend the first image by left / top / right / bottom pixels. |
+
+**Regions.** `mask_mode auto` uses the provider's native mask where it has one (OpenAI) and
+otherwise crops the region (plus `crop_padding` of context), edits the crop and composites it
+back. Either way the result is composited onto the original, so pixels outside the region always
+stay the original's. `feather` blends inward only. A `MASK` of any resolution is fitted to the
+first image; `invert_mask` flips the `MASK` only. The `mask` output is the region actually used
+(1 = edited), or the alpha when `background` is `transparent` and the result has one.
+
+**`bboxes`** is JSON on the first image: `[[x, y, w, h], ...]`. Values are pixels, or fractions
+of the image when every value is ≤ 1 (`[[0, 0, 0.5, 0.5]]` = the top-left quarter). Boxes are
+unioned with the `MASK`.
+
+**Cost.** `info` ends with `cost : $x.xxxx` — OpenAI from the response's token usage, Gemini per
+image by size, Grok from the cost xAI reports — or `cost : n/a` when it is not known. `seed`
+only re-runs the node; it is not sent.
 
 ## Gemini Omni Video (API Key)
 
