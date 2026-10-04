@@ -94,6 +94,44 @@ class MaskMaths(unittest.TestCase):
                     self.assertEqual(out.getpixel((x, y)), base.getpixel((x, y)))
         self.assertEqual(out.getpixel((32, 32)), (200, 10, 30))
 
+    def test_composite_small_island_full_strength_beside_big_region(self):
+        base = _noise((200, 200))
+        patch = Image.new("RGB", (200, 200), (200, 10, 30))
+        mask = _rect_mask((200, 200), (0, 0, 160, 160))
+        mask.paste(255, (180, 180, 184, 184))
+        out = composite(base, patch, (0, 0, 200, 200), mask, 16)
+        got = out.getpixel((182, 182))
+        self.assertTrue(all(abs(a - b) <= 5 for a, b in zip(got, (200, 10, 30))), got)
+        self.assertEqual(out.getpixel((80, 80)), (200, 10, 30))
+        self.assertEqual(out.getpixel((170, 100)), base.getpixel((170, 100)))
+
+    def test_composite_region_unchanged_by_distant_region(self):
+        base = _noise((200, 200))
+        patch = Image.new("RGB", (200, 200), (200, 10, 30))
+        a = _rect_mask((200, 200), (10, 10, 30, 30))
+        b = a.copy()
+        b.paste(255, (170, 170, 190, 190))
+        oa = composite(base, patch, (0, 0, 200, 200), a, 16)
+        ob = composite(base, patch, (0, 0, 200, 200), b, 16)
+        self.assertEqual(oa.crop((0, 0, 100, 100)).tobytes(), ob.crop((0, 0, 100, 100)).tobytes())
+
+    def test_composite_box_past_base_is_clamped(self):
+        base = _noise((64, 64))
+        patch = Image.new("RGB", (80, 80), (255, 0, 0))
+        out = composite(base, patch, (32, 32, 96, 96), _rect_mask((64, 64), (32, 32, 64, 64)), 0)
+        self.assertEqual(out.size, (64, 64))
+        self.assertEqual(out.getpixel((63, 63)), (255, 0, 0))
+        self.assertEqual(out.getpixel((10, 10)), base.getpixel((10, 10)))
+
+    def test_composite_large_region_speed(self):
+        import time
+        base = Image.new("RGB", (2048, 2048), (5, 5, 5))
+        patch = Image.new("RGB", (2048, 2048), (250, 0, 0))
+        t0 = time.time()
+        composite(base, patch, (0, 0, 2048, 2048), _rect_mask((2048, 2048), (256, 256, 1792, 1792)), 64)
+        print("composite 2048 feather 64: %.2fs" % (time.time() - t0))
+        self.assertLess(time.time() - t0, 2.0)
+
 
 if __name__ == "__main__":
     unittest.main()

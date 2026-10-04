@@ -4,7 +4,7 @@ Masks are PIL mode "L"; 255 = region to change.
 """
 import io
 
-from PIL import Image, ImageChops, ImageFilter
+from PIL import Image, ImageChops, ImageFilter, ImageMath
 
 
 def fit_mask(mask, size):
@@ -64,28 +64,51 @@ def outpaint_canvas(img, margins, fill=(127, 127, 127)):
     return canvas, mask
 
 
+def _feather_weight(hard, feather_px):
+    """Inward-only feather, normalised locally so every region's core reaches full strength.
+
+    weight = hard * min(1, blur / D), D = max of the blur (inside the mask only) within `feather_px` (about 2 sigma: far
+    enough to see a wide region's interior, so wide regions are normalised by ~255 = unchanged, and
+    near enough that a distant island is normalised by its own peak, not by another region's).
+    """
+    blurred = hard.filter(ImageFilter.GaussianBlur(feather_px / 2))
+    inside = ImageChops.multiply(blurred, hard)  # blur tails outside a region must not count as its peak
+    f = max(1, int(feather_px) // 8)
+    if f > 1:  # max-pool (never average) so the neighbourhood max is not underestimated
+        pooled = inside.filter(ImageFilter.MaxFilter(f | 1))
+        small = pooled.resize((max(1, hard.width // f), max(1, hard.height // f)), Image.NEAREST)
+    else:
+        small = inside
+    r = max(1, -(-int(feather_px) // f))
+    denom = small.filter(ImageFilter.MaxFilter(2 * r + 1))
+    if f > 1:
+        denom = denom.resize(hard.size, Image.NEAREST)
+    denom = ImageChops.lighter(denom, blurred).point(lambda v: max(v, 1))
+    ratio = ImageMath.lambda_eval(lambda a: a["x"] * 255 / a["y"],
+                                  x=blurred.convert("F"), y=denom.convert("F")).convert("L")
+    return ImageChops.multiply(ratio, hard)
+
+
 def composite(base, patch, box, mask, feather_px):
     """Blend `patch` (resized to `box`) into `base` inside the box, weighted by the mask.
 
-    `mask` is full image size. Feather is inward only: the weight is the blurred mask times
-    the hard mask, so it is 0 wherever the mask is 0 and the original stays exactly as it was.
-    Result mode follows base (RGB -> RGB, RGBA -> RGBA).
+    `mask` is full image size. Feather is inward only: the weight is 0 wherever the mask is 0, so
+    the original stays exactly as it was. The box is clamped to the base. Result mode follows base
+    (RGB -> RGB, RGBA -> RGBA).
     """
-    x0, y0, x1, y1 = box
-    bw, bh = x1 - x0, y1 - y0
     out_mode = "RGBA" if base.mode == "RGBA" else "RGB"
     out = base.convert(out_mode)
-    if bw <= 0 or bh <= 0:
+    x0, y0, x1, y1 = box
+    x0, y0, x1, y1 = max(0, x0), max(0, y0), min(out.width, x1), min(out.height, y1)
+    if x1 <= x0 or y1 <= y0:
         return out
-    hard = mask.convert("L").crop(box)
-    weight = hard
-    if feather_px and feather_px > 0:
-        blurred = hard.filter(ImageFilter.GaussianBlur(feather_px / 2))
-        weight = ImageChops.multiply(blurred, hard)
-        peak = weight.getextrema()[1]
-        if 0 < peak < 255:  # a small region would never reach full strength; keep its core solid
-            scale = 255.0 / peak
-            weight = weight.point(lambda v: min(255, round(v * scale)))
+    box = (x0, y0, x1, y1)
+    bw, bh = x1 - x0, y1 - y0
+    hard = mask.convert("L")
+    if hard.size != out.size:
+        hard = hard.resize(out.size, Image.NEAREST)
+    hard = hard.crop(box)
+    weight = _feather_weight(hard, feather_px) if feather_px and feather_px > 0 else hard
     p = patch.convert("RGB").resize((bw, bh), Image.LANCZOS)
     region = out.crop(box)
     if out_mode == "RGBA":
