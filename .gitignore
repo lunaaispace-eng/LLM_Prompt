@@ -13,6 +13,9 @@ __pycache__/
 # Local context files — not for git
 CLAUDE.md
 STATUS.md
+SPEC.md
+BUILD.md
+plans/
 
 # Live Gemini model-list cache (regenerated on demand)
 .gemini_models.json
