@@ -65,7 +65,9 @@ PROVIDERS = {
         # against https://ai.google.dev/gemini-api/docs/models. Once an API key
         # is set, the live query returns the user's full account-accessible list.
         "fallback_models": [
-            # Gemini 3 series (current)
+            # Gemini 3 series (current). 3.8-flash added 2026-10-04 from a
+            # live ListModels pass.
+            "gemini-3.8-flash",
             "gemini-3.7-flash",
             "gemini-3.6-flash",
             "gemini-3.1-pro-preview",
@@ -77,6 +79,7 @@ PROVIDERS = {
             # Rolling aliases — never go stale.
             "gemini-pro-latest",
             "gemini-flash-latest",
+            "gemini-flash-lite-latest",
             # The gemini-2.5-* entries were REMOVED 2026-08-31. ListModels still
             # advertises them, but generateContent 404s: "This model is no longer
             # available to new users." Verified on a live key for 2.5-pro,
@@ -94,6 +97,7 @@ PROVIDERS = {
         # list below is only the no-key / offline fallback.
         "live_models": True,
         "fallback_models": [
+            "grok-4.7",
             "grok-4.6",
             "grok-4.5",
             "grok-4.3",
@@ -118,9 +122,15 @@ PROVIDERS = {
         # (2026-08-31). Widen this regex to admit a new family; there is no
         # widget for it on purpose, because a dropdown of 124 models is worse
         # than editing one line when 5.7 ships.
-        "model_pattern": r"^gpt-5\.6",
+        # Widened 2026-10-04 to admit the GPT-6 family (gpt-6-sol / -luna /
+        # -astra, gpt-6.1-sol), which appeared on the live list.
+        "model_pattern": r"^gpt-(5\.6|6)",
         # No-key fallback only.
         "fallback_models": [
+            "gpt-6.1-sol",
+            "gpt-6-sol",
+            "gpt-6-luna",
+            "gpt-6-astra",
             "gpt-5.6-sol",    # highest quality
             "gpt-5.6-terra",  # mid
             "gpt-5.6-luna",   # cheapest / fastest
@@ -144,7 +154,10 @@ _NON_CHAT_PATTERNS = re.compile(
     # OpenAI-specific noise: agentic/codex endpoints, realtime + transcription
     # sockets, and the ancient base-completion models (davinci/babbage) which
     # are not chat models at all.
-    r"realtime|transcribe|codex|davinci|babbage|instruct)",
+    r"realtime|transcribe|codex|davinci|babbage|instruct|"
+    # Gemini agent/robotics endpoints on the same key (2026-10-04 ListModels):
+    # generateContent, but not prompt-writing models.
+    r"robotics|computer-use)",
     re.IGNORECASE,
 )
 
@@ -520,18 +533,29 @@ def _sanitize_payload_for_provider(provider: str, payload: dict) -> dict:
             seed_val = int(p["seed"])
             if seed_val > 2147483647:
                 p["seed"] = seed_val % 2147483647
-        # reasoning_effort is accepted only by grok-4.5 / 4.6 / 4.20-multi-agent.
-        # Older models 400 on it, so drop it rather than let the run fail. "xhigh"
-        # is 4.6-and-newer only; 4.5 treats it as "high", so send "high" outright.
+        _m = str(p.get("model", "")).lower()
+        # Live probe 2026-10-04: EVERY current Grok chat model (4.3, 4.5, 4.6,
+        # 4.7, 4.20-0309-*) 400s on presence_penalty and frequency_penalty
+        # ("Model grok-4.6 does not support parameter presencePenalty."), and
+        # 4.3-4.7 also 400 on `stop`. Only 4.20-0309-non-reasoning took `stop`.
+        p.pop("presence_penalty", None)
+        p.pop("frequency_penalty", None)
+        if "grok-4.20" not in _m:
+            p.pop("stop", None)
+        # reasoning_effort is accepted by grok-4.3 / 4.5 / 4.6 / 4.7 /
+        # 4.20-multi-agent (4.3 and 4.7 verified live 2026-10-04). The 4.20
+        # reasoning/non-reasoning pair 400s on it, so drop it there. "xhigh" is
+        # verified on 4.6 and 4.7; 4.5 treats it as "high", so send "high".
         if "reasoning_effort" in p:
-            _m = str(p.get("model", "")).lower()
             # "none" exists for OpenAI but NOT for xAI — reasoning cannot be
-            # disabled on 4.5/4.6, "low" is the floor. Clamp instead of 400.
+            # disabled, "low" is the floor (4.7: "This model does not support
+            # `reasoning_effort` value `none`."). Clamp instead of 400.
             if p["reasoning_effort"] == "none":
                 p["reasoning_effort"] = "low"
-            if not any(t in _m for t in ("grok-4.5", "grok-4.6", "multi-agent")):
+            if not any(t in _m for t in ("grok-4.3", "grok-4.5", "grok-4.6", "grok-4.7", "multi-agent")):
                 p.pop("reasoning_effort")
-            elif p["reasoning_effort"] == "xhigh" and "grok-4.6" not in _m and "multi-agent" not in _m:
+            elif p["reasoning_effort"] == "xhigh" and not any(
+                    t in _m for t in ("grok-4.6", "grok-4.7", "multi-agent")):
                 p["reasoning_effort"] = "high"
 
     elif provider == "OpenAI":
@@ -548,11 +572,24 @@ def _sanitize_payload_for_provider(provider: str, payload: dict) -> dict:
         # 'max_completion_tokens' instead."
         if "max_tokens" in p:
             p["max_completion_tokens"] = p.pop("max_tokens")
+        _m = str(p.get("model", "")).lower()
+        # GPT-6 (probed 2026-10-04): gpt-6-sol and gpt-6-luna follow the 5.6
+        # rules below. gpt-6-astra and gpt-6.1-sol have NO "none" effort —
+        # "Supported values are: 'low', 'medium', 'high', and 'xhigh'." —
+        # so clamp to "low"; sampling is then stripped by the rule below.
+        if p.get("reasoning_effort") == "none" and _m.startswith(("gpt-6-astra", "gpt-6.1")):
+            p["reasoning_effort"] = "low"
+        # gpt-6-luna returns HTTP 500 (server_error, repeatable, 3/3) whenever
+        # presence_penalty or frequency_penalty is sent. gpt-6-sol accepts them.
+        if _m.startswith("gpt-6-luna"):
+            p.pop("presence_penalty", None)
+            p.pop("frequency_penalty", None)
         # THE non-obvious one: temperature / top_p / presence_penalty /
         # frequency_penalty are accepted ONLY at reasoning_effort="none".
         # At low/medium/high/xhigh all four hard-400. Verified behaviourally
         # too — at "none", temperature really does change the output
         # (temp 0.0 -> 1 unique of 4 runs; temp 2.0 -> 4 unique of 4).
+        # Same rule re-verified on gpt-6-sol / -luna / -astra / 6.1-sol.
         _effort = str(p.get("reasoning_effort", "")).lower()
         if _effort and _effort != "none":
             for k in ("temperature", "top_p", "presence_penalty", "frequency_penalty"):
@@ -864,7 +901,13 @@ def _send_gemini_native(
     # branches, because a Gemma name matches neither and would fall through to
     # thinking_budget below.
     _is_gemma = "gemma" in model.lower()
-    _is_gen3 = "gemini-3" in model.lower()
+    # The rolling `-latest` aliases resolve to Gen-3 models now
+    # (2026-10-04: flash-latest -> 3.8-flash, pro-latest -> 3.1-pro-preview,
+    # flash-lite-latest -> 3.5-flash-lite). pro-latest and flash-lite-latest
+    # 400 on thinkingBudget=0 ("Budget 0 is invalid. This model only works in
+    # thinking mode.") and all three accept thinking_level, so route them as Gen-3.
+    _is_gen3 = "gemini-3" in model.lower() or (
+        model.lower().startswith("gemini-") and model.lower().endswith("-latest"))
     if _is_gemma:
         pass
     elif _is_gen3:

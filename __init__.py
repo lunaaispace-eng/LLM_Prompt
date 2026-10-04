@@ -60,6 +60,28 @@ try:
 except Exception as e:  # pragma: no cover
     print(f"[LLM_Prompt] Gemini Image (API Key) node not loaded: {e}")
 
+# Gemini Omni Video (BYO key) — Interactions API; optional like the rest.
+try:
+    from .gemini_omni_node import (
+        NODE_CLASS_MAPPINGS as _OMNI_NODES,
+        NODE_DISPLAY_NAME_MAPPINGS as _OMNI_NAMES,
+    )
+    NODE_CLASS_MAPPINGS.update(_OMNI_NODES)
+    NODE_DISPLAY_NAME_MAPPINGS.update(_OMNI_NAMES)
+except Exception as e:  # pragma: no cover
+    print(f"[LLM_Prompt] Gemini Omni Video (API Key) node not loaded: {e}")
+
+# GPT Image (BYO key) — OpenAI Images API; optional like the rest.
+try:
+    from .openai_image_node import (
+        NODE_CLASS_MAPPINGS as _GPT_IMG_NODES,
+        NODE_DISPLAY_NAME_MAPPINGS as _GPT_IMG_NAMES,
+    )
+    NODE_CLASS_MAPPINGS.update(_GPT_IMG_NODES)
+    NODE_DISPLAY_NAME_MAPPINGS.update(_GPT_IMG_NAMES)
+except Exception as e:  # pragma: no cover
+    print(f"[LLM_Prompt] GPT Image (API Key) node not loaded: {e}")
+
 __all__ = ["NODE_CLASS_MAPPINGS", "NODE_DISPLAY_NAME_MAPPINGS"]
 
 WEB_DIRECTORY = "./web"

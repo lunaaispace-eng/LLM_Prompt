@@ -35,23 +35,37 @@ from PIL import Image
 XAI_BASE_URL = "https://api.x.ai/v1"
 _KEY_NAMES = ("XAI_API_KEY", "GROK_API_KEY")
 
+# grok-imagine-image-pro is now an ALIAS of grok-imagine-image-quality on xAI's
+# /v1/image-generation-models (checked 2026-10-04). Kept so saved workflows
+# still validate. Edit input caps: image / 2.0 = 5, quality / pro = 3 (live).
 _IMAGE_MODELS = ["grok-imagine-image-2.0", "grok-imagine-image-quality", "grok-imagine-image-pro", "grok-imagine-image"]
-_IMAGE_AR = ["1:1", "2:3", "3:2", "3:4", "4:3", "9:16", "16:9", "9:19.5", "19.5:9", "9:20", "20:9", "1:2", "2:1"]
+# 21:9 and 5:2 appended 2026-10-04 from xAI's image docs (docs-only, not probed).
+_IMAGE_AR = ["1:1", "2:3", "3:2", "3:4", "4:3", "9:16", "16:9", "9:19.5", "19.5:9", "9:20", "20:9", "1:2", "2:1",
+             "21:9", "5:2"]
 _VIDEO_AR = ["auto", "16:9", "4:3", "3:2", "1:1", "2:3", "3:4", "9:16"]
 
 # grok-imagine-video-1.5 is the current generation; the unversioned model is the
 # older, cheaper one. 1.5 is the ONLY model that does reference-to-video, and the
 # only one that reaches 1080p (text-to-video + image-to-video; reference-to-video
 # is capped at 720p by xAI).
-_VIDEO_MODELS = ["grok-imagine-video-1.5", "grok-imagine-video"]
+# grok-imagine-video-1.5-lite (2026-10) is the cheaper 1.5 tier ($0.02/s vs
+# $0.08/s). LIVE-verified 2026-10-04: text- and image-to-video, 480p/720p/1080p,
+# 1-15 s. It REJECTS reference_images ("not supported for this model"),
+# last_frame/keyframes, edit and extend.
+#
+# Edit and extend are the reverse: xAI rejects BOTH 1.5 models there and only
+# the classic grok-imagine-video accepts them (live, same day) — hence the
+# separate, single-entry list for those two nodes.
+_VIDEO_MODELS = ["grok-imagine-video-1.5", "grok-imagine-video-1.5-lite", "grok-imagine-video"]
+_VIDEO_EDIT_MODELS = ["grok-imagine-video"]
 _VIDEO_RES = ["480p", "720p", "1080p"]
 
 
 def _check_video_resolution(model: str, resolution: str, mode: str = "") -> str:
     """Reject resolutions the chosen video model can't do, with a clear message."""
     if resolution == "1080p":
-        if model != "grok-imagine-video-1.5":
-            raise ValueError("1080p requires grok-imagine-video-1.5.")
+        if not model.startswith("grok-imagine-video-1.5"):
+            raise ValueError("1080p requires grok-imagine-video-1.5 or -1.5-lite.")
         if mode == "reference":
             raise ValueError("Reference-to-video is capped at 720p by xAI.")
     return resolution
@@ -351,10 +365,11 @@ class GrokImageEditAPINode:
             raise ValueError("Prompt is required.")
         frames = list(_iter_images(image))
         n_in = len(frames)
-        if model == "grok-imagine-image-pro" and n_in > 1:
-            raise ValueError("The pro model supports only 1 input image.")
-        if model != "grok-imagine-image-pro" and n_in > 3:
-            raise ValueError("A maximum of 3 input images is supported.")
+        # Per-model input caps, LIVE-verified 2026-10-04: image / image-2.0 take
+        # 5 ("at most 5"), image-quality (and its alias -pro) take 3.
+        max_in = 3 if model in ("grok-imagine-image-quality", "grok-imagine-image-pro") else 5
+        if n_in > max_in:
+            raise ValueError(f"{model} accepts at most {max_in} input images (got {n_in}).")
         wired = bool(width and height and width > 0 and height > 0)
         # xAI only allows a custom aspect_ratio when multiple inputs are connected;
         # with 1 input we leave it "auto" and rely on the exact resize below.
@@ -445,10 +460,11 @@ class GrokVideoReferenceAPINode:
         if width and height and width > 0 and height > 0:
             aspect_ratio = _nearest_ar(int(width), int(height), _VIDEO_AR[1:])
         _check_video_resolution(model, resolution, mode="reference")
-        # Only grok-imagine-video-1.5 does reference-to-video, and it takes at
-        # most 3 reference images.
+        # Only grok-imagine-video-1.5 does reference-to-video (1.5-lite is
+        # rejected by xAI), and it takes at most 3 reference images.
         if model != "grok-imagine-video-1.5":
-            raise ValueError("Reference-to-video requires grok-imagine-video-1.5.")
+            raise ValueError("Reference-to-video requires grok-imagine-video-1.5 "
+                             "(1.5-lite and the classic model are rejected by xAI).")
         frames = list(_iter_images(reference_images))[:3]
         if not frames:
             raise ValueError("At least one reference image is required.")
@@ -471,7 +487,7 @@ class GrokVideoEditAPINode:
     @classmethod
     def INPUT_TYPES(cls):
         return {"required": {
-            "model": (_VIDEO_MODELS,),
+            "model": (_VIDEO_EDIT_MODELS,),
             "prompt": _PROMPT,
             "video": ("VIDEO",),
             "seed": _SEED,
@@ -498,7 +514,7 @@ class GrokVideoExtendAPINode:
     @classmethod
     def INPUT_TYPES(cls):
         return {"required": {
-            "model": (_VIDEO_MODELS,),
+            "model": (_VIDEO_EDIT_MODELS,),
             "prompt": _PROMPT,
             "video": ("VIDEO",),
             "duration": ("INT", {"default": 8, "min": 2, "max": 15}),

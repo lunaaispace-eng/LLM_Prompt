@@ -25,7 +25,9 @@ const PROVIDERS = {
         // key is set.
         // Kept in step with the Python fallback_models list.
         fallback: [
-            // Gemini 3 series (current) — all verified callable 2026-08-31
+            // Gemini 3 series (current) — all verified callable 2026-08-31;
+            // 3.8-flash added 2026-10-04.
+            "gemini-3.8-flash",
             "gemini-3.7-flash",
             "gemini-3.6-flash",
             "gemini-3.1-pro-preview",
@@ -37,6 +39,7 @@ const PROVIDERS = {
             // Rolling aliases — never go stale.
             "gemini-pro-latest",
             "gemini-flash-latest",
+            "gemini-flash-lite-latest",
             // gemini-2.5-* removed 2026-08-31: ListModels still advertises
             // them but generateContent 404s ("no longer available to new
             // users") for pro, flash AND flash-lite.
@@ -50,6 +53,7 @@ const PROVIDERS = {
         // Kept in step with the Python fallback_models list. grok-3 was
         // dropped from xAI's model list (2026-08-29) and was still here.
         fallback: [
+            "grok-4.7",
             "grok-4.6",
             "grok-4.5",
             "grok-4.3",
@@ -65,8 +69,13 @@ const PROVIDERS = {
         needsAuth: true,
         envVar: "OPENAI_API_KEY",
         // No-key fallback only — the live query returns ~124 models. Kept to
-        // the GPT-5.6 family deliberately; see STATUS.md 2026-08-31.
+        // the GPT-5.6 + GPT-6 families deliberately; see STATUS.md 2026-08-31
+        // and 2026-10-04.
         fallback: [
+            "gpt-6.1-sol",
+            "gpt-6-sol",
+            "gpt-6-luna",
+            "gpt-6-astra",
             "gpt-5.6-sol",
             "gpt-5.6-terra",
             "gpt-5.6-luna",
@@ -88,7 +97,7 @@ const PROVIDERS = {
 // together. (Cost one confused bug report on 2026-08-31.)
 
 // Patterns mirroring the Python-side classification — keep these in sync.
-const NON_CHAT_PATTERN = /(embed|whisper|tts|audio|imagen|image-gen|dall-e|dalle|gpt-image|veo|video-gen|imagine-image|imagine-video|moderation|search|grounding|sora)/i;
+const NON_CHAT_PATTERN = /(embed|whisper|tts|audio|imagen|image-gen|dall-e|dalle|gpt-image|veo|omni|video-gen|imagine-image|imagine-video|moderation|search|grounding|sora|realtime|transcribe|codex|davinci|babbage|instruct|robotics|computer-use)/i;
 const VISION_PATTERN = /(vision|vl|multimodal|gemini|gpt-4o|gpt-4-turbo|gpt-4\.|grok-4|grok-2-vision|o1|o3|claude-3|llava|moondream|cogvlm|qwen.?vl|qwen2.?5.?vl|qwen3.?vl|intern.?vl|pixtral|paligemma|gemma)/i;
 const MULTIMODAL_PATTERN = /(multimodal|gemini-2|gemini-3|gpt-4o-audio|video|audio.?input)/i;
 

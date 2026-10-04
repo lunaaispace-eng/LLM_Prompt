@@ -39,6 +39,8 @@ support. See [Google's video input documentation](https://ai.google.dev/gemini-a
 | `LLM Prompt` | Local GGUF prompt generation through `llama-cpp-python`. Supports Qwen, Gemma, Llama-style models, vision projectors, image/reference/video/audio inputs, model-family presets, and model caching. |
 | `LLM Prompt (API)` | API prompt generation through Gemini native REST, xAI Grok, or a custom OpenAI-compatible endpoint. Uses the same prompt presets and output splitter as the local node. |
 | `Gemini Image (API Key)` | Google Gemini image generation and editing (Nano Banana / Nano Banana Pro / Nano Banana 2) using your own `GEMINI_API_KEY`. Live model list, up to 4K, reference-image editing, multimodal text + thought-image outputs. |
+| `Gemini Omni Video (API Key)` | Google Gemini Omni text/image-to-video and video edit over the Interactions API, with your own `GEMINI_API_KEY`. |
+| `GPT Image (API Key)` | OpenAI GPT Image generation and editing (gpt-image-2.5 flare / sunburst, gpt-image-2, 1.x) with your own `OPENAI_API_KEY`: free sizes up to 3840x2160, multi-image edit, MASK inpainting, transparent background. |
 | `Grok Image (API Key)` | Direct xAI Grok Imagine text-to-image using your own `XAI_API_KEY`. |
 | `Grok Image Edit (API Key)` | Direct xAI Grok Imagine image edit. |
 | `Grok Video (API Key)` | Direct xAI Grok Imagine text/image-to-video. |
@@ -169,6 +171,7 @@ Built-in providers:
 | --- | --- | --- |
 | `Gemini` | Native Gemini REST through `google-genai`. Default provider. | `GEMINI_API_KEY`, `GOOGLE_API_KEY`, or `GOOGLE_GEMINI_API_KEY`. |
 | `Grok (xAI)` | xAI OpenAI-compatible chat endpoint. | `XAI_API_KEY` or `GROK_API_KEY`. |
+| `OpenAI` | OpenAI Chat Completions, dropdown limited to the GPT-5.6 and GPT-6 families. | `OPENAI_API_KEY`. |
 | `Custom` | User-supplied OpenAI-compatible `server_url`. Use this for OpenRouter, LM Studio, llama.cpp server, vLLM, Ollama-compatible gateways, etc. | Optional, depending on server. |
 
 The node intentionally has no `api_key` widget. Keys are read from process environment variables or `.env` files so workflow JSON does not leak credentials.
@@ -258,6 +261,46 @@ interim drafts the model made while composing. They come out separately:
 `batch_count` is N sequential calls with the seed stepped by one, because Gemini returns one
 image per call — so N images cost N times as much.
 
+## GPT Image (API Key)
+
+OpenAI's Images API called directly with `OPENAI_API_KEY` — no Codex CLI, no ComfyUI credits.
+With no reference image it generates; connect any image to `reference_images` and it edits.
+The inputs follow `Gemini Image (API Key)`: `prompt`, `model`, `aspect_ratio`, `resolution`,
+`batch_count`, `seed`, growing `reference_images`, plus optional `width` / `height` from a
+size node (the output is then resized to exactly that size).
+
+| Model | Sizes | Quality | Transparent | `input_fidelity` |
+| --- | --- | --- | --- | --- |
+| `gpt-image-2.5-flare` (fast default) | any WxH, /16, up to 3840 | low … high, `xhigh`, `max` | yes | no |
+| `gpt-image-2.5-sunburst` (precision edits) | any WxH, /16, up to 3840 | low … high, `xhigh`, `max` | yes | no |
+| `gpt-image-2` | any WxH, /16, up to 3840 | low … high | **no** | no |
+| `gpt-image-1.5`, `gpt-image-1`, `chatgpt-image-latest` | 1024², 1536x1024, 1024x1536 | low … high | yes | yes |
+| `gpt-image-1-mini` | same three | low … high | yes | no |
+
+`resolution` is a pixel budget for the free-size models (1K ≈ 1 MP, 2K ≈ 4 MP, 4K = 3840x2160);
+sizes are snapped to the API's rules. On the fixed-size models the nearest of the three sizes is
+used. Settings a model cannot take are lowered or dropped with a note in `info`, not failed.
+
+**Editing.** Every connected image goes to `/v1/images/edits` (live: 101 images accepted on the
+2.x models). The first image is the one being edited; the rest are references. Connect a ComfyUI
+`MASK` — from the mask editor, SAM or any segmentation node — to repaint only the white area of
+the first image (`invert_mask` flips it). The `alpha` output carries the transparency when
+`background` is `transparent`. There is no seed in the API; `seed` only re-runs the node.
+
+## Gemini Omni Video (API Key)
+
+Google's Omni video model through the Interactions API (Omni rejects `generateContent`). Omni
+outputs **video only** — 10 s, 24 fps, with audio; there is no image output and no duration
+control. Aspect `16:9` / `9:16`; resolution `360p` / `720p` / `1080p` / `4k` (360p ≈ $0.34 per
+clip, 720p ≈ $1.01).
+
+- `generate` — text, or up to 3 `reference_images` (one image = image-to-video).
+- `edit video` — wire an earlier Omni node's `interaction_id` into `previous_interaction_id` to
+  edit that clip server-side. Editing an *uploaded* clip is not offered in the EEA, Switzerland
+  or the UK and comes back as `content_blocked` there.
+- `extend video` — needs the uploaded clip (Google rejects `previous_interaction_id` for
+  extend), so the same regional limit applies.
+
 ## Grok Imagine API Key Nodes
 
 These nodes call xAI directly with your own key:
@@ -282,6 +325,16 @@ Available Grok media nodes:
 - `Grok Reference-to-Video (API Key)`
 - `Grok Video Edit (API Key)`
 - `Grok Video Extend (API Key)`
+
+Per-model limits (checked against the live API, 2026-10-04):
+
+| Model | Notes |
+| --- | --- |
+| `grok-imagine-image`, `grok-imagine-image-2.0` | Edit takes up to 5 input images. `quality` is 2.0-only. |
+| `grok-imagine-image-quality` (alias `-pro`) | Edit takes up to 3 input images. |
+| `grok-imagine-video-1.5` | Text/image-to-video up to 1080p; the only model for reference-to-video (max 3 refs, 720p). |
+| `grok-imagine-video-1.5-lite` | Cheaper 1.5 tier: text/image-to-video, 480p–1080p, 1–15 s. No references, edit or extend. |
+| `grok-imagine-video` | The only model xAI accepts for video edit and extend. |
 
 ## Prompt Presets
 
