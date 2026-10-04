@@ -1430,6 +1430,354 @@ def _send_grok_cli(model: str, messages: list[dict], timeout: float, reasoning_e
 
 
 # ---------------------------------------------------------------------------
+# The writer core (shared by the node and the Director)
+# ---------------------------------------------------------------------------
+
+def _video_route(provider: str, model_name: str, video, video_input_mode: str) -> tuple[dict, bool]:
+    """(provider config, native_video). Raises the node's provider / video-mode errors."""
+    cfg = PROVIDERS.get(provider)
+    if not cfg:
+        raise RuntimeError(f"Unknown provider: {provider!r}")
+    if video_input_mode not in ("auto", "native_video", "sampled_frames"):
+        raise ValueError(f"Unknown video input mode: {video_input_mode!r}")
+    native_video = video is not None and video_input_mode != "sampled_frames" and cfg.get("native_protocol") == "gemini"
+    if video is not None and video_input_mode == "native_video" and not native_video:
+        raise ValueError("native_video is supported only by the Gemini provider; select sampled_frames for this provider.")
+    if native_video and "gemini" not in model_name.lower():
+        raise ValueError("Native video requires a Gemini video-capable model; select sampled_frames for Gemma.")
+    return cfg, native_video
+
+
+def write_prompt_api(
+    *,
+    provider: str,
+    model_name: str,
+    system_prompt: str = "None",
+    custom_system_prompt: str = "",
+    user_prompt: str = "",
+    context: str = "",
+    style: str = "",
+    width: int = 0,
+    height: int = 0,
+    images_b64: list[str] | None = None,
+    output_format: str = "text",
+    split_output: bool = True,
+    max_tokens: int = 4096,
+    temperature: float = 0.7,
+    top_p: float = 0.9,
+    top_k: int = 0,
+    presence_penalty: float = 0.0,
+    frequency_penalty: float = 0.0,
+    seed: int = 0,
+    stop_sequences: str = "",
+    gemini_thinking_budget: int = 0,
+    gemini_thinking_level: str = "None",
+    enable_caching: bool = False,
+    disable_thinking: bool = True,
+    timeout_seconds: int = 120,
+    auto_settings: bool = True,
+    reasoning_effort: str = "low",
+    server_url: str = "",
+    validate: str = "off",
+    frames: int = 0,
+    video=None,
+    video_input_mode: str = "auto",
+    video_sample_frames: int = 32,
+    gemini_video_fps: float = 2.0,
+) -> tuple[str, str, str]:
+    """The LLM Prompt (API) writer: build the messages, call the provider, clean and split.
+
+    Returns (positive, negative, log). The node's execute() is this call plus its tensor
+    work (image / sampled-frame encoding and the image-dims canvas fallback); the Director
+    calls it in-process. Every default equals the node's widget default
+    (tests/test_writer_api_core.py pins this).
+
+    images_b64: base64 PNGs (the Claude CLI declares image/png). width/height drive the
+    canvas block; no fallback to the images' size is made here. video: a VIDEO object, for
+    native Gemini only; sampled frames go in images_b64, so video_sample_frames (the node's
+    sampling setting) is not used here. disable_thinking is accepted and unused, as on the
+    node.
+    """
+    cfg, native_video = _video_route(provider, model_name, video, video_input_mode)
+    if video is not None and not native_video:
+        raise ValueError("write_prompt_api takes `video` only for native Gemini; "
+                         "send sampled frames as images_b64 instead.")
+
+    # Official sampling values for the model family, applied server-side on
+    # every run. The frontend cannot do this job: a JS preset only fires on a
+    # manual dropdown click, so on workflow load the sliders keep stale
+    # values — the same bug the local node was fixed for.
+    if auto_settings:
+        resolved = _resolve_model_settings((model_name or "").lower())
+        if resolved:
+            temperature = resolved["temperature"]
+            top_p = resolved["top_p"]
+            top_k = resolved["top_k"]
+            presence_penalty = resolved["presence_penalty"]
+            # min_p / repetition_penalty are still in the preset table (the
+            # local GGUF node uses them) but this node no longer exposes or
+            # sends them — every cloud provider rejects both.
+            print(
+                f"[LLM_Prompt_API] auto_settings -> temp={temperature}, top_p={top_p}, "
+                f"top_k={top_k}, presence_penalty={presence_penalty}"
+            )
+        else:
+            print(
+                f"[LLM_Prompt_API] auto_settings ON but no published preset for "
+                f"'{model_name}' — using the slider values as-is."
+            )
+
+    base_url = _resolve_base_url(provider, server_url)
+    # Keys are NEVER passed via node widgets — read only from env / .env
+    resolved_key = _resolve_api_key(provider)
+    if cfg.get("needs_auth") and not resolved_key:
+        spec = cfg.get("env_var")
+        names = spec if isinstance(spec, list) else [spec or "<none>"]
+        primary = names[0]
+        alt_text = f" (or any of: {', '.join(names[1:])})" if len(names) > 1 else ""
+        env_path = _comfyui_root() / ".env"
+        raise RuntimeError(
+            f"{provider} requires an API key. Two ways to set it:\n"
+            f"  1. Set the {primary} environment variable{alt_text} BEFORE launching ComfyUI "
+            f"(env vars set after ComfyUI starts are NOT picked up by Easy-Install builds), OR\n"
+            f"  2. Create a .env file at {env_path} with the line:\n"
+            f"     {primary}=your_key_here\n\n"
+            f"The node intentionally has NO api_key widget — widget values are saved to "
+            f"workflow JSON and would leak the key if you shared the workflow.\n\n"
+            f"Check the ComfyUI startup log for '[LLM_Prompt_API] API key environment check:' "
+            f"to see exactly which keys this Python process sees."
+        )
+
+    # Resolve system prompt
+    if custom_system_prompt and custom_system_prompt.strip():
+        sys_prompt = custom_system_prompt.strip()
+    elif system_prompt and system_prompt != "None":
+        prompts = load_system_prompts()
+        sys_prompt = prompts.get(system_prompt, "")
+    else:
+        sys_prompt = ""
+
+    # Grok: use json_schema with strict=true to guarantee positive/negative
+    # split — text format instructions are unreliable with Grok.
+    # Detected here (before tails are appended) so we can choose the right tail.
+    grok_pair_schema: dict | None = None
+    if (
+        provider == "Grok (xAI)"
+        and output_format == "text"
+        and sys_prompt
+        and "|" in sys_prompt
+        and "negative" in sys_prompt.lower()
+    ):
+        grok_pair_schema = {
+            "type": "json_schema",
+            "json_schema": {
+                "name": "prompt_pair",
+                "strict": True,
+                "schema": {
+                    "type": "object",
+                    "properties": {
+                        "positive": {
+                            "type": "string",
+                            "description": "The positive image generation prompt",
+                        },
+                        "negative": {
+                            "type": "string",
+                            "description": "The negative image generation prompt",
+                        },
+                    },
+                    "required": ["positive", "negative"],
+                    "additionalProperties": False,
+                },
+            },
+        }
+
+    # Output-format directive (light hint; JSON is also forced at API level via response_format)
+    if output_format == "json":
+        sys_prompt += (
+            "\n\nReturn only the final prompt as a valid JSON object. "
+            "No preface, no explanations, no markdown fences."
+        )
+    elif output_format == "list":
+        sys_prompt += (
+            "\n\nOutput only the numbered list as specified. "
+            "No preface, no explanations, no markdown fences. "
+            "Keep every item on its own numbered line."
+        )
+    elif sys_prompt:
+        if grok_pair_schema:
+            # Tell Grok to fill JSON fields — "no JSON" would contradict the schema
+            sys_prompt += (
+                "\n\nOutput the positive prompt in the \"positive\" field "
+                "and the negative prompt in the \"negative\" field. "
+                "No extra text outside the JSON."
+            )
+        else:
+            sys_prompt += (
+                "\n\nReturn only the final prompt text. "
+                "No preface, no explanations, no JSON, no markdown fences."
+            )
+            # Authoritative positive/negative delimiter contract (identical to
+            # the GGUF node). Labelled markers survive where a bare '|' gets
+            # dropped; the shared parser strips them so outputs stay clean.
+            if split_output:
+                sys_prompt += (
+                    "\n\nIf your instructions produce a NEGATIVE prompt, format your entire "
+                    "answer EXACTLY like this, each marker on its own line:\n"
+                    "[POSITIVE]\n<the full positive prompt>\n[NEGATIVE]\n<the full negative prompt>\n"
+                    "Write nothing before [POSITIVE] and nothing after the negative prompt. "
+                    "If there is no negative prompt, write [POSITIVE] then your prompt and stop."
+                )
+
+    # Canvas dims. The node's execute() has already applied its image-dims
+    # fallback, so composition stays aspect-ratio-driven.
+    eff_w, eff_h = width, height
+
+    # Build user prompt — STABLE FIRST, VARIABLE LAST for cache friendliness.
+    # LEAD with the aspect-ratio canvas profile, then STYLE -> USER REQUEST.
+    stable_parts: list[str] = []
+    if eff_w > 0 and eff_h > 0:
+        canvas_block = _build_canvas_profile(eff_w, eff_h)
+        if canvas_block:
+            stable_parts.append(canvas_block)
+    if style and style.strip():
+        stable_parts.append(f"STYLE:\n{style.strip()}")
+
+    variable_parts: list[str] = []
+    # Upstream analysis (stage 1 of a two-stage graph). Variable, not stable:
+    # it changes every run, so it must stay OUT of the Gemini cache prefix.
+    if context and context.strip():
+        variable_parts.append(f"REFERENCE CONTEXT:\n{context.strip()}")
+    if user_prompt and user_prompt.strip():
+        variable_parts.append(f"USER REQUEST:\n{user_prompt.strip()}")
+
+    all_parts = stable_parts + variable_parts
+    final_user_prompt = "\n\n".join(all_parts) if all_parts else "Describe a scene vividly."
+
+    # Stable text for Gemini caching purposes (system + stable user portion)
+    stable_user_text = "\n\n".join(stable_parts)
+
+    # Vision content: base64 PNGs, already encoded by the caller. Empty
+    # entries are dropped, as the node always did.
+    images_b64 = [b for b in (images_b64 or []) if b]
+    media_log = ""
+    if native_video:
+        media_log = f"Video: native Gemini clip with embedded audio if present; sampling {gemini_video_fps:g} fps."
+
+    # Build messages array
+    messages: list[dict] = []
+    if sys_prompt:
+        messages.append({"role": "system", "content": sys_prompt})
+
+    if images_b64:
+        user_content = _build_multimodal_user_content(final_user_prompt, images_b64)
+        messages.append({"role": "user", "content": user_content})
+    else:
+        messages.append({"role": "user", "content": final_user_prompt})
+
+    # Build sampling dict
+    sampling = {
+        "temperature": float(temperature),
+        "top_p": float(top_p),
+        "top_k": int(top_k),
+        "presence_penalty": float(presence_penalty),
+        "frequency_penalty": float(frequency_penalty),
+        "max_tokens": int(max_tokens),
+        "seed": int(seed),
+    }
+
+    # Parse stop sequences
+    stops: list[str] = []
+    if stop_sequences and stop_sequences.strip():
+        stops = [s.strip() for s in stop_sequences.split(",") if s.strip()]
+
+    # Send the request — route Gemini through its native API for full
+    # feature support (thinking_budget, safety, top_k, caching). Other
+    # providers go through the OpenAI-compatible /v1/chat/completions path.
+    _cli = cfg.get("native_protocol")
+    if _cli in ("claude_cli", "codex_cli", "grok_cli"):
+        _send = {"claude_cli": _send_claude_cli, "codex_cli": _send_codex_cli,
+                 "grok_cli": _send_grok_cli}[_cli]
+        raw = _send(model_name, messages, float(timeout_seconds), reasoning_effort)
+    elif cfg.get("native_protocol") == "gemini":
+        # Caching: create or reuse a cached content resource for the stable prefix
+        cache_name: str | None = None
+        if enable_caching and resolved_key and sys_prompt and stable_user_text:
+            cache_name = _gemini_create_cached_content(
+                api_key=resolved_key,
+                model=model_name,
+                system_text=sys_prompt,
+                stable_user_text=stable_user_text,
+            )
+            if cache_name:
+                print(f"[LLM_Prompt_API] Using Gemini cached content: {cache_name}")
+
+        raw = _send_gemini_native(
+            base_url=base_url,
+            api_key=resolved_key,
+            model=model_name,
+            messages=messages,
+            sampling=sampling,
+            output_format=output_format,
+            stop_sequences=stops,
+            thinking_budget=gemini_thinking_budget,
+            thinking_level=gemini_thinking_level,
+            cached_content_name=cache_name,
+            timeout=float(timeout_seconds),
+            video=video if native_video else None,
+            video_fps=gemini_video_fps,
+        )
+    else:
+        raw = _send_chat_completion(
+            provider=provider,
+            base_url=base_url,
+            api_key=resolved_key,
+            model=model_name,
+            messages=messages,
+            sampling=sampling,
+            output_format=output_format,
+            stop_sequences=stops,
+            timeout=float(timeout_seconds),
+            extra_body=None,
+            response_format_override=grok_pair_schema,
+            reasoning_effort=reasoning_effort,
+        )
+
+    if grok_pair_schema:
+        # Grok returned a guaranteed JSON object — assemble positive|negative directly.
+        # No text cleaning needed; the schema enforces clean string fields.
+        try:
+            pair = json.loads(raw)
+            positive = str(pair.get("positive") or "").strip()
+            negative = str(pair.get("negative") or "").strip()
+            cleaned = f"{positive}|{negative}" if negative else positive
+        except Exception as e:
+            print(f"[LLM_Prompt_API] Grok JSON parse failed ({e}), falling back to text cleaning")
+            cleaned = clean_model_output(raw, OutputCleanConfig(mode="prompt")) or raw
+            cleaned = normalize_prompt_separator(cleaned)
+    elif output_format == "text":
+        # The shared hardened split_positive_negative() below handles markers,
+        # labels, pipe and JSON, so the old normalize-to-pipe pre-pass is gone.
+        cleaned = clean_model_output(raw, OutputCleanConfig(mode="prompt")) or raw
+    else:
+        cleaned = raw
+
+    # Split 'positive|negative' into the two outputs (or full text on
+    # positive + empty negative when split_output is off / no pipe).
+    positive, negative = split_positive_negative(cleaned, split_output)
+
+    log = ""
+    if validate == "h3":
+        positive, findings = validate_h3(positive, frames or None)
+        log = format_log(positive, frames or None, findings)
+        print(f"[LLM_Prompt_API] {log}")
+    if media_log:
+        print(f"[LLM_Prompt_API] {media_log}")
+        log = "\n".join(part for part in (media_log, log) if part)
+
+    return positive, negative, log
+
+
+# ---------------------------------------------------------------------------
 # The Node
 # ---------------------------------------------------------------------------
 
@@ -1635,141 +1983,8 @@ class LLMPromptAPINode(io.ComfyNode):
         video_sample_frames: int = 32,
         gemini_video_fps: float = 2.0,
     ):
-        cfg = PROVIDERS.get(provider)
-        if not cfg:
-            raise RuntimeError(f"Unknown provider: {provider!r}")
-        if video_input_mode not in ("auto", "native_video", "sampled_frames"):
-            raise ValueError(f"Unknown video input mode: {video_input_mode!r}")
-        native_video = video is not None and video_input_mode != "sampled_frames" and cfg.get("native_protocol") == "gemini"
-        if video is not None and video_input_mode == "native_video" and not native_video:
-            raise ValueError("native_video is supported only by the Gemini provider; select sampled_frames for this provider.")
-        if native_video and "gemini" not in model_name.lower():
-            raise ValueError("Native video requires a Gemini video-capable model; select sampled_frames for Gemma.")
-
-        # Official sampling values for the model family, applied server-side on
-        # every run. The frontend cannot do this job: a JS preset only fires on a
-        # manual dropdown click, so on workflow load the sliders keep stale
-        # values — the same bug the local node was fixed for.
-        if auto_settings:
-            resolved = _resolve_model_settings((model_name or "").lower())
-            if resolved:
-                temperature = resolved["temperature"]
-                top_p = resolved["top_p"]
-                top_k = resolved["top_k"]
-                presence_penalty = resolved["presence_penalty"]
-                # min_p / repetition_penalty are still in the preset table (the
-                # local GGUF node uses them) but this node no longer exposes or
-                # sends them — every cloud provider rejects both.
-                print(
-                    f"[LLM_Prompt_API] auto_settings -> temp={temperature}, top_p={top_p}, "
-                    f"top_k={top_k}, presence_penalty={presence_penalty}"
-                )
-            else:
-                print(
-                    f"[LLM_Prompt_API] auto_settings ON but no published preset for "
-                    f"'{model_name}' — using the slider values as-is."
-                )
-
-        base_url = _resolve_base_url(provider, server_url)
-        # Keys are NEVER passed via node widgets — read only from env / .env
-        resolved_key = _resolve_api_key(provider)
-        if cfg.get("needs_auth") and not resolved_key:
-            spec = cfg.get("env_var")
-            names = spec if isinstance(spec, list) else [spec or "<none>"]
-            primary = names[0]
-            alt_text = f" (or any of: {', '.join(names[1:])})" if len(names) > 1 else ""
-            env_path = _comfyui_root() / ".env"
-            raise RuntimeError(
-                f"{provider} requires an API key. Two ways to set it:\n"
-                f"  1. Set the {primary} environment variable{alt_text} BEFORE launching ComfyUI "
-                f"(env vars set after ComfyUI starts are NOT picked up by Easy-Install builds), OR\n"
-                f"  2. Create a .env file at {env_path} with the line:\n"
-                f"     {primary}=your_key_here\n\n"
-                f"The node intentionally has NO api_key widget — widget values are saved to "
-                f"workflow JSON and would leak the key if you shared the workflow.\n\n"
-                f"Check the ComfyUI startup log for '[LLM_Prompt_API] API key environment check:' "
-                f"to see exactly which keys this Python process sees."
-            )
-
-        # Resolve system prompt
-        if custom_system_prompt and custom_system_prompt.strip():
-            sys_prompt = custom_system_prompt.strip()
-        elif system_prompt and system_prompt != "None":
-            prompts = load_system_prompts()
-            sys_prompt = prompts.get(system_prompt, "")
-        else:
-            sys_prompt = ""
-
-        # Grok: use json_schema with strict=true to guarantee positive/negative
-        # split — text format instructions are unreliable with Grok.
-        # Detected here (before tails are appended) so we can choose the right tail.
-        grok_pair_schema: dict | None = None
-        if (
-            provider == "Grok (xAI)"
-            and output_format == "text"
-            and sys_prompt
-            and "|" in sys_prompt
-            and "negative" in sys_prompt.lower()
-        ):
-            grok_pair_schema = {
-                "type": "json_schema",
-                "json_schema": {
-                    "name": "prompt_pair",
-                    "strict": True,
-                    "schema": {
-                        "type": "object",
-                        "properties": {
-                            "positive": {
-                                "type": "string",
-                                "description": "The positive image generation prompt",
-                            },
-                            "negative": {
-                                "type": "string",
-                                "description": "The negative image generation prompt",
-                            },
-                        },
-                        "required": ["positive", "negative"],
-                        "additionalProperties": False,
-                    },
-                },
-            }
-
-        # Output-format directive (light hint; JSON is also forced at API level via response_format)
-        if output_format == "json":
-            sys_prompt += (
-                "\n\nReturn only the final prompt as a valid JSON object. "
-                "No preface, no explanations, no markdown fences."
-            )
-        elif output_format == "list":
-            sys_prompt += (
-                "\n\nOutput only the numbered list as specified. "
-                "No preface, no explanations, no markdown fences. "
-                "Keep every item on its own numbered line."
-            )
-        elif sys_prompt:
-            if grok_pair_schema:
-                # Tell Grok to fill JSON fields — "no JSON" would contradict the schema
-                sys_prompt += (
-                    "\n\nOutput the positive prompt in the \"positive\" field "
-                    "and the negative prompt in the \"negative\" field. "
-                    "No extra text outside the JSON."
-                )
-            else:
-                sys_prompt += (
-                    "\n\nReturn only the final prompt text. "
-                    "No preface, no explanations, no JSON, no markdown fences."
-                )
-                # Authoritative positive/negative delimiter contract (identical to
-                # the GGUF node). Labelled markers survive where a bare '|' gets
-                # dropped; the shared parser strips them so outputs stay clean.
-                if split_output:
-                    sys_prompt += (
-                        "\n\nIf your instructions produce a NEGATIVE prompt, format your entire "
-                        "answer EXACTLY like this, each marker on its own line:\n"
-                        "[POSITIVE]\n<the full positive prompt>\n[NEGATIVE]\n<the full negative prompt>\n"
-                        "Write nothing before [POSITIVE] and nothing after the negative prompt. "
-                        "If there is no negative prompt, write [POSITIVE] then your prompt and stop."
-                    )
+        # Provider and video-mode errors first, as before the writer core existed.
+        _cfg, native_video = _video_route(provider, model_name, video, video_input_mode)
 
         # Effective canvas dims: wired width/height, else the input image's dims,
         # so composition is ALWAYS aspect-ratio-driven.
@@ -1780,30 +1995,6 @@ class LLMPromptAPINode(io.ComfyNode):
             except Exception:
                 pass
 
-        # Build user prompt — STABLE FIRST, VARIABLE LAST for cache friendliness.
-        # LEAD with the aspect-ratio canvas profile, then STYLE -> USER REQUEST.
-        stable_parts: list[str] = []
-        if eff_w > 0 and eff_h > 0:
-            canvas_block = _build_canvas_profile(eff_w, eff_h)
-            if canvas_block:
-                stable_parts.append(canvas_block)
-        if style and style.strip():
-            stable_parts.append(f"STYLE:\n{style.strip()}")
-
-        variable_parts: list[str] = []
-        # Upstream analysis (stage 1 of a two-stage graph). Variable, not stable:
-        # it changes every run, so it must stay OUT of the Gemini cache prefix.
-        if context and context.strip():
-            variable_parts.append(f"REFERENCE CONTEXT:\n{context.strip()}")
-        if user_prompt and user_prompt.strip():
-            variable_parts.append(f"USER REQUEST:\n{user_prompt.strip()}")
-
-        all_parts = stable_parts + variable_parts
-        final_user_prompt = "\n\n".join(all_parts) if all_parts else "Describe a scene vividly."
-
-        # Stable text for Gemini caching purposes (system + stable user portion)
-        stable_user_text = "\n\n".join(stable_parts)
-
         # Vision content. Guard against a disabled/empty upstream (e.g. a bypassed
         # image loader): treat a missing or zero-length tensor as "no image" -> t2i.
         images_b64: list[str] = []
@@ -1812,130 +2003,38 @@ class LLMPromptAPINode(io.ComfyNode):
                 img = _tensor_to_base64_png(image[i], max_mp=vision_mp)
                 if img:
                     images_b64.append(img)
-        media_log = ""
-        if native_video:
-            media_log = f"Video: native Gemini clip with embedded audio if present; sampling {gemini_video_fps:g} fps."
-        elif video is not None:
+        sampled_log = ""
+        if video is not None and not native_video:
             if not 1 <= int(video_sample_frames) <= 256:
                 raise ValueError("video_sample_frames must be between 1 and 256.")
             video_images = video.get_components().images if callable(getattr(video, "get_components", None)) else video
             sampled = _sample_video_frames(video_images, video_sample_frames)
-            media_log = f"Video: {len(sampled)} sampled still frames; audio is not sent."
+            sampled_log = f"Video: {len(sampled)} sampled still frames; audio is not sent."
             for frame in sampled:
                 img = _tensor_to_base64_png(frame, max_mp=vision_mp)
                 if img:
                     images_b64.append(img)
 
-        # Build messages array
-        messages: list[dict] = []
-        if sys_prompt:
-            messages.append({"role": "system", "content": sys_prompt})
-
-        if images_b64:
-            user_content = _build_multimodal_user_content(final_user_prompt, images_b64)
-            messages.append({"role": "user", "content": user_content})
-        else:
-            messages.append({"role": "user", "content": final_user_prompt})
-
-        # Build sampling dict
-        sampling = {
-            "temperature": float(temperature),
-            "top_p": float(top_p),
-            "top_k": int(top_k),
-            "presence_penalty": float(presence_penalty),
-            "frequency_penalty": float(frequency_penalty),
-            "max_tokens": int(max_tokens),
-            "seed": int(seed),
-        }
-
-        # Parse stop sequences
-        stops: list[str] = []
-        if stop_sequences and stop_sequences.strip():
-            stops = [s.strip() for s in stop_sequences.split(",") if s.strip()]
-
-        # Send the request — route Gemini through its native API for full
-        # feature support (thinking_budget, safety, top_k, caching). Other
-        # providers go through the OpenAI-compatible /v1/chat/completions path.
-        _cli = cfg.get("native_protocol")
-        if _cli in ("claude_cli", "codex_cli", "grok_cli"):
-            _send = {"claude_cli": _send_claude_cli, "codex_cli": _send_codex_cli,
-                     "grok_cli": _send_grok_cli}[_cli]
-            raw = _send(model_name, messages, float(timeout_seconds), reasoning_effort)
-        elif cfg.get("native_protocol") == "gemini":
-            # Caching: create or reuse a cached content resource for the stable prefix
-            cache_name: str | None = None
-            if enable_caching and resolved_key and sys_prompt and stable_user_text:
-                cache_name = _gemini_create_cached_content(
-                    api_key=resolved_key,
-                    model=model_name,
-                    system_text=sys_prompt,
-                    stable_user_text=stable_user_text,
-                )
-                if cache_name:
-                    print(f"[LLM_Prompt_API] Using Gemini cached content: {cache_name}")
-
-            raw = _send_gemini_native(
-                base_url=base_url,
-                api_key=resolved_key,
-                model=model_name,
-                messages=messages,
-                sampling=sampling,
-                output_format=output_format,
-                stop_sequences=stops,
-                thinking_budget=gemini_thinking_budget,
-                thinking_level=gemini_thinking_level,
-                cached_content_name=cache_name,
-                timeout=float(timeout_seconds),
-                video=video if native_video else None,
-                video_fps=gemini_video_fps,
-            )
-        else:
-            raw = _send_chat_completion(
-                provider=provider,
-                base_url=base_url,
-                api_key=resolved_key,
-                model=model_name,
-                messages=messages,
-                sampling=sampling,
-                output_format=output_format,
-                stop_sequences=stops,
-                timeout=float(timeout_seconds),
-                extra_body=None,
-                response_format_override=grok_pair_schema,
-                reasoning_effort=reasoning_effort,
-            )
-
-        if grok_pair_schema:
-            # Grok returned a guaranteed JSON object — assemble positive|negative directly.
-            # No text cleaning needed; the schema enforces clean string fields.
-            try:
-                pair = json.loads(raw)
-                positive = str(pair.get("positive") or "").strip()
-                negative = str(pair.get("negative") or "").strip()
-                cleaned = f"{positive}|{negative}" if negative else positive
-            except Exception as e:
-                print(f"[LLM_Prompt_API] Grok JSON parse failed ({e}), falling back to text cleaning")
-                cleaned = clean_model_output(raw, OutputCleanConfig(mode="prompt")) or raw
-                cleaned = normalize_prompt_separator(cleaned)
-        elif output_format == "text":
-            # The shared hardened split_positive_negative() below handles markers,
-            # labels, pipe and JSON, so the old normalize-to-pipe pre-pass is gone.
-            cleaned = clean_model_output(raw, OutputCleanConfig(mode="prompt")) or raw
-        else:
-            cleaned = raw
-
-        # Split 'positive|negative' into the two outputs (or full text on
-        # positive + empty negative when split_output is off / no pipe).
-        positive, negative = split_positive_negative(cleaned, split_output)
-
-        log = ""
-        if validate == "h3":
-            positive, findings = validate_h3(positive, frames or None)
-            log = format_log(positive, frames or None, findings)
-            print(f"[LLM_Prompt_API] {log}")
-        if media_log:
-            print(f"[LLM_Prompt_API] {media_log}")
-            log = "\n".join(part for part in (media_log, log) if part)
+        positive, negative, log = write_prompt_api(
+            provider=provider, model_name=model_name, system_prompt=system_prompt,
+            custom_system_prompt=custom_system_prompt, user_prompt=user_prompt,
+            context=context, style=style, width=eff_w, height=eff_h, images_b64=images_b64,
+            output_format=output_format, split_output=split_output, max_tokens=max_tokens,
+            temperature=temperature, top_p=top_p, top_k=top_k,
+            presence_penalty=presence_penalty, frequency_penalty=frequency_penalty, seed=seed,
+            stop_sequences=stop_sequences, gemini_thinking_budget=gemini_thinking_budget,
+            gemini_thinking_level=gemini_thinking_level, enable_caching=enable_caching,
+            disable_thinking=disable_thinking, timeout_seconds=timeout_seconds,
+            auto_settings=auto_settings, reasoning_effort=reasoning_effort,
+            server_url=server_url, validate=validate, frames=frames,
+            video=video if native_video else None, video_input_mode=video_input_mode,
+            video_sample_frames=video_sample_frames, gemini_video_fps=gemini_video_fps,
+        )
+        # Sampled frames are this node's work, so their log line is added here,
+        # ahead of the validation report, as before.
+        if sampled_log:
+            print(f"[LLM_Prompt_API] {sampled_log}")
+            log = "\n".join(part for part in (sampled_log, log) if part)
 
         return io.NodeOutput(positive, negative, log)
 
