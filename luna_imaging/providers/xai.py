@@ -14,12 +14,18 @@ from ..http import ProviderError, post_json, with_retries
 from ..types import EditRequest, EditResult
 
 BASE_URL = "https://api.x.ai/v1"
-_RESOLUTIONS = {"1k", "1.5k", "2k"}
+RESOLUTIONS = ["1K", "1.5K", "2K"]   # the resolution values the image API takes, smallest first
+_RESOLUTIONS = {r.lower() for r in RESOLUTIONS}
 _NO_QUALITY_MODELS = ("grok-imagine-image-quality", "grok-imagine-image-pro")
 # Copied from grok_imagine_nodes._IMAGE_AR: the aspect_ratio values the image API takes.
 ASPECTS = ["1:1", "2:3", "3:2", "3:4", "4:3", "9:16", "16:9", "9:19.5", "19.5:9", "9:20", "20:9",
            "1:2", "2:1", "21:9", "5:2"]
 _UA = "Mozilla/5.0 (ComfyUI LLM_Prompt Grok node)"
+
+
+def qualities_for(model: str) -> list[str]:
+    """The quality values `model` takes, cheapest first ("auto" aside); none on quality / pro."""
+    return [] if model in _NO_QUALITY_MODELS else ["low", "medium"]
 
 
 def _png_data_uri(img: Image.Image) -> str:

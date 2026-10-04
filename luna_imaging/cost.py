@@ -13,6 +13,12 @@ OPENAI_RATES = {
     "gpt-image-1": (5.0, 10.0, 40.0),
 }
 
+# Output image tokens of gpt-image-2.5 (flare and sunburst alike) at 1024x1024, per quality. Deterministic per
+# size x quality (MEASURED live 2026-10-04, ~$1.3 pass; moved here from openai_image_node.py so there is one
+# source). gpt-image-2 `high` used 7024 tokens at 1024, so this table is 2.5-only.
+OPENAI_OUT_TOKENS_1024 = {"low": 196, "medium": 439, "high": 1756, "xhigh": 3122, "max": 7024}
+_OUT_TOKEN_TABLES = {"gpt-image-2.5": OPENAI_OUT_TOKENS_1024}
+
 # USD per image, by output size.
 GEMINI_IMAGE_PRICES = {
     "gemini-3.1-flash-image": {"0.5K": .045, "1K": .067, "2K": .101, "4K": .151},
@@ -47,6 +53,23 @@ def openai_cost(model: str, usage: dict) -> float | None:
         return None
     t_in, i_in, i_out, _ = _tokens(usage)
     return (t_in * rates[0] + i_in * rates[1] + i_out * rates[2]) / 1e6
+
+
+def openai_estimate(model: str, quality: str, size: str) -> float | None:
+    """Pre-run output cost in USD of one image at `size` ("WxH"): the 1024x1024 token table scaled by pixel area
+    (INFERRED). None ("after run") for a model without a table, quality `auto` or a size that is not WxH.
+    Input tokens (prompt, reference images) are not included."""
+    table = _longest_prefix(_OUT_TOKEN_TABLES, model)
+    rates = _longest_prefix(OPENAI_RATES, model)
+    if not table or not rates or quality not in table:
+        return None
+    try:
+        w, h = (int(v) for v in str(size).lower().split("x"))
+    except ValueError:
+        return None
+    if w <= 0 or h <= 0:
+        return None
+    return table[quality] * (w * h) / (1024 * 1024) * rates[2] / 1e6
 
 
 def openai_cost_line(model: str, usage: dict) -> str:

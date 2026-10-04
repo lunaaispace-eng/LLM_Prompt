@@ -116,6 +116,20 @@ class CostTests(unittest.TestCase):
         self.assertAlmostEqual(gemini_cost("nano-banana-pro-preview", "4K", 1), 0.24)
         self.assertIn("gemini-3-pro-image", GEMINI_IMAGE_PRICES)
 
+    def test_openai_estimate_table(self):
+        from luna_imaging.cost import OPENAI_OUT_TOKENS_1024, openai_estimate
+        self.assertEqual(OPENAI_OUT_TOKENS_1024,
+                         {"low": 196, "medium": 439, "high": 1756, "xhigh": 3122, "max": 7024})
+        rate = OPENAI_RATES["gpt-image-2.5"][2]
+        self.assertAlmostEqual(openai_estimate("gpt-image-2.5", "low", "1024x1024"), 196 * rate / 1e6)
+        self.assertAlmostEqual(openai_estimate(FLARE, "max", "1024x1024"), 7024 * rate / 1e6)
+        # scaled by pixel area: 2048x1024 is twice the 1024x1024 tokens
+        self.assertAlmostEqual(openai_estimate(FLARE, "high", "2048x1024"), 2 * 1756 * rate / 1e6)
+        self.assertIsNone(openai_estimate(FLARE, "auto", "1024x1024"))
+        self.assertIsNone(openai_estimate("gpt-image-1.5", "low", "1024x1024"))   # no table for it
+        self.assertIsNone(openai_estimate("other-model", "low", "1024x1024"))
+        self.assertIsNone(openai_estimate(FLARE, "low", "auto"))
+
 
 class NodeSourceTests(unittest.TestCase):
     def test_core_docstring_states_pillow_dependency(self):
@@ -133,6 +147,14 @@ class NodeSourceTests(unittest.TestCase):
         for gone in ("_fit_free", "_snap16", "_ar_float", "_resolve_size",
                      "_rates_for", "_cost_line", "_free_size"):
             self.assertNotIn(gone, defs)
+
+    def test_openai_node_token_table_has_one_source(self):
+        # The output-token figures live only in luna_imaging.cost; the node builds its tooltip from them.
+        with open(os.path.join(ROOT, "openai_image_node.py"), encoding="utf-8") as f:
+            src = f.read()
+        self.assertTrue("OPENAI_OUT_TOKENS_1024" in src, "the node does not read the core table")
+        for number in ("196", "439", "1756", "3122", "7024"):
+            self.assertFalse(number in src, f"{number} is still written in openai_image_node.py")
 
 
 if __name__ == "__main__":

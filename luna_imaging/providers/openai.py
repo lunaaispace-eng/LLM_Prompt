@@ -13,11 +13,28 @@ from PIL import Image
 from ..http import ProviderError, post_json, post_multipart, with_retries
 from ..masks import openai_alpha_mask
 from ..cost import openai_cost
-from ..sizes import openai_size
+from ..capabilities import caps_for
+from ..sizes import RESOLUTIONS, openai_size
 from ..types import EditRequest, EditResult
 
 _BASE = "https://api.openai.com/v1"
 _FIDELITY_MODELS = ("gpt-image-1", "gpt-image-1.5", "chatgpt-image-latest")
+
+
+def qualities_for(model: str) -> list[str]:
+    """The quality values `model` takes, cheapest first ("auto" aside): xhigh / max exist on 2.5 only."""
+    out = ["low", "medium", "high"]
+    if model.startswith("gpt-image-2.5"):
+        out += ["xhigh", "max"]
+    return out
+
+
+def resolutions_for(model: str) -> list[str]:
+    """The resolution budgets `model` takes, smallest first ("auto" aside). The fixed-size models (1.x,
+    chatgpt-image-latest) have one size class, sent as 1K."""
+    if not caps_for(model).free_size:
+        return ["1K"]
+    return [k for k, pix in RESOLUTIONS.items() if pix]
 
 
 def _png_bytes(img: Image.Image) -> bytes:
@@ -33,7 +50,7 @@ def run(req: EditRequest, key: str, mask: Image.Image | None = None) -> EditResu
     size = openai_size(model, req.aspect_ratio, req.resolution, req.width, req.height, notes)
 
     quality = req.quality
-    if quality in ("xhigh", "max") and not model.startswith("gpt-image-2.5"):
+    if quality in ("xhigh", "max") and quality not in qualities_for(model):
         notes.append(f"{model} has no quality '{quality}' - sent 'high'")
         quality = "high"
 

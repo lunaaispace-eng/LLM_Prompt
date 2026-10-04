@@ -29,9 +29,9 @@ Second, deeper pass (2026-10-04, ~$1.3, scratch FINDINGS openai_img2):
   - BILLING IS BY TOKENS, not per image: usage reports input text/image tokens
     and output image (and on 1.x, text) tokens. Output image tokens are
     deterministic per size x quality and identical for flare and sunburst --
-    1024x1024: low 196, medium 439, high 1756, xhigh 3122, max 7024. At $30/M
-    that is ~$0.006 / $0.013 / $0.053 / $0.094 / $0.211. gpt-image-2 `high` at
-    1024 used 7024 tokens (= 2.5 max), so 2.5 high is ~4x cheaper than it.
+    the 1024x1024 figures are luna_imaging.cost.OPENAI_OUT_TOKENS_1024 (one
+    source; the quality tooltip is built from it). gpt-image-2 `high` at 1024
+    used as many tokens as 2.5 `max`, so 2.5 high is ~4x cheaper than it.
     Reference images bill as input image tokens.
   - NO reasoning / thinking / mode parameter exists on the Images API: every
     spelling tried (reasoning_effort, reasoning, thinking, mode, ...) is a 400
@@ -63,7 +63,7 @@ from PIL import Image
 from comfy_api.latest import io
 
 from .llm_prompt_api_node import _resolve_api_key, _comfyui_root
-from .luna_imaging.cost import openai_cost_line
+from .luna_imaging.cost import OPENAI_OUT_TOKENS_1024, OPENAI_RATES, openai_cost_line
 from .luna_imaging.sizes import RESOLUTIONS, openai_size
 
 _BASE = "https://api.openai.com/v1"
@@ -91,6 +91,17 @@ REWRITERS = ["off", "gpt-6-sol", "gpt-5.6-sol", "gpt-6-luna", "gpt-5.6-luna"]
 
 
 REF_SLOTS = 16  # UI cap; the 2.x API took 101 live — a batch per slot goes past it
+
+
+def _quality_cost_tip() -> str:
+    """The quality tooltip's cost line, built from the core's output-token table (one source)."""
+    rate = OPENAI_RATES["gpt-image-2.5"][2]
+    parts = [f"{q} {t}{' tok' if i == 0 else ''} ~${t * rate / 1e6:.3f}"
+             for i, (q, t) in enumerate(OPENAI_OUT_TOKENS_1024.items())]
+    return "Billed by output tokens. 2.5 at 1024x1024: " + ", ".join(parts)
+
+
+_QUALITY_COST_TIP = _quality_cost_tip()
 
 
 def _is_25(model: str) -> bool:
@@ -284,9 +295,8 @@ class OpenAIImageNode(io.ComfyNode):
                 # ===== GENERATION SETTINGS =====
                 io.Combo.Input(
                     "quality", options=QUALITIES, default="auto",
-                    tooltip="Billed by output tokens. 2.5 at 1024x1024: low 196 tok "
-                            "~$0.006, medium 439 ~$0.013, high 1756 ~$0.053, xhigh 3122 "
-                            "~$0.094, max 7024 ~$0.21 (~49 s flare / ~87 s sunburst). "
+                    tooltip=_QUALITY_COST_TIP +
+                            " (~49 s flare / ~87 s sunburst). "
                             "xhigh / max are 2.5-only and are NOT a reasoning mode - "
                             "the Images API has none. Lowered to high elsewhere."),
                 io.Combo.Input(

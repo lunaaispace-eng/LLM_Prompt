@@ -44,6 +44,19 @@ def _sizes_for(model: str) -> list[str]:
     return best
 
 
+def sizes_for(model: str) -> list[str]:
+    """The imageSize values `model` takes, smallest first."""
+    return list(_sizes_for(model))
+
+
+def price_size(model: str, resolution: str) -> str:
+    """The size `run` sends (and bills) for `resolution`: auto -> the default price size, else clamped."""
+    if not resolution or resolution == "auto":
+        return _DEFAULT_PRICE_SIZE
+    sizes = _sizes_for(model)
+    return resolution if resolution in sizes else _clamp_size(resolution, sizes)
+
+
 def _k(size: str) -> float:
     try:
         return float(size.upper().rstrip("K"))
