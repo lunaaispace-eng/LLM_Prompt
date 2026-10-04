@@ -16,6 +16,7 @@ import logging
 import os
 import re
 import struct
+import threading
 import time
 from io import BytesIO
 from pathlib import Path
@@ -807,6 +808,19 @@ MAX_VIDEO_FRAMES = 30
 MAX_AUDIO_DURATION_SECONDS = 60
 
 
+def _pil_to_content(pil, max_mp: float = 0.0) -> dict:
+    """A PIL image -> an OpenAI-compatible image_url dict (JPEG quality 95).
+
+    Converts to RGB first: JPEG has no alpha, and an RGBA PIL (browser PNGs
+    reaching the Director) would otherwise raise OSError on save.
+    """
+    pil = _downscale_pil_to_mp(pil.convert("RGB"), max_mp)
+    buf = BytesIO()
+    pil.save(buf, format="JPEG", quality=95)
+    b64 = base64.b64encode(buf.getvalue()).decode("utf-8")
+    return {"type": "image_url", "image_url": {"url": f"data:image/jpeg;base64,{b64}"}}
+
+
 def _image_tensor_to_content(image: torch.Tensor, max_mp: float = 0.0) -> dict:
     """A single ComfyUI image tensor -> an OpenAI-compatible image_url dict.
 
@@ -817,11 +831,7 @@ def _image_tensor_to_content(image: torch.Tensor, max_mp: float = 0.0) -> dict:
     if image.ndim == 4:
         image = image[0]
     arr = (image.cpu().numpy() * 255).clip(0, 255).astype(np.uint8)
-    pil = _downscale_pil_to_mp(Image.fromarray(arr, mode="RGB"), max_mp)
-    buf = BytesIO()
-    pil.save(buf, format="JPEG", quality=95)
-    b64 = base64.b64encode(buf.getvalue()).decode("utf-8")
-    return {"type": "image_url", "image_url": {"url": f"data:image/jpeg;base64,{b64}"}}
+    return _pil_to_content(Image.fromarray(arr, mode="RGB"), max_mp)
 
 
 def _video_tensor_to_contents(video: torch.Tensor, target_fps: float = 1.0,
@@ -1709,6 +1719,7 @@ class _LLMRunner:
         video=None,
         audio=None,
         frames: int = 0,
+        media_override: list[dict] | None = None,
     ):
         # Gate the chatty status prints for this run (warnings/errors still show).
         self._verbose = bool(verbose_logging)
@@ -1837,39 +1848,45 @@ class _LLMRunner:
         # ---- Build the multimodal content list (image / reference / video / audio)
         # Each item is an OpenAI-style content dict, ordered and labelled here so
         # _invoke just prepends the user-prompt text and sends it.
+        # media_override (the Director writer) is a ready content list that
+        # replaces this whole assembly; the node never passes it.
         media_content: list[dict] = []
 
-        # Main image(s). When a reference image is also present, label this one so
-        # the model knows which is the content source vs the style source.
-        if image is not None:
-            # NB: not `frames` — that name is the clip's frame-count input.
-            img_frames = [image[i] for i in range(image.shape[0])] if image.ndim == 4 else [image]
-            if reference_image is not None and img_frames:
-                media_content.append({"type": "text", "text": "Input Image:"})
-            for fr in img_frames:
-                media_content.append(_image_tensor_to_content(fr, max_mp=vision_mp))
+        if media_override is not None:
+            media_content = list(media_override)
+        else:
+            # Main image(s). When a reference image is also present, label this one so
+            # the model knows which is the content source vs the style source.
+            if image is not None:
+                # NB: not `frames` — that name is the clip's frame-count input.
+                img_frames = [image[i] for i in range(image.shape[0])] if image.ndim == 4 else [image]
+                if reference_image is not None and img_frames:
+                    media_content.append({"type": "text", "text": "Input Image:"})
+                for fr in img_frames:
+                    media_content.append(_image_tensor_to_content(fr, max_mp=vision_mp))
 
-        # Reference image for style-transfer prompts.
-        if reference_image is not None:
-            media_content.append({"type": "text", "text": "Reference Image:"})
-            ref_frame = reference_image[0] if reference_image.ndim == 4 else reference_image
-            media_content.append(_image_tensor_to_content(ref_frame, max_mp=vision_mp))
+            # Reference image for style-transfer prompts.
+            if reference_image is not None:
+                media_content.append({"type": "text", "text": "Reference Image:"})
+                ref_frame = reference_image[0] if reference_image.ndim == 4 else reference_image
+                media_content.append(_image_tensor_to_content(ref_frame, max_mp=vision_mp))
 
-        # Video frames, FPS-subsampled and context-budget aware.
-        if video is not None:
-            media_content.extend(
-                _video_tensor_to_contents(video, target_fps=video_fps, n_ctx=n_ctx)
-            )
+            # Video frames, FPS-subsampled and context-budget aware.
+            if video is not None:
+                media_content.extend(
+                    _video_tensor_to_contents(video, target_fps=video_fps, n_ctx=n_ctx)
+                )
 
-        # Audio (Gemma-4 audio projector only). Never hard-fail on audio issues.
-        if audio is not None:
-            try:
-                media_content.append(_audio_to_content(audio))
-            except Exception as e:
-                print(f"[LLM_Prompt] Audio could not be encoded ({e}); ignoring audio input.")
+            # Audio (Gemma-4 audio projector only). Never hard-fail on audio issues.
+            if audio is not None:
+                try:
+                    media_content.append(_audio_to_content(audio))
+                except Exception as e:
+                    print(f"[LLM_Prompt] Audio could not be encoded ({e}); ignoring audio input.")
 
         # Load model and generate. want_vision drives whether we load the vision
-        # handler at all â€” only when image/reference/video/audio is connected.
+        # handler at all â€” only when image/reference/video/audio is connected
+        # (or media_override is non-empty).
         # With no media, Qwen loads text-only so the no-think template engages.
         want_vision = bool(media_content)
         try:
@@ -1944,6 +1961,11 @@ class _LLMRunner:
 
 # Single cached runner shared across executions (V3 nodes are stateless).
 _RUNNER = _LLMRunner()
+
+# One GGUF run at a time: the node and the Director writer (which calls
+# _RUNNER.generate in-process from an executor thread) both hold this lock,
+# so a graph run and a Director write never load or invoke the runner at once.
+_RUNNER_LOCK = threading.Lock()
 
 
 class LLMPromptNode(io.ComfyNode):
@@ -2099,7 +2121,8 @@ class LLMPromptNode(io.ComfyNode):
     def execute(cls, **kwargs) -> io.NodeOutput:
         # Drop any framework-injected extras the runner doesn't expect, then run.
         call_kwargs = _filter_kwargs_for_callable(_LLMRunner.generate, kwargs)
-        positive, negative, log = _RUNNER.generate(**call_kwargs)
+        with _RUNNER_LOCK:
+            positive, negative, log = _RUNNER.generate(**call_kwargs)
         return io.NodeOutput(positive, negative, log)
 
 
