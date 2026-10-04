@@ -70,6 +70,30 @@ def _whole_image(req: EditRequest, provider: str) -> tuple[EditRequest, list[str
     return dataclasses.replace(req, aspect_ratio=ar), [f"width/height {w}x{h} -> aspect_ratio {ar}"]
 
 
+def region_plan(model: str, operation: str, mask: Image.Image, mask_mode: str = "auto",
+                crop_padding: float = 0.25) -> tuple[str, tuple[int, int, int, int]]:
+    """The one native / crop / outpaint decision for a region edit (inpaint / outpaint).
+
+    `mask` is the L mask at the size of the image to edit (for outpaint: the grown canvas, mask
+    255 on the new area, as `outpaint_canvas` returns it). Returns (mode, box):
+      native   - the model takes the whole frame plus the mask; box = the whole frame
+      outpaint - no native mask: the whole grown canvas with its grey borders; box = whole frame
+      crop     - no native mask: the padded mask box is cropped and sent; box = that box
+    `run` and the Director writer's legend both call this, so they cannot drift (R-13).
+    Raises ValueError("mask is empty").
+    """
+    bbox = mask_bbox(mask)
+    if bbox is None:
+        raise ValueError("mask is empty")
+    full = (0, 0, mask.width, mask.height)
+    if caps_for(model).native_mask and mask_mode in ("auto", "native"):
+        return "native", full
+    if operation == "outpaint":
+        # The whole canvas, so the model sees all of the original it has to continue.
+        return "outpaint", full
+    return "crop", expand_box(bbox, crop_padding, mask.size)
+
+
 def run(req: EditRequest, key: str) -> tuple[EditResult, Image.Image | None]:
     """Run one studio request. Returns (result, the mask actually used, full output size; None
     for generate/edit/compose). The caller's `req` is never mutated."""
@@ -96,24 +120,18 @@ def run(req: EditRequest, key: str) -> tuple[EditResult, Image.Image | None]:
         base = req.images[0]
         mask = fit_mask(req.mask, base.size)
         feather = req.feather_px
-    bbox = mask_bbox(mask)
-    if bbox is None:
-        raise ValueError("mask is empty")
+    mode, box = region_plan(req.model, req.operation, mask, req.mask_mode, req.crop_padding)
     refs = list(req.images[1:])
 
-    native = caps.native_mask and req.mask_mode in ("auto", "native")
+    native = mode == "native"
     if req.mask_mode == "native" and not caps.native_mask:
         notes.append(f"mask_mode native: {req.model} has no native mask - used crop")
 
     if native:
-        box = (0, 0, base.width, base.height)
         sent_img, prompt, sent_mask = base, req.prompt, mask
-    elif req.operation == "outpaint":
-        # The whole canvas, so the model sees all of the original it has to continue.
-        box = (0, 0, base.width, base.height)
+    elif mode == "outpaint":
         sent_img, prompt, sent_mask = base, OUTPAINT_PREFIX + req.prompt, None
     else:
-        box = expand_box(bbox, req.crop_padding, base.size)
         sent_img, prompt, sent_mask = base.crop(box), CROP_PREFIX + req.prompt, None
 
     # Always the size of the image actually sent (OpenAI snaps it in openai_size, keeping the
