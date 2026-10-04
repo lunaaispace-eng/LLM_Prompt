@@ -136,6 +136,64 @@ PROVIDERS = {
             "gpt-5.6-luna",   # cheapest / fastest
         ],
     },
+    # ---- Subscription routes (Peter, 2026-10-04: "not on API but on my Max
+    # sub", "do the same for codex", "and Grok sub cli"). Each runs the
+    # vendor's own CLI headless on its stored login - the sanctioned way to use
+    # a subscription from a program; the node never reads or stores a token.
+    # They spend that subscription's quota (shared with interactive sessions)
+    # and pay a CLI start-up of several seconds per call. No sampling controls;
+    # reasoning_effort maps to each CLI's own effort flag. All three were
+    # live-tested with text and an image on 2026-10-04.
+    "Claude (Max)": {
+        # `claude -p`; preset via --system-prompt-file (no length limit);
+        # images as base64 blocks through --input-format stream-json.
+        "base_url": "",
+        "env_var": None,
+        "needs_auth": False,
+        "live_models": False,
+        "native_protocol": "claude_cli",
+        "fallback_models": [
+            "claude-sonnet-5-5",
+            "claude-opus-5-5",
+            "claude-fable-5-1",
+            "claude-haiku-4-5",
+        ],
+    },
+    "Codex (ChatGPT)": {
+        # `codex exec`; prompt on stdin, images as temp PNGs via -i, read-only
+        # sandbox. gpt-6-astra left out on purpose: it empties the ChatGPT
+        # quota in a few turns (agent-fleet rule, Peter 2026-09-19).
+        "base_url": "",
+        "env_var": None,
+        "needs_auth": False,
+        "live_models": False,
+        "native_protocol": "codex_cli",
+        "fallback_models": [
+            "gpt-6-luna",
+            "gpt-6-sol",
+            "gpt-6.1-sol",
+            "gpt-5.6-luna",
+            "gpt-5.6-terra",
+            "gpt-5.6-sol",
+        ],
+    },
+    "Grok (SuperGrok)": {
+        # `grok` CLI with XAI_API_KEY / GROK_API_KEY removed from ITS process
+        # only - otherwise it bills the API key instead of the grok.com login.
+        # Images go in as ACP blocks on the command line, so they are
+        # downscaled to fit Windows' ~32k-character limit.
+        "base_url": "",
+        "env_var": None,
+        "needs_auth": False,
+        "live_models": False,
+        "native_protocol": "grok_cli",
+        "fallback_models": [
+            "grok-4.7",
+            "grok-4.7-build-fast",
+            "grok-4.6",
+            "grok-4.5",
+        ],
+    },
     "Custom": {
         "base_url": "",  # user supplies via the server_url widget
         "env_var": None,
@@ -1168,6 +1226,210 @@ def _build_multimodal_user_content(text: str, images_b64: list[str]) -> list[dic
 
 
 # ---------------------------------------------------------------------------
+# Subscription CLI routes (Claude Max / Codex ChatGPT / SuperGrok)
+# ---------------------------------------------------------------------------
+
+def _cli_split_messages(messages: list[dict]) -> tuple[str, str, list[str]]:
+    """OpenAI-style messages -> (system text, user text, [base64 PNG])."""
+    system, text, images = "", "", []
+    for m in messages:
+        content = m.get("content")
+        if m.get("role") == "system":
+            system = content if isinstance(content, str) else ""
+            continue
+        if isinstance(content, str):
+            text = content
+        elif isinstance(content, list):
+            for part in content:
+                if part.get("type") == "text":
+                    text = part.get("text", "")
+                elif part.get("type") == "image_url":
+                    url = (part.get("image_url") or {}).get("url", "")
+                    if "," in url:
+                        images.append(url.split(",", 1)[1])
+    return system, text, images
+
+
+def _cli_exe(name: str, extra: list[str]) -> str:
+    import shutil
+    found = shutil.which(name)
+    if found:
+        return found
+    for cand in extra:
+        if cand and Path(cand).is_file():
+            return cand
+    raise RuntimeError(f"The `{name}` CLI was not found on PATH (looked also in {extra}).")
+
+
+def _cli_workdir():
+    """A throwaway working folder outside every project, removed afterwards."""
+    import tempfile
+    try:
+        import folder_paths
+        root = Path(folder_paths.get_temp_directory()) / "llm_prompt_cli"
+    except Exception:
+        root = Path(tempfile.gettempdir()) / "llm_prompt_cli"
+    root.mkdir(parents=True, exist_ok=True)
+    return tempfile.TemporaryDirectory(dir=str(root))
+
+
+def _cli_effort(reasoning_effort: str) -> str | None:
+    e = (reasoning_effort or "").lower()
+    if e in ("", "default"):
+        return None
+    return "low" if e == "none" else e
+
+
+def _cli_run(cmd: list[str], *, input_text: str | None, cwd: str, timeout: float,
+             env: dict | None = None):
+    import subprocess
+    try:
+        return subprocess.run(cmd, input=input_text, capture_output=True, text=True,
+                              encoding="utf-8", errors="replace", cwd=cwd, env=env,
+                              timeout=timeout)
+    except subprocess.TimeoutExpired:
+        raise RuntimeError(f"{Path(cmd[0]).name} did not answer within {timeout:.0f}s.") from None
+
+
+def _send_claude_cli(model: str, messages: list[dict], timeout: float, reasoning_effort: str) -> str:
+    """Claude Code headless on the Max login. Live-tested 2026-10-04."""
+    exe = _cli_exe("claude", [str(Path.home() / ".local" / "bin" / "claude.exe")])
+    system, text, images = _cli_split_messages(messages)
+    content = [{"type": "image", "source": {"type": "base64", "media_type": "image/png", "data": b}}
+               for b in images]
+    content.append({"type": "text", "text": text or "Describe a scene vividly."})
+    line = json.dumps({"type": "user", "message": {"role": "user", "content": content}})
+    with _cli_workdir() as wd:
+        cmd = [exe, "-p", "--model", model, "--tools", "", "--strict-mcp-config",
+               "--setting-sources", "", "--no-session-persistence",
+               "--input-format", "stream-json", "--output-format", "stream-json", "--verbose"]
+        if system:
+            sp = Path(wd) / "system.md"
+            sp.write_text(system, encoding="utf-8")
+            cmd += ["--system-prompt-file", str(sp)]
+        effort = _cli_effort(reasoning_effort)
+        if effort:
+            cmd += ["--effort", effort]
+        t0 = time.perf_counter()
+        p = _cli_run(cmd, input_text=line + "\n", cwd=wd, timeout=timeout)
+    result = None
+    for ln in p.stdout.splitlines():
+        try:
+            ev = json.loads(ln)
+        except Exception:
+            continue
+        if ev.get("type") == "result":
+            result = ev
+    if not result:
+        raise RuntimeError(f"Claude CLI returned no result (exit {p.returncode}): "
+                           f"{(p.stderr or p.stdout)[-600:]}")
+    if result.get("is_error"):
+        raise RuntimeError(f"Claude CLI: {result.get('result')}")
+    used = ", ".join((result.get("modelUsage") or {}).keys()) or model
+    print(f"[LLM_Prompt_API] Claude (Max) | {used} | {len(images)} image(s) | "
+          f"time={time.perf_counter() - t0:.2f}s (api {result.get('duration_api_ms', 0) / 1000:.1f}s)")
+    return result.get("result") or ""
+
+
+def _send_codex_cli(model: str, messages: list[dict], timeout: float, reasoning_effort: str) -> str:
+    """Codex CLI headless on the ChatGPT login. Live-tested 2026-10-04."""
+    import base64 as _b64
+    exe = _cli_exe("codex", [str(Path(os.environ.get("APPDATA", "")) / "npm" / "codex.cmd")])
+    system, text, images = _cli_split_messages(messages)
+    prompt = (f"{system}\n\n---\n\n{text}" if system else text) or "Describe a scene vividly."
+    with _cli_workdir() as wd:
+        out = Path(wd) / "last.txt"
+        cmd = [exe, "exec", "-m", model, "-s", "read-only", "--skip-git-repo-check",
+               "--ephemeral", "--color", "never", "-C", wd, "-o", str(out)]
+        effort = _cli_effort(reasoning_effort)
+        if effort:
+            cmd += ["-c", f'model_reasoning_effort="{effort}"']
+        for i, b in enumerate(images):
+            ip = Path(wd) / f"image_{i:02d}.png"
+            ip.write_bytes(_b64.b64decode(b))
+            cmd += ["-i", str(ip)]
+        cmd.append("-")  # prompt from stdin
+        t0 = time.perf_counter()
+        p = _cli_run(cmd, input_text=prompt, cwd=wd, timeout=timeout)
+        answer = out.read_text(encoding="utf-8").strip() if out.is_file() else ""
+    if not answer:
+        raise RuntimeError(f"Codex CLI returned nothing (exit {p.returncode}): "
+                           f"{(p.stderr or p.stdout)[-600:]}")
+    print(f"[LLM_Prompt_API] Codex (ChatGPT) | {model} | {len(images)} image(s) | "
+          f"time={time.perf_counter() - t0:.2f}s")
+    return answer
+
+
+_GROK_CMDLINE_BUDGET = 30000  # Windows CreateProcess caps a command line at 32767 chars
+
+
+def _send_grok_cli(model: str, messages: list[dict], timeout: float, reasoning_effort: str) -> str:
+    """Grok CLI headless on the grok.com (SuperGrok) login. Live-tested 2026-10-04."""
+    import base64 as _b64
+    from PIL import Image as _Image
+    import io as _stdio  # module-level `io` is comfy_api.latest.io
+    exe = _cli_exe("grok", [r"D:\CLI-Data\.grok\bin\grok.exe"])
+    system, text, images = _cli_split_messages(messages)
+    env = {k: v for k, v in os.environ.items() if k not in ("XAI_API_KEY", "GROK_API_KEY")}
+    with _cli_workdir() as wd:
+        base = [exe, "-m", model, "--output-format", "json", "--tools", "", "--max-turns", "1",
+                "--no-subagents", "--cwd", wd]
+        effort = _cli_effort(reasoning_effort)
+        if effort:
+            base += ["--reasoning-effort", effort]
+        # Short presets ride as the system prompt; long ones go into the text
+        # so the command line stays under the Windows limit.
+        body = text or "Describe a scene vividly."
+        if system and len(system) <= 6000:
+            base += ["--system-prompt-override", system]
+        elif system:
+            body = f"INSTRUCTIONS:\n{system}\n\n---\n\n{body}"
+        blocks = [{"type": "text", "text": body}]
+        note = ""
+        if images:
+            room = _GROK_CMDLINE_BUDGET - len(" ".join(base)) - len(json.dumps(blocks)) - 200
+            sent = []
+            for side in (768, 512, 384, 256, 192):
+                sent = []
+                for b in images:
+                    im = _Image.open(_stdio.BytesIO(_b64.b64decode(b))).convert("RGB")
+                    im.thumbnail((side, side))
+                    buf = _stdio.BytesIO()
+                    im.save(buf, "JPEG", quality=80)
+                    sent.append(_b64.b64encode(buf.getvalue()).decode())
+                if sum(len(x) + 60 for x in sent) <= room:
+                    break
+            else:
+                sent = []
+            if sent:
+                blocks += [{"type": "image", "data": x, "mimeType": "image/jpeg"} for x in sent]
+                note = f"{len(sent)} image(s) at <= {side}px"
+            else:
+                note = "images DROPPED (too large for the command line)"
+                print("[LLM_Prompt_API] Grok (SuperGrok): " + note)
+        if len(blocks) > 1:
+            cmd = base + ["--prompt-json", json.dumps(blocks)]
+            p_in = None
+        else:
+            pf = Path(wd) / "prompt.md"
+            pf.write_text(body, encoding="utf-8")
+            cmd = base + ["--prompt-file", str(pf)]
+        t0 = time.perf_counter()
+        p = _cli_run(cmd, input_text=None, cwd=wd, timeout=timeout, env=env)
+    try:
+        payload = json.loads(p.stdout)
+    except Exception:
+        raise RuntimeError(f"Grok CLI returned no JSON (exit {p.returncode}): "
+                           f"{(p.stderr or p.stdout)[-600:]}") from None
+    answer = (payload.get("text") or "").strip()
+    if not answer:
+        raise RuntimeError(f"Grok CLI returned no text (stopReason={payload.get('stopReason')}).")
+    print(f"[LLM_Prompt_API] Grok (SuperGrok) | {model} | {note or 'text only'} | "
+          f"time={time.perf_counter() - t0:.2f}s")
+    return answer
+
+
+# ---------------------------------------------------------------------------
 # The Node
 # ---------------------------------------------------------------------------
 
@@ -1594,7 +1856,12 @@ class LLMPromptAPINode(io.ComfyNode):
         # Send the request — route Gemini through its native API for full
         # feature support (thinking_budget, safety, top_k, caching). Other
         # providers go through the OpenAI-compatible /v1/chat/completions path.
-        if cfg.get("native_protocol") == "gemini":
+        _cli = cfg.get("native_protocol")
+        if _cli in ("claude_cli", "codex_cli", "grok_cli"):
+            _send = {"claude_cli": _send_claude_cli, "codex_cli": _send_codex_cli,
+                     "grok_cli": _send_grok_cli}[_cli]
+            raw = _send(model_name, messages, float(timeout_seconds), reasoning_effort)
+        elif cfg.get("native_protocol") == "gemini":
             # Caching: create or reuse a cached content resource for the stable prefix
             cache_name: str | None = None
             if enable_caching and resolved_key and sys_prompt and stable_user_text:

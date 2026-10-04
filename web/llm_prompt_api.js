@@ -81,6 +81,28 @@ const PROVIDERS = {
             "gpt-5.6-luna",
         ],
     },
+    // Subscription CLI routes - no key, no live list (see the Python side).
+    "Claude (Max)": {
+        defaultUrl: "",
+        liveModels: false,
+        needsAuth: false,
+        envVar: null,
+        fallback: ["claude-sonnet-5-5", "claude-opus-5-5", "claude-fable-5-1", "claude-haiku-4-5"],
+    },
+    "Codex (ChatGPT)": {
+        defaultUrl: "",
+        liveModels: false,
+        needsAuth: false,
+        envVar: null,
+        fallback: ["gpt-6-luna", "gpt-6-sol", "gpt-6.1-sol", "gpt-5.6-luna", "gpt-5.6-terra", "gpt-5.6-sol"],
+    },
+    "Grok (SuperGrok)": {
+        defaultUrl: "",
+        liveModels: false,
+        needsAuth: false,
+        envVar: null,
+        fallback: ["grok-4.7", "grok-4.7-build-fast", "grok-4.6", "grok-4.5"],
+    },
     "Custom": {
         defaultUrl: "",
         liveModels: true,

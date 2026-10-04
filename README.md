@@ -173,7 +173,15 @@ Built-in providers:
 | `Gemini` | Native Gemini REST through `google-genai`. Default provider. | `GEMINI_API_KEY`, `GOOGLE_API_KEY`, or `GOOGLE_GEMINI_API_KEY`. |
 | `Grok (xAI)` | xAI OpenAI-compatible chat endpoint. | `XAI_API_KEY` or `GROK_API_KEY`. |
 | `OpenAI` | OpenAI Chat Completions, dropdown limited to the GPT-5.6 and GPT-6 families. | `OPENAI_API_KEY`. |
+| `Claude (Max)` | Your Claude Max **subscription** through the Claude Code CLI (`claude -p`) — no API key. | The CLI's own login. |
+| `Codex (ChatGPT)` | Your ChatGPT **subscription** through the Codex CLI (`codex exec`), read-only sandbox. | The CLI's own login. |
+| `Grok (SuperGrok)` | Your SuperGrok **subscription** through the Grok CLI; the API key is hidden from it so it bills the grok.com login. | The CLI's own login. |
 | `Custom` | User-supplied OpenAI-compatible `server_url`. Use this for OpenRouter, LM Studio, llama.cpp server, vLLM, Ollama-compatible gateways, etc. | Optional, depending on server. |
+
+The three subscription providers run the vendor's own CLI headless (the CLI must be installed and logged
+in). They use that subscription's quota, take a few seconds of CLI start-up per call (6-9 s measured), ignore
+the sampling sliders, and map `reasoning_effort` to the CLI's effort setting. Images are supported on all three;
+Grok downscales them to fit Windows' command-line limit.
 
 The node intentionally has no `api_key` widget. Keys are read from process environment variables or `.env` files so workflow JSON does not leak credentials.
 
