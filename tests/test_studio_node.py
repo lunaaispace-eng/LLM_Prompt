@@ -3,11 +3,14 @@
 Runs with the ComfyUI python. The pack is loaded as a stub package so its heavy
 __init__.py (llama-cpp etc.) never runs; skipped when comfy_api is not importable.
 """
+import contextlib
 import importlib
+import io
 import os
 import sys
 import types
 import unittest
+import warnings
 from unittest import mock
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
@@ -16,9 +19,16 @@ for p in (ROOT, COMFY):
     if p not in sys.path:
         sys.path.insert(0, p)
 
+# Third-party import noise, not this pack's: torch warns about pynvml, SWIG-built modules
+# warn at import and at interpreter exit, and dill leaves os.devnull open until exit.
+warnings.filterwarnings("ignore", message=r"builtin type (SwigPy|swigvarlink)", category=DeprecationWarning)
+warnings.filterwarnings("ignore", message=r"unclosed file .*name='nul'", category=ResourceWarning)
+
 try:
-    import comfy_api.latest  # noqa: F401
-    import torch
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        import comfy_api.latest  # noqa: F401
+        import torch
     _HAVE_COMFY = True
 except Exception:  # pragma: no cover - plain python without ComfyUI
     _HAVE_COMFY = False
@@ -31,7 +41,10 @@ def _load_node():
         pkg = types.ModuleType(PKG)
         pkg.__path__ = [ROOT]
         sys.modules[PKG] = pkg
-    return importlib.import_module(f"{PKG}.luna_image_studio_node")
+    # The pack's modules print their key / model checks on import; keep the test output clean.
+    with contextlib.redirect_stdout(io.StringIO()), warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        return importlib.import_module(f"{PKG}.luna_image_studio_node")
 
 
 def _base_kwargs(**over):
@@ -50,7 +63,8 @@ class StudioNodeTest(unittest.TestCase):
 
     def _run(self, fake, **kw):
         with mock.patch(f"{PKG}.luna_imaging.studio.run", side_effect=fake), \
-             mock.patch.object(self.mod, "_resolve_api_key", return_value="sk-test"):
+             mock.patch.object(self.mod, "_resolve_api_key", return_value="sk-test"), \
+             contextlib.redirect_stdout(io.StringIO()):  # the node's one-line run log
             return self.Node.execute(**_base_kwargs(**kw))
 
     def test_schema_validates(self):
@@ -164,9 +178,77 @@ class StudioNodeTest(unittest.TestCase):
                 self._run(lambda r, k: None, operation="inpaint",
                           reference_images={"reference_image_1": image}, bboxes=bad)
 
+    # D7: MASK / bboxes with an operation other than inpaint are ignored with a note.
+    def test_mask_ignored_outside_inpaint(self):
+        from PIL import Image
+        seen = {}
+
+        def fake(req, key):
+            seen["req"] = req
+            t = sys.modules[f"{PKG}.luna_imaging.types"]
+            size = req.images[0].size if req.images else (8, 8)
+            return t.EditResult(images=[Image.new("RGBA", size)]), None
+
+        image = torch.rand(1, 8, 8, 3)
+        mask = torch.ones(1, 8, 8)
+        for op, refs in (("generate", None), ("edit", {"reference_image_1": image}),
+                         ("compose", {"reference_image_1": image}),
+                         ("outpaint", {"reference_image_1": image})):
+            with self.subTest(op=op):
+                kw = dict(operation=op, reference_images=refs, mask=mask, bboxes="[[0,0,4,4]]")
+                if op == "outpaint":
+                    kw["outpaint_right"] = 4
+                out = self._run(fake, **kw)
+                info = out.result[3]
+                self.assertIsNone(seen["req"].mask)
+                self.assertIn(f"mask/bboxes ignored for {op} — use inpaint", info)
+                self.assertNotIn(", mask)", info)
+        out = self._run(fake, operation="generate")
+        self.assertNotIn("ignored", out.result[3])
+
+    def test_bboxes_without_image_names_first_image(self):
+        with self.assertRaisesRegex(ValueError, "the first image"):
+            self._run(lambda r, k: None, operation="inpaint", bboxes="[[0,0,4,4]]")
+
+    # F4: generate / edit / compose with wired width x height -> output resized to exactly that.
+    def test_wired_size_resizes_output(self):
+        from PIL import Image
+
+        def fake(req, key):
+            t = sys.modules[f"{PKG}.luna_imaging.types"]
+            im = Image.new("RGBA", (16, 12), (255, 0, 0, 0))
+            im.paste((255, 0, 0, 255), (0, 0, 8, 12))
+            return t.EditResult(images=[im, im.copy()]), None
+
+        out = self._run(fake, operation="generate", width=64, height=40, background="transparent")
+        img_t, mask_t, _, info = out.result
+        self.assertEqual(tuple(img_t.shape), (2, 40, 64, 3))
+        self.assertEqual(tuple(mask_t.shape), (2, 40, 64))
+        self.assertAlmostEqual(float(mask_t[0, 20, 2]), 1.0)
+        self.assertAlmostEqual(float(mask_t[0, 20, 60]), 0.0)
+        self.assertIn("resized : 16x12 -> 64x40", info)
+        self.assertIn("-> 2 x 64x40", info)
+        out = self._run(fake, operation="generate", width=16, height=12)
+        self.assertNotIn("resized", out.result[3])
+        out = self._run(fake, operation="generate", width=64, height=0)
+        self.assertEqual(tuple(out.result[0].shape), (2, 12, 16, 3))
+
+    def test_region_output_not_resized(self):
+        def fake(req, key):
+            t = sys.modules[f"{PKG}.luna_imaging.types"]
+            return t.EditResult(images=[req.images[0].convert("RGBA")]), None
+
+        image = torch.rand(1, 8, 8, 3)
+        out = self._run(fake, operation="inpaint", reference_images={"reference_image_1": image},
+                        bboxes="[[0,0,4,4]]", width=64, height=48)
+        self.assertEqual(tuple(out.result[0].shape), (1, 8, 8, 3))
+        self.assertNotIn("resized", out.result[3])
+        self.assertIn(", mask)", out.result[3])
+
     def test_missing_key_names_env_var(self):
         with mock.patch.object(self.mod, "_resolve_api_key", return_value=""):
-            with self.assertRaisesRegex(RuntimeError, "GEMINI_API_KEY"):
+            with self.assertRaisesRegex(RuntimeError, "GEMINI_API_KEY"), \
+                    contextlib.redirect_stdout(io.StringIO()):
                 self.Node.execute(**_base_kwargs(model="gemini-3.1-flash-image", operation="generate"))
 
 

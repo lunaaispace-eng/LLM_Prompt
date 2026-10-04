@@ -322,7 +322,7 @@ which has no ComfyUI or torch dependency.
 | --- | --- | --- |
 | `generate` | no image | Text-to-image. |
 | `edit` (default) | 1+ image | Whole-image edit; the other images are references. |
-| `compose` | 1+ image | Combine the connected images into one. |
+| `compose` | 1+ image | Combine the connected images into one. It sends the same request as `edit` (several images in, one result) — the name is for your workflow, the logic is the same. |
 | `inpaint` | image + `mask` and/or `bboxes` | Change only the region of the first image. |
 | `outpaint` | image + an `outpaint_*` margin | Extend the first image by left / top / right / bottom pixels. |
 
@@ -332,6 +332,22 @@ back. Either way the result is composited onto the original, so pixels outside t
 stay the original's. `feather` blends inward only. A `MASK` of any resolution is fitted to the
 first image; `invert_mask` flips the `MASK` only. The `mask` output is the region actually used
 (1 = edited), or the alpha when `background` is `transparent` and the result has one.
+`mask` and `bboxes` apply to `inpaint` only; with any other operation they are ignored with a
+note in `info`.
+
+**`background transparent`** applies to `generate` / `edit` / `compose` only (OpenAI, except
+`gpt-image-2`). Region edits are composited onto the original, so `inpaint` / `outpaint` send
+`auto` and say so in `info`.
+
+**`width` / `height`** (optional, from a size node). For `generate` / `edit` / `compose` the
+output is resized to exactly width x height; OpenAI sizes the request from them, Gemini and Grok
+send their nearest aspect ratio when `aspect_ratio` is `auto`. `inpaint` / `outpaint` ignore
+them: the request takes the size of the image sent, and the output keeps the original's size
+(plus the margins for `outpaint`).
+
+**Outpaint** sends the whole padded canvas — the original plus grey margins. OpenAI gets a mask
+of the new area; Gemini and Grok are asked to extend the image into the grey borders. Only the
+new area is taken from the result; the original's pixels stay exact.
 
 **`bboxes`** is JSON on the first image: `[[x, y, w, h], ...]`. Values are pixels, or fractions
 of the image when every value is ≤ 1 (`[[0, 0, 0.5, 0.5]]` = the top-left quarter). Boxes are

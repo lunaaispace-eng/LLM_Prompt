@@ -124,9 +124,10 @@ class LunaImageStudio(io.ComfyNode):
                             "gemini-/nano-banana = Gemini, grok- = xAI."),
                 io.Combo.Input(
                     "operation", options=OPERATIONS, default="edit",
-                    tooltip="generate: no images. edit / compose: whole images as input. "
-                            "inpaint: change only the mask / bbox region of the first image. "
-                            "outpaint: extend the first image by the outpaint margins."),
+                    tooltip="generate: no images. edit / compose: whole images as input "
+                            "(compose sends the same request as edit). inpaint: change only "
+                            "the mask / bbox region of the first image. outpaint: extend the "
+                            "first image by the outpaint margins."),
                 io.Combo.Input(
                     "aspect_ratio", options=ASPECT_RATIOS, default="auto",
                     tooltip="Region edits follow the crop / image size instead."),
@@ -153,7 +154,7 @@ class LunaImageStudio(io.ComfyNode):
                 io.Mask.Input(
                     "mask", optional=True,
                     tooltip="ComfyUI MASK (white = region to change) for the first image. "
-                            "Any resolution — it is fitted to the image."),
+                            "Any resolution — it is fitted to the image. inpaint only."),
                 io.Boolean.Input(
                     "invert_mask", default=False, optional=True,
                     tooltip="Change everything EXCEPT the white area (applies to the MASK, "
@@ -162,7 +163,7 @@ class LunaImageStudio(io.ComfyNode):
                     "bboxes", default="", optional=True,
                     tooltip="Optional region boxes as JSON [[x, y, w, h], ...] on the first "
                             "image — pixels, or fractions when every value is <= 1. Unioned "
-                            "with the mask."),
+                            "with the mask. inpaint only."),
                 io.Combo.Input(
                     "mask_mode", options=MASK_MODES, default="auto",
                     tooltip="auto: native mask where the provider has one (OpenAI), crop + "
@@ -183,13 +184,17 @@ class LunaImageStudio(io.ComfyNode):
                     tooltip="Sent where the provider has it (xhigh / max: gpt-image-2.5 only)."),
                 io.Combo.Input(
                     "background", options=BACKGROUNDS, default="auto",
-                    tooltip="transparent: OpenAI except gpt-image-2. The alpha comes out on "
-                            "the mask output."),
+                    tooltip="transparent: OpenAI except gpt-image-2, for generate / edit / "
+                            "compose only (not applied to inpaint / outpaint). The alpha comes "
+                            "out on the mask output."),
 
                 io.Int.Input("width", default=0, min=0, max=32768, optional=True,
                              force_input=True,
-                             tooltip="Optional, from a size node. With height, overrides "
-                                     "aspect_ratio / resolution."),
+                             tooltip="Optional, from a size node. With height, for generate / "
+                                     "edit / compose: OpenAI sizes from it, Gemini / Grok pick "
+                                     "the nearest aspect when aspect_ratio is auto, and the "
+                                     "output is resized to exactly width x height. Ignored by "
+                                     "inpaint / outpaint (the output keeps the image size)."),
                 io.Int.Input("height", default=0, min=0, max=32768, optional=True,
                              force_input=True, tooltip="See width."),
                 io.Int.Input("timeout", default=600, min=30, max=1800, step=10),
@@ -215,11 +220,18 @@ class LunaImageStudio(io.ComfyNode):
         # seed is a re-run trigger only; it is deliberately not part of the request.
         images = [_to_pil(f) for f in _collect_refs(reference_images)]
 
-        region = _mask_to_pil(mask, bool(invert_mask)) if mask is not None else None
+        notes: list[str] = []
         boxes = _parse_bboxes(bboxes)
+        region = None
+        if operation != "inpaint":
+            if mask is not None or boxes:
+                notes.append(f"mask/bboxes ignored for {operation} — use inpaint")
+            mask, boxes = None, []
+        elif mask is not None:
+            region = _mask_to_pil(mask, bool(invert_mask))
         if boxes:
             if not images:
-                raise ValueError("bboxes need an image to apply to (reference_image_1)")
+                raise ValueError("bboxes need an image to apply to (the first image)")
             size = images[0].size
             normalized = all(abs(v) <= 1 for b in boxes for v in b)
             box_mask = boxes_to_mask(boxes, size, normalized)
@@ -248,6 +260,12 @@ class LunaImageStudio(io.ComfyNode):
             raise RuntimeError(f"{model} returned no image. " + " | ".join(result.info))
 
         image_t = _stack([_image_tensor(im) for im in result.images])
+        sized = (operation in ("generate", "edit", "compose")
+                 and bool(width and height) and width > 0 and height > 0)
+        if sized and (image_t.shape[2], image_t.shape[1]) != (int(width), int(height)):
+            # Like GPT Image (API Key): wired width x height is the exact output size.
+            notes.append(f"resized : {image_t.shape[2]}x{image_t.shape[1]} -> {width}x{height}")
+            image_t = _resize_exact(image_t, int(width), int(height))
         n, h, w = image_t.shape[0], image_t.shape[1], image_t.shape[2]
         if background == "transparent" and any(im.mode in ("RGBA", "LA") for im in result.images):
             mask_t = _stack([_mask_tensor(im.convert("RGBA").getchannel("A"))
@@ -267,7 +285,7 @@ class LunaImageStudio(io.ComfyNode):
             [f"model : {model} ({provider})",
              f"operation : {operation} ({len(images)} image(s)"
              + (", mask" if region is not None else "") + f") -> {n} x {w}x{h}"]
-            + list(result.info)
+            + list(result.info) + notes
             + [f"cost : {cost}"])
         print(f"[Luna Image Studio] {model} {operation}: {n} image(s) {w}x{h}, cost {cost}")
         return io.NodeOutput(image_t, mask_t, result.text or "", info)
