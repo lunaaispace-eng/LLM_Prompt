@@ -221,17 +221,27 @@ def _build_canvas_profile(width: int, height: int) -> str:
 # ---------------------------------------------------------------------------
 
 def load_system_prompts() -> dict[str, str]:
-    """Load all .md files from prompts/ folder.
+    """Load all .md files from prompts/ folder, then prompts/private/.
 
     Each file becomes a preset. Optional YAML frontmatter (between --- markers)
     can set: title: Display Name Override
+
+    prompts/private/ is git-ignored: presets that are fine to use locally but
+    must not be published (e.g. third-party prompts licensed "use in your own
+    projects, do not republish"). Their titles get a "Private: " prefix so they
+    never collide with a published preset.
     """
     prompts = {}
     if not PROMPTS_DIR.exists():
         PROMPTS_DIR.mkdir(parents=True, exist_ok=True)
         return prompts
 
-    for md_file in sorted(PROMPTS_DIR.glob("*.md")):
+    private_dir = PROMPTS_DIR / "private"
+    files = [(f, "") for f in sorted(PROMPTS_DIR.glob("*.md"))]
+    if private_dir.is_dir():
+        files += [(f, "Private: ") for f in sorted(private_dir.glob("*.md"))]
+
+    for md_file, prefix in files:
         try:
             text = md_file.read_text(encoding="utf-8").strip()
         except Exception:
@@ -255,7 +265,7 @@ def load_system_prompts() -> dict[str, str]:
                 content = text
 
         if content:
-            prompts[title] = content
+            prompts[prefix + title] = content
 
     return prompts
 
