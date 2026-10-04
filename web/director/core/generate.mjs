@@ -11,19 +11,25 @@ export function assemblePrompt(sections) {
   return parts.join(" ");
 }
 
-// The config's compose limit for one model (0 when unknown). ref_limit is {operation: n}, or a bare number.
-export function composeLimit(model, config) {
-  const id = typeof model === "string" ? model : model && model.id;
-  for (const g of (config && config.cloud) || []) {
-    for (const m of g.models || []) {
-      if (m.id !== id) continue;
-      const l = m.ref_limit;
-      if (l && typeof l === "object") return Number(l.compose) || 0;
-      if (typeof l === "number") return l;
-      return Number(m.max_inputs) || 0;
-    }
+export function findModel(config, id) {
+  for (const grp of (config && config.cloud) || []) {
+    for (const m of grp.models || []) if (m.id === id) return m;
   }
+  return null;
+}
+
+// The ONE reader of a model's ref_limit (server-computed). ref_limit is {operation: n} or a bare number.
+export function limitFor(config, id, operation) {
+  const m = findModel(config, id);
+  if (!m) return 0;
+  const l = m.ref_limit;
+  if (l && typeof l === "object") return Number(l[operation] ?? l.edit ?? 0) || 0;
+  if (typeof l === "number") return operation === "generate" ? 0 : l;
   return 0;
+}
+
+export function composeLimit(model, config) {
+  return limitFor(config, typeof model === "string" ? model : model && model.id, "compose");
 }
 
 // Labels the chip only; the server decides. Compose needs a sent reference and a model that takes them.
@@ -41,7 +47,7 @@ export function editPrompt(variant, text) {
 }
 
 const modelId = (m) => (typeof m === "string" ? m : m && m.id);
-const entryModel = (e) => e.model ?? (typeof e.engine === "string" ? e.engine : e.engine && e.engine.model);
+export const entryModel = (e) => e.model ?? (typeof e.engine === "string" ? e.engine : e.engine && e.engine.model);
 const hasImage = (e) => (Array.isArray(e.outputs) ? e.outputs.length > 0 : Boolean(e.output));
 
 // One row per chosen model, in that order; tiles in variant order. A cancelled entry with an image stays.

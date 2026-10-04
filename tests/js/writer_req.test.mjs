@@ -9,6 +9,7 @@ import {
 const config = {
   cloud: [{ provider: "OpenAI", models: [
     { id: "gpt-image-2", ref_limit: { generate: 0, compose: 4, edit: 3, inpaint: 3, outpaint: 3 } },
+    { id: "nano-banana", ref_limit: { generate: 0, compose: 2, edit: 1 } },
     { id: "nano", ref_limit: { generate: 0, compose: 0, edit: 0, inpaint: 0 } },
   ] }],
 };
@@ -40,9 +41,10 @@ const WRITE_KEYS = ["canvas", "mask", "refs", "provider", "model", "preset", "ta
 
 test("buildWriteBody has exactly the A6 keys, carries switches and drops refs past the limit", () => {
   const st = edit({ refs: refs(5), writer: { ...edit().writer, provider: "Custom", model: "m", thinking: true,
-    negativeOn: true, serverUrl: "http://x/v1", preset: "Edit Rewrite - GPT Image" } });
+    negativeOn: true, serverUrl: "http://x/v1", preset: { edit: "Edit Rewrite - GPT Image", generate: null } } });
   const b = buildWriteBody(st, config);
   assert.deepEqual(Object.keys(b).sort(), WRITE_KEYS);
+  assert.equal(b.preset, "Edit Rewrite - GPT Image");
   assert.equal(b.thinking, true);
   assert.equal(b.negative, true);
   assert.equal(b.server_url, "http://x/v1");
@@ -166,4 +168,31 @@ test("mergeGenerateResult asks first when a variant was edited, and then changes
 test("negative off drops every variant negative", () => {
   const patch = mergeGenerateResult(gen(), reply);
   assert.ok(patch.generate.variants.every((v) => v.negative === ""));
+});
+
+test("Refine writes for the result's model, not the lead", () => {
+  const st = gen();
+  const entry = { id: "e", model: "nano-banana", outputs: [{ name: "o.png" }], prompt: "old" };
+  const b = buildRefineBody(st, config, entry, "f");
+  assert.equal(b.target_model, "nano-banana");
+  assert.equal(b.refs.length, 2);
+  assert.equal(b.operation, "compose");
+  assert.equal(buildRefineBody(st, config, { ...entry, model: "nano" }, "f").operation, "generate");
+  assert.equal(buildRefineBody(st, config, { ...entry, model: "nano" }, "f").refs.length, 0);
+});
+
+test("a writer preset picked on one tab is not sent from the other", () => {
+  const st = gen({ writer: { ...gen().writer, preset: { edit: "E", generate: "G" } } });
+  assert.equal(buildWriteBody(st, config).preset, "G");
+  assert.equal(buildWriteBody({ ...st, mode: "edit" }, config).preset, "E");
+  const auto = gen({ writer: { ...gen().writer, preset: { edit: "E", generate: null } } });
+  assert.equal(buildWriteBody(auto, config).preset, null);
+});
+
+test("the nominal write size never becomes width/height", () => {
+  const b = buildWriteBody(gen(), config);
+  assert.ok(!("width" in b) && !("height" in b));
+  assert.deepEqual(b.size, [2048, 1152]);
+  const st = gen();
+  assert.ok(!("width" in st.generate.params) && !("height" in st.generate.params));
 });

@@ -11,7 +11,7 @@ export function defaultState() {
       },
     },
     writer: {
-      provider: "Local GGUF", model: "", preset: null, send: { canvas: true, mask: true, refs: true },
+      provider: "Local GGUF", model: "", preset: { edit: null, generate: null }, send: { canvas: true, mask: true, refs: true },
       thinking: false, negativeOn: false, busy: false, error: null, positive: "", negative: "",
       visionMp: 1.0, serverUrl: "", gguf: {},
     },

@@ -2,7 +2,7 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import {
-  assemblePrompt, autoOperation, editSection, editPrompt, groupByModel, batchSummary,
+  assemblePrompt, autoOperation, composeLimit, limitFor, editSection, editPrompt, groupByModel, batchSummary,
 } from "../../web/director/core/generate.mjs";
 
 const config = {
@@ -61,4 +61,11 @@ test("groupByModel orders rows by chosen models, tiles by variant, keeps a cance
 test("batchSummary reads like the queue row", () => {
   assert.equal(batchSummary({ idea: "a boat", models: ["a", "b", "c"], count: 4 }), "a boat / 3 models · 4 images each");
   assert.equal(batchSummary({ idea: " x ", models: ["a"], count: 1 }), "x / 1 model · 1 image each");
+});
+
+test("composeLimit and limitFor agree (one reader of ref_limit)", () => {
+  for (const id of ["gpt-image-2", "no-compose", "unknown"]) {
+    assert.equal(composeLimit(id, config), limitFor(config, id, "compose"));
+  }
+  assert.equal(limitFor(config, "gpt-image-2", "inpaint"), 3);
 });
