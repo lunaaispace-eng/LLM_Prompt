@@ -120,10 +120,15 @@ def run(req: EditRequest, key: str) -> tuple[EditResult, Image.Image | None]:
     # aspect); the other providers follow the sent image's aspect.
     changes = {"images": [sent_img] + refs, "prompt": prompt, "mask": None,
                "width": sent_img.width, "height": sent_img.height, "aspect_ratio": "auto"}
+    # OpenAI with "auto" may return the masked area transparent (RGB black), so region edits ask
+    # for an opaque patch; the other providers have no background control.
+    bg = "opaque" if provider == "openai" else "auto"
     if req.background == "transparent":
         # The patch is composited onto the original, so its alpha could not survive anyway.
-        notes.append("transparent background is not applied to region edits - sent 'auto'")
-        changes["background"] = "auto"
+        notes.append(f"transparent background is not applied to region edits - sent '{bg}'")
+        changes["background"] = bg
+    elif provider == "openai":
+        changes["background"] = bg
     sent = dataclasses.replace(req, **changes)
 
     result = _dispatch(provider, sent, key, mask=sent_mask)

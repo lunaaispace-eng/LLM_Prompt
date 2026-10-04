@@ -109,6 +109,9 @@ def composite(base, patch, box, mask, feather_px):
         hard = hard.resize(out.size, Image.NEAREST)
     hard = hard.crop(box)
     weight = _feather_weight(hard, feather_px) if feather_px and feather_px > 0 else hard
+    # A transparent patch pixel keeps the original (the API may return the edit area as alpha 0).
+    if "A" in patch.getbands():
+        weight = ImageChops.multiply(weight, patch.getchannel("A").resize((bw, bh), Image.LANCZOS))
     p = patch.convert("RGB").resize((bw, bh), Image.LANCZOS)
     region = out.crop(box)
     if out_mode == "RGBA":

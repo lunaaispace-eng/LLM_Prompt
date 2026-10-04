@@ -239,7 +239,7 @@ class Studio(unittest.TestCase):
                 req = self._req("gpt-image-2.5-flare", operation=op, background="transparent", **kw)
                 with mock.patch("luna_imaging.providers.openai.run", fake):
                     res, _ = studio.run(req, "k")
-                self.assertEqual(fake.calls[0][0].background, "auto")
+                self.assertEqual(fake.calls[0][0].background, "opaque")
                 self.assertTrue(any("transparent background is not applied to region edits" in i
                                     for i in res.info), res.info)
                 self.assertEqual(req.background, "transparent")  # caller's request not mutated
@@ -248,6 +248,16 @@ class Studio(unittest.TestCase):
         with mock.patch("luna_imaging.providers.openai.run", fake):
             studio.run(req, "k")
         self.assertEqual(fake.calls[0][0].background, "transparent")
+
+    def test_openai_region_edits_send_opaque(self):
+        for op, kw in (("inpaint", {}), ("outpaint", {"outpaint": (0, 0, 10, 0)})):
+            with self.subTest(op=op):
+                fake = _Fake()
+                req = self._req("gpt-image-2.5-flare", operation=op, background="auto", **kw)
+                with mock.patch("luna_imaging.providers.openai.run", fake):
+                    res, _ = studio.run(req, "k")
+                self.assertEqual(fake.calls[0][0].background, "opaque")
+                self.assertFalse(any("transparent background" in i for i in res.info), res.info)
 
     # F4: region edits always send the size of the image actually sent; wired width/height
     # are ignored with a note.

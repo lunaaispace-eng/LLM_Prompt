@@ -83,6 +83,21 @@ class MaskMaths(unittest.TestCase):
         out = composite(base, patch, box, _rect_mask((64, 64), box), 4)
         self.assertEqual(out.mode, "RGB")
 
+    def test_composite_transparent_patch_keeps_original(self):
+        base = _noise((64, 64))
+        patch = Image.new("RGBA", (32, 32), (0, 0, 0, 0))
+        box = (16, 16, 48, 48)
+        out = composite(base, patch, box, _rect_mask((64, 64), box), 0)
+        self.assertIsNone(ImageChops.difference(out, base).getbbox())
+
+    def test_composite_half_transparent_patch(self):
+        base = Image.new("RGB", (64, 64), (0, 0, 0))
+        patch = Image.new("RGBA", (32, 32), (255, 255, 255, 128))
+        box = (16, 16, 48, 48)
+        out = composite(base, patch, box, _rect_mask((64, 64), box), 0)
+        self.assertEqual(out.getpixel((30, 30)), (128, 128, 128))
+        self.assertEqual(out.getpixel((2, 2)), (0, 0, 0))
+
     def test_composite_feather_never_touches_outside_mask(self):
         base = _noise((64, 64))
         patch = Image.new("RGB", (40, 40), (200, 10, 30))
