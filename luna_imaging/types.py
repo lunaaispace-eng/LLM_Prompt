@@ -31,7 +31,9 @@ class EditRequest:
 
 @dataclass
 class EditResult:
-    images: list[Image.Image] = field(default_factory=list)  # RGBA
+    # Provider results are RGBA. Region results (inpaint / outpaint, composited by the studio)
+    # follow the original image's mode: RGB stays RGB, RGBA stays RGBA.
+    images: list[Image.Image] = field(default_factory=list)
     text: str = ""
     cost_usd: float | None = None
     info: list[str] = field(default_factory=list)

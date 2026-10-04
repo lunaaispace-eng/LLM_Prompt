@@ -73,6 +73,89 @@ class CoreScaffold(unittest.TestCase):
             with self.assertRaises(ProviderError) as cm:
                 h.post_json("http://x", {}, {}, 1)
         self.assertIsNone(cm.exception.status)
+        self.assertFalse(cm.exception.retryable)
+        self.assertIn("may still have been billed", str(cm.exception))
+
+    # F5: only failures before the request reached the server are retried (a paid POST must
+    # not bill twice); 429 / 5xx keep retrying.
+    def _post_calls(self, side_effect, max_retries=2):
+        from unittest import mock
+        import luna_imaging.http as h
+        calls = []
+
+        def urlopen(req, timeout=None):
+            calls.append(req)
+            return side_effect()
+
+        with mock.patch.object(h.urllib.request, "urlopen", urlopen), \
+                mock.patch.object(h, "_sleep") as sl:
+            with self.assertRaises(ProviderError) as cm:
+                with_retries(lambda: h.post_json("http://x", {}, {}, 1), max_retries)
+        return len(calls), sl.call_count, cm.exception
+
+    def test_connect_failure_is_retried(self):
+        import urllib.error
+
+        def fail():
+            raise urllib.error.URLError(ConnectionRefusedError("refused"))
+
+        n, sleeps, err = self._post_calls(fail)
+        self.assertEqual((n, sleeps), (3, 2))
+        self.assertTrue(err.retryable)
+        self.assertIsNone(err.status)
+        self.assertNotIn("billed", str(err))
+
+    def test_read_failures_are_not_retried(self):
+        import http.client
+
+        def timeout():
+            raise TimeoutError("timed out")
+
+        def disconnected():
+            raise http.client.RemoteDisconnected("closed")
+
+        def reset():
+            raise ConnectionResetError("reset")
+
+        for fail in (timeout, disconnected, reset):
+            with self.subTest(fail=fail.__name__):
+                n, sleeps, err = self._post_calls(fail)
+                self.assertEqual((n, sleeps), (1, 0))
+                self.assertFalse(err.retryable)
+                self.assertIn("may still have been billed", str(err))
+
+    def test_invalid_json_on_200_not_retried(self):
+        import io as _io
+
+        n, sleeps, err = self._post_calls(lambda: _io.BytesIO(b"<html>not json</html>"))
+        self.assertEqual((n, sleeps), (1, 0))
+        self.assertIn("invalid JSON", str(err))
+        self.assertIn("may still have been billed", str(err))
+
+    def test_http_status_errors(self):
+        import io as _io
+        import urllib.error
+
+        def http_error(code):
+            def fail():
+                raise urllib.error.HTTPError("http://x", code, "err", {}, _io.BytesIO(b'{"error": "e"}'))
+            return fail
+
+        n, sleeps, err = self._post_calls(http_error(400))
+        self.assertEqual((n, sleeps, err.status), (1, 0, 400))
+        n, sleeps, err = self._post_calls(http_error(503))
+        self.assertEqual((n, sleeps, err.status), (3, 2, 503))
+
+    def test_status_none_default_not_retryable(self):
+        calls = []
+
+        def fn():
+            calls.append(1)
+            raise ProviderError("x")
+
+        with self.assertRaises(ProviderError):
+            with_retries(fn, 3)
+        self.assertEqual(len(calls), 1)
 
 
 if __name__ == "__main__":

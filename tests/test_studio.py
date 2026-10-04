@@ -138,6 +138,15 @@ class Studio(unittest.TestCase):
         self.assertEqual(res.images[0].size, (150, 50))
         self.assertEqual(used.size, (150, 50))
         self.assertEqual(res.images[0].convert("RGB").getpixel((140, 25)), GREEN)
+        # D4: crop-mode outpaint sends the whole canvas with the outpaint prompt
+        sent, _, sent_mask = fake.calls[0]
+        self.assertEqual(sent.images[0].size, (150, 50))
+        self.assertIsNone(sent_mask)
+        self.assertEqual(sent.prompt, studio.OUTPAINT_PREFIX + "a red ball")
+        self.assertTrue(sent.prompt.startswith("Extend this image into the grey border areas"))
+        self.assertEqual(sent.aspect_ratio, "auto")
+        self.assertEqual(sent.images[0].getpixel((140, 25)), (127, 127, 127))
+        self.assertEqual(sent.images[0].getpixel((10, 10)), img.getpixel((10, 10)))
 
     def test_too_many_images(self):
         fake = _Fake()
@@ -180,6 +189,137 @@ class Studio(unittest.TestCase):
         self.assertEqual(out.size, (140, 55))
         self.assertIsNone(ImageChops.difference(out.crop((10, 5, 110, 55)), img).getbbox())
         self.assertEqual(out.getpixel((2, 2)), GREEN)
+
+    def test_outpaint_crop_mode_on_openai_sends_whole_canvas(self):
+        fake = _Fake(size=(160, 64))  # API-snapped size, not the canvas
+        img = _noise((100, 50), seed=4)
+        req = self._req(OPENAI, operation="outpaint", images=[img], outpaint=(0, 0, 50, 0),
+                        mask_mode="crop")
+        with mock.patch("luna_imaging.providers.openai.run", fake):
+            res, _ = studio.run(req, "k")
+        sent, _, sent_mask = fake.calls[0]
+        self.assertIsNone(sent_mask)
+        self.assertEqual(sent.images[0].size, (150, 50))
+        self.assertEqual((sent.width, sent.height), (150, 50))
+        self.assertTrue(sent.prompt.startswith(studio.OUTPAINT_PREFIX))
+        out = res.images[0].convert("RGB")
+        self.assertIsNone(ImageChops.difference(out.crop((0, 0, 100, 50)), img).getbbox())
+        self.assertEqual(out.getpixel((120, 25)), GREEN)
+
+    # D6: OpenAI native outpaint - canvas + mask + width/height at canvas size; the original
+    # area of the output equals the original exactly.
+    def test_outpaint_native_openai(self):
+        fake = _Fake(size=(144, 64))  # API-snapped size, not the canvas
+        img = _noise((100, 50), seed=5)
+        req = self._req(OPENAI, operation="outpaint", images=[img], outpaint=(10, 5, 30, 0))
+        with mock.patch("luna_imaging.providers.openai.run", fake):
+            res, used = studio.run(req, "k")
+        sent, _, sent_mask = fake.calls[0]
+        self.assertEqual(sent.images[0].size, (140, 55))
+        self.assertEqual((sent.width, sent.height), (140, 55))
+        self.assertEqual(sent.prompt, "a red ball")
+        self.assertIsNotNone(sent_mask)
+        self.assertEqual(sent_mask.size, (140, 55))
+        self.assertEqual(sent_mask.getpixel((2, 2)), 255)      # new area
+        self.assertEqual(sent_mask.getpixel((60, 30)), 0)      # original area
+        self.assertEqual(sent.images[0].getpixel((60, 30)), img.getpixel((50, 25)))
+        self.assertIn("mode : native", res.info)
+        out = res.images[0].convert("RGB")
+        self.assertEqual(out.size, (140, 55))
+        self.assertIsNone(ImageChops.difference(out.crop((10, 5, 110, 55)), img).getbbox())
+        self.assertEqual(out.getpixel((2, 2)), GREEN)
+        self.assertEqual(out.getpixel((135, 50)), GREEN)
+        self.assertEqual(used.getpixel((2, 2)), 255)
+
+    # F3: transparent is not applied to region edits (the patch is composited onto the original).
+    def test_transparent_not_sent_for_region_edits(self):
+        for op, kw in (("inpaint", {}), ("outpaint", {"outpaint": (0, 0, 10, 0)})):
+            with self.subTest(op=op):
+                fake = _Fake(alpha=0)
+                req = self._req("gpt-image-2.5-flare", operation=op, background="transparent", **kw)
+                with mock.patch("luna_imaging.providers.openai.run", fake):
+                    res, _ = studio.run(req, "k")
+                self.assertEqual(fake.calls[0][0].background, "auto")
+                self.assertTrue(any("transparent background is not applied to region edits" in i
+                                    for i in res.info), res.info)
+                self.assertEqual(req.background, "transparent")  # caller's request not mutated
+        fake = _Fake()
+        req = self._req("gpt-image-2.5-flare", operation="generate", images=[], background="transparent")
+        with mock.patch("luna_imaging.providers.openai.run", fake):
+            studio.run(req, "k")
+        self.assertEqual(fake.calls[0][0].background, "transparent")
+
+    # F4: region edits always send the size of the image actually sent; wired width/height
+    # are ignored with a note.
+    def test_region_edit_ignores_wired_size(self):
+        cases = [("auto", (60, 60)), ("crop", (30, 30))]
+        for mode, size in cases:
+            with self.subTest(mode=mode):
+                fake = _Fake()
+                req = self._req(OPENAI, mask_mode=mode, width=1024, height=576, aspect_ratio="21:9")
+                with mock.patch("luna_imaging.providers.openai.run", fake):
+                    res, _ = studio.run(req, "k")
+                sent = fake.calls[0][0]
+                self.assertEqual((sent.width, sent.height), size)
+                self.assertEqual(sent.aspect_ratio, "auto")
+                self.assertTrue(any(i.startswith("width/height ignored for inpaint") for i in res.info),
+                                res.info)
+                self.assertEqual(res.images[0].size, (60, 60))
+        fake = _Fake()
+        req = self._req(OPENAI, mask_mode="crop", width=1024, height=0)  # only one side wired
+        with mock.patch("luna_imaging.providers.openai.run", fake):
+            res, _ = studio.run(req, "k")
+        self.assertEqual((fake.calls[0][0].width, fake.calls[0][0].height), (30, 30))
+        self.assertTrue(any("width/height ignored" in i for i in res.info))
+        fake = _Fake()
+        img = _noise((40, 20), seed=6)
+        req = self._req(GEMINI, operation="outpaint", images=[img], outpaint=(0, 0, 20, 0),
+                        width=512, height=512)
+        with mock.patch("luna_imaging.providers.gemini.run", fake):
+            res, _ = studio.run(req, "k")
+        self.assertEqual(res.images[0].size, (60, 20))
+        self.assertTrue(any("width/height ignored for outpaint" in i for i in res.info))
+
+    def test_unwired_region_edit_has_no_size_note(self):
+        fake = _Fake()
+        with mock.patch("luna_imaging.providers.gemini.run", fake):
+            res, _ = studio.run(self._req(GEMINI), "k")
+        self.assertFalse(any("width/height" in i for i in res.info), res.info)
+
+    # F4: generate / edit / compose with wired width x height: Gemini / Grok get their nearest
+    # aspect when aspect_ratio is auto; OpenAI gets the request unchanged (openai_size sizes it).
+    def test_wired_size_picks_nearest_aspect(self):
+        imgs2 = [_noise((20, 20), seed=1), _noise((20, 20), seed=2)]
+        cases = [
+            ("gemini", GEMINI, "generate", [], "auto", "16:9"),
+            ("gemini", GEMINI, "edit", [self.img], "auto", "16:9"),
+            ("gemini", GEMINI, "edit", [self.img], "4:3", "4:3"),     # explicit aspect kept
+            ("xai", "grok-imagine-image-2.0", "compose", imgs2, "auto", "16:9"),
+            ("xai", "grok-imagine-image-2.0", "generate", [], "auto", "16:9"),
+            ("xai", "grok-imagine-image-2.0", "edit", [self.img], "auto", "auto"),  # 1 input: none
+        ]
+        for prov, model, op, images, ar, want in cases:
+            with self.subTest(model=model, op=op, ar=ar, n=len(images)):
+                fake = _Fake()
+                req = self._req(model, operation=op, images=images, width=1000, height=600,
+                                aspect_ratio=ar)
+                with mock.patch(f"luna_imaging.providers.{prov}.run", fake):
+                    res, used = studio.run(req, "k")
+                self.assertIsNone(used)
+                self.assertEqual(fake.calls[0][0].aspect_ratio, want)
+                noted = any(i == f"width/height 1000x600 -> aspect_ratio {want}" for i in res.info)
+                self.assertEqual(noted, ar == "auto" and want != "auto", res.info)
+        fake = _Fake()
+        req = self._req("grok-imagine-image-2.0", operation="generate", images=[],
+                        width=900, height=2000)
+        with mock.patch("luna_imaging.providers.xai.run", fake):
+            studio.run(req, "k")
+        self.assertEqual(fake.calls[0][0].aspect_ratio, "9:20")  # xAI list, not Gemini's
+        fake = _Fake()
+        req = self._req(OPENAI, operation="generate", images=[], width=1000, height=600)
+        with mock.patch("luna_imaging.providers.openai.run", fake):
+            studio.run(req, "k")
+        self.assertIs(fake.calls[0][0], req)
 
     def test_n2_composites_both(self):
         fake = _Fake(count=2)

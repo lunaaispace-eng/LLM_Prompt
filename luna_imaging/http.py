@@ -15,10 +15,21 @@ T = TypeVar("T")
 _sleep = time.sleep
 
 
+_BILLED = " - the request may still have been billed"
+
+
 class ProviderError(RuntimeError):
-    def __init__(self, message: str, status: int | None = None):
+    """A provider call failed. `status` is the HTTP status, or None when there was none.
+
+    `retryable` marks a failure that happened before the request reached the server
+    (connect / send, wrapped by urllib in URLError), so sending it again cannot bill twice.
+    `with_retries` retries those, 429 and 5xx - nothing else.
+    """
+
+    def __init__(self, message: str, status: int | None = None, retryable: bool = False):
         super().__init__(message)
         self.status = status
+        self.retryable = retryable
 
 
 def _error_message(raw: str) -> str:
@@ -47,13 +58,18 @@ def _send(url: str, headers: dict, data: bytes, content_type: str, timeout: floa
             return json.loads(resp.read().decode("utf-8"))
     except urllib.error.HTTPError as e:
         raw = e.read().decode("utf-8", "replace")
-        raise ProviderError(f"HTTP {e.code}: {_error_message(raw)}", status=e.code) from None
+        raise ProviderError(f"HTTP {e.code}: {_error_message(raw)}", status=e.code,
+                            retryable=e.code == 429 or e.code >= 500) from None
     except urllib.error.URLError as e:
-        raise ProviderError(f"network error: {e.reason}", status=None) from None
+        # urllib wraps only connect / send failures in URLError: the request never
+        # reached the server, so a retry cannot bill twice.
+        raise ProviderError(f"network error: {e.reason}", status=None, retryable=True) from None
     except (http.client.HTTPException, TimeoutError, OSError) as e:
-        raise ProviderError(f"network error: {e}", status=None) from None
+        # Raised while waiting for / reading the response: the server may have the request.
+        raise ProviderError(f"network error after the request was sent: {e}{_BILLED}",
+                            status=None) from None
     except ValueError as e:
-        raise ProviderError(f"invalid JSON in response: {e}", status=None) from None
+        raise ProviderError(f"invalid JSON in response: {e}{_BILLED}", status=None) from None
 
 
 def post_json(url: str, headers: dict, body: dict, timeout: float) -> dict:
@@ -87,7 +103,10 @@ def with_retries(fn: Callable[[], T], max_retries: int) -> T:
         try:
             return fn()
         except ProviderError as e:
-            retryable = e.status is None or e.status >= 500 or e.status == 429
+            if e.status is None:
+                retryable = e.retryable  # only a failure before the request was sent
+            else:
+                retryable = e.status == 429 or e.status >= 500
             if not retryable or attempt >= max_retries:
                 raise
             _sleep(2 ** attempt)

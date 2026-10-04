@@ -14,10 +14,15 @@ from .masks import composite, expand_box, fit_mask, mask_bbox, outpaint_canvas
 from .providers import gemini as _gemini
 from .providers import openai as _openai
 from .providers import xai as _xai
+from .sizes import nearest_aspect
 from .types import EditRequest, EditResult
 
 CROP_PREFIX = "Edit only the marked region of the first image: "
+OUTPAINT_PREFIX = ("Extend this image into the grey border areas, continuing the scene "
+                   "seamlessly; keep the existing content unchanged: ")
 _OPERATIONS = ("generate", "edit", "compose", "inpaint", "outpaint")
+# Aspect ratios each provider accepts, for wired width/height on Gemini / Grok.
+_ASPECTS = {"gemini": _gemini.ASPECTS, "xai": _xai.ASPECTS}
 
 
 def _dispatch(provider: str, req: EditRequest, key: str, mask: Image.Image | None = None) -> EditResult:
@@ -52,6 +57,19 @@ def _validate(req: EditRequest, max_inputs: int) -> None:
         raise ValueError(f"{req.model} takes at most {max_inputs} images")
 
 
+def _whole_image(req: EditRequest, provider: str) -> tuple[EditRequest, list[str]]:
+    """generate / edit / compose with wired width x height on Gemini / Grok and aspect_ratio
+    auto: send the provider's nearest aspect ratio (the caller resizes the output to width x
+    height). OpenAI takes width x height through openai_size instead."""
+    w, h = int(req.width or 0), int(req.height or 0)
+    if w <= 0 or h <= 0 or provider not in _ASPECTS or req.aspect_ratio != "auto":
+        return req, []
+    if provider == "xai" and len(req.images) == 1:
+        return req, []  # xAI takes a custom aspect only with more than one input image
+    ar = nearest_aspect(w, h, _ASPECTS[provider])
+    return dataclasses.replace(req, aspect_ratio=ar), [f"width/height {w}x{h} -> aspect_ratio {ar}"]
+
+
 def run(req: EditRequest, key: str) -> tuple[EditResult, Image.Image | None]:
     """Run one studio request. Returns (result, the mask actually used, full output size; None
     for generate/edit/compose). The caller's `req` is never mutated."""
@@ -60,9 +78,17 @@ def run(req: EditRequest, key: str) -> tuple[EditResult, Image.Image | None]:
     _validate(req, caps.max_inputs)
 
     if req.operation in ("generate", "edit", "compose"):
-        return _dispatch(provider, req, key), None
+        sent, notes = _whole_image(req, provider)
+        result = _dispatch(provider, sent, key)
+        if notes:
+            result = dataclasses.replace(result, info=list(result.info) + notes)
+        return result, None
 
     notes: list[str] = []
+    if req.width or req.height:
+        keeps = ("the original size" if req.operation == "inpaint"
+                 else "the original plus the outpaint margins")
+        notes.append(f"width/height ignored for {req.operation} - the output keeps {keeps}")
     if req.operation == "outpaint":
         base, mask = outpaint_canvas(req.images[0], tuple(int(v) for v in req.outpaint))
         feather = 0  # hard edge: the original area stays exact, no grey fill leaks in
@@ -82,16 +108,22 @@ def run(req: EditRequest, key: str) -> tuple[EditResult, Image.Image | None]:
     if native:
         box = (0, 0, base.width, base.height)
         sent_img, prompt, sent_mask = base, req.prompt, mask
+    elif req.operation == "outpaint":
+        # The whole canvas, so the model sees all of the original it has to continue.
+        box = (0, 0, base.width, base.height)
+        sent_img, prompt, sent_mask = base, OUTPAINT_PREFIX + req.prompt, None
     else:
         box = expand_box(bbox, req.crop_padding, base.size)
         sent_img, prompt, sent_mask = base.crop(box), CROP_PREFIX + req.prompt, None
 
-    changes = {"images": [sent_img] + refs, "prompt": prompt, "mask": None}
-    if provider == "openai":
-        if not req.width and not req.height:
-            changes["width"], changes["height"] = sent_img.size  # snapped by openai_size, keeps the aspect
-    elif not native:
-        changes["aspect_ratio"] = "auto"  # follow the crop
+    # Always the size of the image actually sent (OpenAI snaps it in openai_size, keeping the
+    # aspect); the other providers follow the sent image's aspect.
+    changes = {"images": [sent_img] + refs, "prompt": prompt, "mask": None,
+               "width": sent_img.width, "height": sent_img.height, "aspect_ratio": "auto"}
+    if req.background == "transparent":
+        # The patch is composited onto the original, so its alpha could not survive anyway.
+        notes.append("transparent background is not applied to region edits - sent 'auto'")
+        changes["background"] = "auto"
     sent = dataclasses.replace(req, **changes)
 
     result = _dispatch(provider, sent, key, mask=sent_mask)
