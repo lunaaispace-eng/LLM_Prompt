@@ -51,7 +51,6 @@ from __future__ import annotations
 import base64
 import io as _io
 import json
-import math
 import time
 import urllib.error
 import urllib.request
@@ -64,6 +63,8 @@ from PIL import Image
 from comfy_api.latest import io
 
 from .llm_prompt_api_node import _resolve_api_key, _comfyui_root
+from .luna_imaging.cost import openai_cost_line
+from .luna_imaging.sizes import RESOLUTIONS, openai_size
 
 _BASE = "https://api.openai.com/v1"
 
@@ -79,119 +80,21 @@ MODELS = [
 
 ASPECT_RATIOS = ["auto", "1:1", "2:3", "3:2", "3:4", "4:3", "4:5", "5:4",
                  "9:16", "16:9", "21:9", "1:3", "3:1"]
-# Target pixel budgets for the free-size (2.x) models. 4K is the API's
-# 8,294,400-pixel ceiling (3840x2160).
-RESOLUTIONS = {"auto": None, "1K": 1024 * 1024, "2K": 2048 * 2048, "4K": 3840 * 2160}
 QUALITIES = ["auto", "low", "medium", "high", "xhigh", "max"]
 BACKGROUNDS = ["auto", "opaque", "transparent"]
 FORMATS = ["png", "webp", "jpeg"]
 MODERATION = ["auto", "low"]
 FIDELITY = ["auto", "low", "high"]
 
-# USD per 1M tokens: (text in, image in, image out). Batch would be 50%.
-# From OpenAI's pricing page, 2026-10-04. Cached-input discounts are not
-# applied (the Images API reports no cached split for these calls).
-RATES = {
-    "gpt-image-2.5": (5.0, 8.0, 30.0),
-    "gpt-image-2": (5.0, 8.0, 30.0),
-    "gpt-image-1.5": (5.0, 8.0, 32.0),
-    "chatgpt-image-latest": (5.0, 8.0, 32.0),
-    "gpt-image-1-mini": (2.0, 2.5, 8.0),
-    "gpt-image-1": (5.0, 10.0, 40.0),
-}
 # Mainline models offered for the Responses-API prompt rewriter.
 REWRITERS = ["off", "gpt-6-sol", "gpt-5.6-sol", "gpt-6-luna", "gpt-5.6-luna"]
 
 
-def _rates_for(model: str):
-    best, n = None, -1
-    for k, v in RATES.items():
-        if model.startswith(k) and len(k) > n:
-            best, n = v, len(k)
-    return best
-
-
-def _cost_line(model: str, usage: dict) -> str:
-    """Image-model cost from `usage`. Output TEXT tokens (1.x only) are shown
-    but not priced: their rate is not on the image pricing table."""
-    rates = _rates_for(model)
-    if not usage or not rates:
-        return "n/a"
-    ind = usage.get("input_tokens_details") or {}
-    outd = usage.get("output_tokens_details") or {}
-    t_in = int(ind.get("text_tokens") or 0)
-    i_in = int(ind.get("image_tokens") or 0)
-    i_out = int(outd.get("image_tokens") or usage.get("output_tokens") or 0)
-    t_out = int(outd.get("text_tokens") or 0)
-    usd = (t_in * rates[0] + i_in * rates[1] + i_out * rates[2]) / 1e6
-    extra = f" (+{t_out} text-out tokens, unpriced)" if t_out else ""
-    return (f"${usd:.4f}  [in {t_in} text + {i_in} image, out {i_out} image tokens]"
-            + extra)
-
-
-_FIXED_SIZES = [(1024, 1024), (1536, 1024), (1024, 1536)]
-_MIN_PIX, _MAX_PIX, _MAX_EDGE = 655_360, 8_294_400, 3840
 REF_SLOTS = 16  # UI cap; the 2.x API took 101 live — a batch per slot goes past it
-
-
-def _free_size(model: str) -> bool:
-    return model.startswith("gpt-image-2")
 
 
 def _is_25(model: str) -> bool:
     return model.startswith("gpt-image-2.5")
-
-
-def _snap16(v: float) -> int:
-    return max(16, int(round(v / 16.0)) * 16)
-
-
-def _fit_free(w: float, h: float) -> tuple[int, int]:
-    """Clamp an arbitrary target into the 2.x rules: /16, edge <= 3840,
-    aspect 1:3..3:1, pixel count inside the documented window."""
-    ar = max(1 / 3, min(3.0, w / h))
-    pix = max(_MIN_PIX, min(_MAX_PIX, w * h))
-    w = math.sqrt(pix * ar)
-    h = w / ar
-    scale = min(1.0, _MAX_EDGE / max(w, h))
-    w, h = _snap16(w * scale), _snap16(h * scale)
-    # Rounding can step over either bound. Live: 1000x600 snapped to 1040x624
-    # (648,960 px) and 400'd "below the current minimum pixel budget".
-    while w * h > _MAX_PIX:
-        w, h = (w - 16, h) if w >= h else (w, h - 16)
-    while w * h < _MIN_PIX:
-        w, h = (w, h + 16) if w >= h else (w + 16, h)
-    return w, h
-
-
-def _ar_float(ar: str) -> float:
-    a, b = ar.split(":")
-    return float(a) / float(b)
-
-
-def _resolve_size(model, aspect_ratio, resolution, width, height, notes) -> str:
-    """Widgets (or wired width/height) -> the API's `size` string."""
-    wired = bool(width and height and width > 0 and height > 0)
-    if _free_size(model):
-        if wired:
-            w, h = _fit_free(float(width), float(height))
-            if (w, h) != (int(width), int(height)):
-                notes.append(f"{width}x{height} -> {w}x{h} (API rules; output resized back)")
-            return f"{w}x{h}"
-        if aspect_ratio == "auto" and resolution == "auto":
-            return "auto"
-        pix = RESOLUTIONS[resolution] or RESOLUTIONS["1K"]
-        ar = 1.0 if aspect_ratio == "auto" else _ar_float(aspect_ratio)
-        w, h = _fit_free(math.sqrt(pix * ar), math.sqrt(pix / ar))
-        return f"{w}x{h}"
-    # 1.x / chatgpt-image-latest: three fixed sizes.
-    if not wired and aspect_ratio == "auto":
-        return "auto"
-    ar = (float(width) / float(height)) if wired else _ar_float(aspect_ratio)
-    w, h = min(_FIXED_SIZES, key=lambda s: abs(math.log((s[0] / s[1]) / ar)))
-    if resolution not in ("auto", "1K"):
-        notes.append(f"{model} has fixed sizes only - {resolution} ignored")
-    return f"{w}x{h}"
 
 
 # ---------------------------------------------------------------------------
@@ -452,7 +355,7 @@ class OpenAIImageNode(io.ComfyNode):
 
         notes: list[str] = []
         refs = _collect_refs(reference_images)
-        size = _resolve_size(model, aspect_ratio, resolution, width, height, notes)
+        size = openai_size(model, aspect_ratio, resolution, width, height, notes)
 
         if quality in ("xhigh", "max") and not _is_25(model):
             notes.append(f"{model} has no quality '{quality}' - sent 'high'")
@@ -565,7 +468,7 @@ class OpenAIImageNode(io.ComfyNode):
             f"settings   : quality={quality} background={background} "
             f"format={output_format} moderation={moderation}",
             f"images     : {images.shape[0]}",
-            f"cost       : {_cost_line(model, usage)}",
+            f"cost       : {openai_cost_line(model, usage)}",
             f"elapsed    : {elapsed:.1f}s",
         ] + ([f"revised    : {revised[:1500]}"] if revised else [])
           + [f"note       : {n}" for n in notes])
