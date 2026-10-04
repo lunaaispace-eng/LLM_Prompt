@@ -12,7 +12,10 @@ from luna_imaging.http import ProviderError, with_retries  # noqa: E402
 
 class CoreScaffold(unittest.TestCase):
     def test_no_comfy_or_torch_import(self):
-        code = (f"import sys; sys.path.insert(0, {ROOT!r}); import luna_imaging; assert 'torch' not in sys.modules "
+        code = (f"import sys, pkgutil, importlib; sys.path.insert(0, {ROOT!r}); import luna_imaging; "
+                "[importlib.import_module(m.name) for m in "
+                "pkgutil.walk_packages(luna_imaging.__path__, 'luna_imaging.')]; "
+                "assert 'torch' not in sys.modules "
                 "and 'comfy_api' not in sys.modules and 'numpy' not in sys.modules")
         r = subprocess.run([sys.executable, "-c", code], cwd=ROOT)
         self.assertEqual(r.returncode, 0)
@@ -42,6 +45,34 @@ class CoreScaffold(unittest.TestCase):
         with self.assertRaises(ProviderError):
             with_retries(fn, 3)
         self.assertEqual(len(calls), 1)
+
+    def test_retries_5xx_then_success_and_429(self):
+        from unittest import mock
+        import luna_imaging.http as h
+        for status in (503, 429):
+            seq = [ProviderError("x", status=status), ProviderError("x", status=status), "ok"]
+            calls = []
+
+            def fn():
+                calls.append(1)
+                v = seq[len(calls) - 1]
+                if isinstance(v, Exception):
+                    raise v
+                return v
+
+            with mock.patch.object(h, "_sleep") as sl:
+                self.assertEqual(with_retries(fn, 2), "ok")
+            self.assertEqual(len(calls), 3)
+            self.assertEqual([c.args[0] for c in sl.call_args_list], [1, 2])
+
+    def test_http_exception_becomes_provider_error(self):
+        import http.client
+        from unittest import mock
+        import luna_imaging.http as h
+        with mock.patch.object(h.urllib.request, "urlopen", side_effect=http.client.IncompleteRead(b"")):
+            with self.assertRaises(ProviderError) as cm:
+                h.post_json("http://x", {}, {}, 1)
+        self.assertIsNone(cm.exception.status)
 
 
 if __name__ == "__main__":

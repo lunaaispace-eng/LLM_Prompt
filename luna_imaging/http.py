@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import http.client
 import json
 import time
 import urllib.error
@@ -49,7 +50,7 @@ def _send(url: str, headers: dict, data: bytes, content_type: str, timeout: floa
         raise ProviderError(f"HTTP {e.code}: {_error_message(raw)}", status=e.code) from None
     except urllib.error.URLError as e:
         raise ProviderError(f"network error: {e.reason}", status=None) from None
-    except (TimeoutError, OSError) as e:
+    except (http.client.HTTPException, TimeoutError, OSError) as e:
         raise ProviderError(f"network error: {e}", status=None) from None
     except ValueError as e:
         raise ProviderError(f"invalid JSON in response: {e}", status=None) from None
