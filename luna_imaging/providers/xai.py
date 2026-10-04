@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import base64
 import io
+import urllib.error
 import urllib.request
 
 from PIL import Image
@@ -15,6 +16,10 @@ from ..types import EditRequest, EditResult
 BASE_URL = "https://api.x.ai/v1"
 _RESOLUTIONS = {"1k", "1.5k", "2k"}
 _NO_QUALITY_MODELS = ("grok-imagine-image-quality", "grok-imagine-image-pro")
+# Copied from grok_imagine_nodes._IMAGE_AR: the aspect_ratio values the image API takes.
+ASPECTS = ["1:1", "2:3", "3:2", "3:4", "4:3", "9:16", "16:9", "9:19.5", "19.5:9", "9:20", "20:9",
+           "1:2", "2:1", "21:9", "5:2"]
+_UA = "Mozilla/5.0 (ComfyUI LLM_Prompt Grok node)"
 
 
 def _png_data_uri(img: Image.Image) -> str:
@@ -24,9 +29,33 @@ def _png_data_uri(img: Image.Image) -> str:
     return "data:image/png;base64," + base64.b64encode(buf.getvalue()).decode("ascii")
 
 
-def _download(url: str, timeout: float) -> bytes:
-    with urllib.request.urlopen(url, timeout=timeout) as r:  # noqa: S310 - url from xAI response
-        return r.read()
+def _download(url: str, key: str, timeout: float) -> bytes:
+    """Fetch an image URL from the response. As grok_imagine_nodes._download_bytes: xAI's CDN
+    403s urllib's default User-Agent, so send a browser-like one; on 401/403 retry once with
+    the Bearer key. Failures raise ProviderError (the generation itself was already billed)."""
+    def attempt(with_auth: bool) -> bytes:
+        r = urllib.request.Request(url, method="GET")
+        r.add_header("User-Agent", _UA)
+        r.add_header("Accept", "*/*")
+        if with_auth and key:
+            r.add_header("Authorization", f"Bearer {key}")
+        with urllib.request.urlopen(r, timeout=timeout) as resp:  # noqa: S310 - url from xAI
+            return resp.read()
+
+    try:
+        try:
+            return attempt(False)
+        except urllib.error.HTTPError as e:
+            if e.code in (401, 403) and key:
+                return attempt(True)
+            raise
+    except urllib.error.HTTPError as e:
+        raise ProviderError(f"xAI image download failed: HTTP {e.code} (the generation was "
+                            f"already billed)", status=e.code) from None
+    except (urllib.error.URLError, OSError) as e:
+        reason = getattr(e, "reason", e)
+        raise ProviderError(f"xAI image download failed: {reason} (the generation was "
+                            f"already billed)") from None
 
 
 def run(req: EditRequest, key: str) -> EditResult:
@@ -46,7 +75,7 @@ def run(req: EditRequest, key: str) -> EditResult:
     res = (req.resolution or "").lower()
     if res in _RESOLUTIONS:
         body["resolution"] = res
-    elif res:
+    elif res and res != "auto":  # auto: omitted silently, it is the API default
         info.append(f"resolution {req.resolution!r} not supported by Grok (1K/1.5K/2K); omitted")
 
     aspect = req.aspect_ratio
@@ -56,15 +85,15 @@ def run(req: EditRequest, key: str) -> EditResult:
         else:
             body["aspect_ratio"] = aspect
 
-    if req.quality in ("low", "medium"):
-        if req.model in _NO_QUALITY_MODELS:
-            info.append(f"quality not sent: {req.model} has no quality field")
-        else:
-            body["quality"] = req.quality
+    quality = req.quality or "auto"
+    if quality in ("low", "medium") and req.model not in _NO_QUALITY_MODELS:
+        body["quality"] = quality
+    elif quality != "auto":
+        why = (f"{req.model} has no quality field" if req.model in _NO_QUALITY_MODELS
+               else "Grok takes low / medium")
+        info.append(f"quality {quality!r} not sent: {why}")
 
-    seed = (req.extra or {}).get("seed")
-    if seed is not None:
-        body["seed"] = int(seed)
+    # No seed: it is never sent (Ruling R8) - the node's seed only re-runs it.
 
     if n_in:
         url = f"{BASE_URL}/images/edits"
@@ -83,11 +112,14 @@ def run(req: EditRequest, key: str) -> EditResult:
         if item.get("b64_json"):
             raw = base64.b64decode(item["b64_json"])
         elif item.get("url"):
-            raw = _download(item["url"], req.timeout)
+            raw = _download(item["url"], key, req.timeout)
         if raw is None:
             continue
-        im = Image.open(io.BytesIO(raw))
-        im.load()
+        try:
+            im = Image.open(io.BytesIO(raw))
+            im.load()
+        except (OSError, ValueError, Image.DecompressionBombError) as e:
+            raise ProviderError(f"xAI returned an image Pillow cannot read: {e}") from None
         images.append(im.convert("RGBA"))
         if item.get("revised_prompt"):
             texts.append(str(item["revised_prompt"]))

@@ -130,6 +130,64 @@ class GeminiTests(unittest.TestCase):
         res, _ = run(req())
         self.assertAlmostEqual(res.cost_usd, 0.067)
 
+    # F2: an unsupported size clamps to the largest supported size <= the request, else the
+    # smallest - never up to the most expensive one.
+    def test_clamp_down_not_up(self):
+        cases = [
+            ("gemini-3.1-flash-image", "1.5K", "1K", 0.067),
+            ("gemini-3-pro-image", "0.5K", "1K", 0.134),
+            ("gemini-3-pro-image", "1.5K", "1K", 0.134),
+            ("gemini-3-pro-image-preview", "4K", "4K", 0.24),
+            ("gemini-3.1-flash-lite-image", "4K", "1K", 0.0336),
+        ]
+        for model, asked, sent, price in cases:
+            with self.subTest(model=model, asked=asked):
+                res, fake = run(req(model=model, resolution=asked))
+                cfg = fake.calls[0][2]["generationConfig"]["imageConfig"]
+                self.assertEqual(cfg["imageSize"], sent)
+                self.assertAlmostEqual(res.cost_usd, price)
+                clamped = [i for i in res.info if "clamped" in i]
+                self.assertEqual(len(clamped), 0 if asked == sent else 1, res.info)
+                if clamped:
+                    self.assertIn(f"clamped to {sent}", clamped[0])
+
+    # F6: with n > 1 a later empty / blocked / failed call keeps the images already paid for.
+    def test_later_blocked_response_keeps_collected_images(self):
+        blocked = {"candidates": [{"finishReason": "IMAGE_SAFETY"}]}
+        res, fake = run(req(n=3, resolution="2K"), ok(), blocked)
+        self.assertEqual(len(fake.calls), 2)
+        self.assertEqual(len(res.images), 1)
+        self.assertAlmostEqual(res.cost_usd, 0.101)
+        self.assertTrue(any(i.startswith("stopped after 1 of 3 image(s)") and "IMAGE_SAFETY" in i
+                            for i in res.info), res.info)
+
+    def test_later_provider_error_keeps_collected_images(self):
+        calls = []
+
+        def fake(url, headers, body, timeout):
+            calls.append(1)
+            if len(calls) == 3:
+                raise ProviderError("HTTP 400: bad", status=400)
+            return ok()
+
+        with mock.patch("luna_imaging.providers.gemini.post_json", fake):
+            res = gemini.run(req(n=4), "KEY")
+        self.assertEqual(len(calls), 3)
+        self.assertEqual(len(res.images), 2)
+        self.assertAlmostEqual(res.cost_usd, 0.067 * 2)
+        self.assertTrue(any("stopped after 2 of 4" in i and "HTTP 400" in i for i in res.info))
+
+    def test_first_call_failure_still_raises(self):
+        def fake(url, headers, body, timeout):
+            raise ProviderError("HTTP 400: bad", status=400)
+
+        with mock.patch("luna_imaging.providers.gemini.post_json", fake):
+            with self.assertRaises(ProviderError):
+                gemini.run(req(n=3), "KEY")
+        blocked = {"promptFeedback": {"blockReason": "OTHER"}}
+        with self.assertRaises(ProviderError):
+            run(req(n=3), blocked)
+
     def test_generate_without_images(self):
         _, fake = run(req(operation="generate", images=[]))
         self.assertEqual(fake.calls[0][2]["contents"][0]["parts"], [{"text": "make it blue"}])

@@ -25,6 +25,9 @@ _SIZES = {
 _DEFAULT_SIZES = ["1K", "2K", "4K"]
 _DEFAULT_PRICE_SIZE = "1K"
 
+# Copied from gemini_image_node.ASPECT_RATIOS (without "auto"): the aspectRatio values the API takes.
+ASPECTS = ["1:1", "2:3", "3:2", "3:4", "4:3", "4:5", "5:4", "9:16", "16:9", "21:9"]
+
 _SAFETY = [{"category": c, "threshold": "BLOCK_NONE"} for c in (
     "HARM_CATEGORY_HARASSMENT",
     "HARM_CATEGORY_HATE_SPEECH",
@@ -39,6 +42,19 @@ def _sizes_for(model: str) -> list[str]:
         if model.startswith(prefix) and len(prefix) > n:
             best, n = sizes, len(prefix)
     return best
+
+
+def _k(size: str) -> float:
+    try:
+        return float(size.upper().rstrip("K"))
+    except ValueError:
+        return 0.0
+
+
+def _clamp_size(size: str, sizes: list[str]) -> str:
+    """The largest supported size <= the request, else the smallest supported one."""
+    below = [s for s in sizes if _k(s) <= _k(size)]
+    return max(below, key=_k) if below else min(sizes, key=_k)
 
 
 def _png_b64(img: Image.Image) -> str:
@@ -96,7 +112,7 @@ def run(req: EditRequest, key: str) -> EditResult:
     if req.resolution and req.resolution != "auto":
         size = req.resolution
         if size not in sizes:
-            fallback = sizes[-1]
+            fallback = _clamp_size(size, sizes)
             info.append(f"{req.model} does not accept {size} - clamped to {fallback}")
             size = fallback
         image_config["imageSize"] = size
@@ -124,12 +140,25 @@ def run(req: EditRequest, key: str) -> EditResult:
 
     result = EditResult(info=info)
     texts_all: list[str] = []
-    for _ in range(max(1, int(req.n))):
-        payload = with_retries(
-            lambda: post_json(url, headers, body, req.timeout), req.max_retries)
+    n = max(1, int(req.n))
+    for _ in range(n):
+        # One image per call. When a later call fails, the images already returned were
+        # billed: keep them and say why the batch stopped. Raise only when nothing came back.
+        try:
+            payload = with_retries(
+                lambda: post_json(url, headers, body, req.timeout), req.max_retries)
+        except ProviderError as e:
+            if not result.images:
+                raise
+            info.append(f"stopped after {len(result.images)} of {n} image(s): {e}")
+            break
         images, texts = _split(payload)
         if not images:
-            raise ProviderError(_reason(payload, texts))
+            if not result.images:
+                raise ProviderError(_reason(payload, texts))
+            info.append(f"stopped after {len(result.images)} of {n} image(s): "
+                        f"{_reason(payload, texts)}")
+            break
         result.images.extend(images)
         texts_all.extend(t.strip() for t in texts if t.strip())
         usage = payload.get("usageMetadata")
