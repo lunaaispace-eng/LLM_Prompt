@@ -50,10 +50,34 @@ PATCH_TYPES = {"star": bool, "note": str, "hidden": bool}
 _ENTRY_DEFAULTS = {"inputs": [], "outputs": [], "star": False, "note": "", "hidden": False}
 _WRITER_DEFAULTS = {"feedback": "", "variants_mode": None}
 
-# Pillow format -> file extension. MPO (phone JPEGs) is JPEG-compatible, so it is stored as .jpg.
-_EXT = {"JPEG": "jpg", "MPO": "jpg", "PNG": "png", "WEBP": "webp", "GIF": "gif", "BMP": "bmp", "TIFF": "tif"}
+# Formats stored as uploaded (Pillow format -> extension); /view and the cloud APIs take these. MPO (phone JPEGs)
+# is JPEG-compatible, so it is kept as .jpg. Any other decodable format is converted to PNG first.
+_KEEP_EXT = {"PNG": "png", "JPEG": "jpg", "MPO": "jpg", "WEBP": "webp"}
+_PNG_MODES = ("1", "L", "LA", "P", "RGB", "RGBA")
 _SLUG_RE = re.compile(r"^[a-z0-9-]{1,%d}$" % SLUG_MAX)
 _HEX_COLOR = re.compile(r"^#[0-9a-fA-F]{6}$")
+# Windows device names: a folder called "nul" or "com1" cannot be created.
+_RESERVED = frozenset({"con", "prn", "aux", "nul", *(f"com{i}" for i in range(1, 10)),
+                       *(f"lpt{i}" for i in range(1, 10))})
+
+# Resize limits (Implementation choice): a plan larger than MAX_PIXELS (100 MP) is refused before any pixel is
+# allocated, and snap is bounded to SNAP_MAX (the card offers at most 64).
+MAX_PIXELS = 100_000_000
+SNAP_MAX = 1024
+
+# One lock per ledger file, shared by every Store instance in the process, so two Store objects on one root
+# never interleave or lose appends.
+_LEDGER_LOCKS: dict[str, threading.Lock] = {}
+_LEDGER_LOCKS_GUARD = threading.Lock()
+
+
+def _ledger_lock(path: Path) -> threading.Lock:
+    key = os.path.normcase(os.path.abspath(path))
+    with _LEDGER_LOCKS_GUARD:
+        lock = _LEDGER_LOCKS.get(key)
+        if lock is None:
+            lock = _LEDGER_LOCKS[key] = threading.Lock()
+        return lock
 
 
 class RefError(ValueError):
@@ -70,11 +94,12 @@ def project_slug(name) -> str:
     """Any project name -> `[a-z0-9-]`, at most 48 characters; "default" when nothing is left."""
     text = unicodedata.normalize("NFKD", str(name or "")).encode("ascii", "ignore").decode("ascii").lower()
     slug = re.sub(r"[^a-z0-9]+", "-", text).strip("-")[:SLUG_MAX].strip("-")
-    return slug or "default"
+    slug = slug or "default"
+    return f"{slug}-project" if slug in _RESERVED else slug
 
 
 def _check_project(project) -> str:
-    if not isinstance(project, str) or not _SLUG_RE.match(project):
+    if not isinstance(project, str) or not _SLUG_RE.match(project) or project in _RESERVED:
         raise RefError(f"bad project name: {project!r}")
     return project
 
@@ -124,8 +149,8 @@ def validate_resize_item(item: dict) -> dict:
     for key in ("max_mp", "longest_side", "scale_factor"):
         _number(item, key)
     snap = item.get("snap")
-    if isinstance(snap, bool) or not isinstance(snap, int) or snap < 0:
-        raise ResizeStateError(f"bad resize state: snap must be a whole number >= 0, got {snap!r}")
+    if isinstance(snap, bool) or not isinstance(snap, int) or not 0 <= snap <= SNAP_MAX:
+        raise ResizeStateError(f"bad resize state: snap must be a whole number 0..{SNAP_MAX}, got {snap!r}")
     if not isinstance(item.get("ratio"), str):
         raise ResizeStateError(f"bad resize state: ratio must be text like 16:9, got {item.get('ratio')!r}")
     if item.get("ratio_action") not in ("crop", "pad"):
@@ -148,6 +173,36 @@ def validate_resize_item(item: dict) -> dict:
     return item
 
 
+def _size_key(item: dict) -> str:
+    """The state field that sets the output size, for naming it in a refusal."""
+    mode = item.get("mode")
+    return mode if mode in ("max_mp", "longest_side", "scale_factor") else ("snap" if item.get("snap") else "ratio")
+
+
+def checked_plan(w: int, h: int, item: dict):
+    """`resize.plan_resize`, refused with a named `ResizeStateError` when the plan cannot be applied: an extreme
+    ratio that crops a side to 0 (or divides by it), any crop / pad / output side < 1, or more than
+    MAX_PIXELS pixels (a pad ignores `allow_upscale`, and a big factor or snap can ask for a giant image)."""
+    try:
+        plan = plan_resize(w, h, item)
+    except (ZeroDivisionError, ValueError, OverflowError):
+        raise ResizeStateError(f"bad resize state: ratio {item.get('ratio')!r} leaves no image") from None
+    sizes = []
+    if plan.crop_box:
+        x0, y0, x1, y1 = plan.crop_box
+        sizes.append(("ratio", (x1 - x0, y1 - y0)))
+    if plan.pad_size:
+        sizes.append(("ratio", tuple(plan.pad_size)))
+    sizes.append((_size_key(item), tuple(plan.out_size)))
+    for key, (sw, sh) in sizes:
+        if sw < 1 or sh < 1:
+            raise ResizeStateError(f"bad resize state: {key} {item.get(key)!r} gives a {sw}x{sh} image")
+        if sw * sh > MAX_PIXELS:
+            raise ResizeStateError(f"bad resize state: {key} {item.get(key)!r} gives a {sw}x{sh} image, "
+                                   f"over the {MAX_PIXELS // 1_000_000} MP limit")
+    return plan
+
+
 def _oriented_size(im: Image.Image) -> tuple[int, int]:
     w, h = im.size
     try:
@@ -167,7 +222,6 @@ class Store:
         self.root = Path(root)
         self.assets_root = Path(assets_root)
         self._clock = clock or (lambda: datetime.now().astimezone())
-        self._lock = threading.Lock()
 
     # ---- ledger
 
@@ -177,7 +231,7 @@ class Store:
     def _append(self, project, record: dict) -> None:
         path = self._ledger(project)
         line = (json.dumps(record, ensure_ascii=False) + "\n").encode("utf-8")
-        with self._lock:
+        with _ledger_lock(path):
             path.parent.mkdir(parents=True, exist_ok=True)
             with open(path, "ab+") as f:
                 f.seek(0, os.SEEK_END)
@@ -225,7 +279,10 @@ class Store:
         full["id"] = uuid.uuid4().hex
         full["ts"] = self._clock().isoformat()
         full["project"] = project
-        full = json.loads(json.dumps(full))   # a detached, JSON-clean copy
+        try:   # a detached, JSON-clean copy; NaN / Infinity would break the browser's JSON.parse
+            full = json.loads(json.dumps(full, allow_nan=False))
+        except (TypeError, ValueError) as exc:
+            raise ValueError(f"history entry is not plain JSON: {exc}") from None
         self._append(project, {"op": "add", "entry": full})
         return full
 
@@ -301,27 +358,52 @@ class Store:
         raise RefError(f"no free file name for {base}.png")
 
     def import_asset(self, project, data: bytes) -> dict:
-        """Store image bytes once per content under `<assets_root>/<project>/<sha256[:16]>.<ext>`."""
+        """Store image bytes once per content under `<assets_root>/<project>/<sha256[:16]>.<ext>`.
+
+        PNG, JPEG and WEBP are stored byte for byte. Any other format Pillow decodes (TIFF, PSD, ICO, PPM, BMP,
+        GIF's first frame...) is converted to PNG first, so `/view` and the cloud APIs can use it; the name is
+        the hash of the stored bytes."""
         _check_project(project)
         if not isinstance(data, (bytes, bytearray)) or not data:
             raise RefError("not an image")
+        data = bytes(data)
         try:
             with Image.open(io.BytesIO(data)) as im:
                 fmt = im.format
                 im.load()
+                if fmt not in _KEEP_EXT:
+                    if im.mode not in _PNG_MODES:
+                        alpha = "A" in im.getbands() or "transparency" in im.info
+                        im = im.convert("RGBA" if alpha else "RGB")
+                    buf = io.BytesIO()
+                    im.save(buf, "PNG")
+                    data = buf.getvalue()
         except Exception:
             raise RefError("not an image") from None
         if not fmt:
             raise RefError("not an image")
-        name = f"{hashlib.sha256(data).hexdigest()[:16]}.{_EXT.get(fmt, fmt.lower())}"
+        name = f"{hashlib.sha256(data).hexdigest()[:16]}.{_KEEP_EXT.get(fmt, 'png')}"
         folder = self.assets_root / project
         folder.mkdir(parents=True, exist_ok=True)
         path = folder / name
-        if not path.exists():
-            tmp = folder / f".{name}.{uuid.uuid4().hex}.tmp"
-            tmp.write_bytes(bytes(data))
+        ref = {"name": name, "subfolder": f"{SUBDIR}/{project}", "type": "input"}
+        if path.exists():
+            return ref
+        tmp = folder / f".{name}.{uuid.uuid4().hex}.tmp"
+        try:
+            tmp.write_bytes(data)
             os.replace(tmp, path)
-        return {"name": name, "subfolder": f"{SUBDIR}/{project}", "type": "input"}
+        except OSError:
+            # The same bytes imported concurrently (or the target held open on Windows): the content-named file
+            # is already there, so the result is the same.
+            if not path.exists():
+                raise
+        finally:
+            try:
+                tmp.unlink()
+            except FileNotFoundError:
+                pass
+        return ref
 
     def resize_asset(self, project, ref: dict, item: dict, dirs: dict, dry_run=False) -> dict:
         """Plan (and unless `dry_run`, apply) one settled resize item on the asset `ref`.
@@ -345,7 +427,7 @@ class Store:
                 size = img.size
         except Exception:
             raise RefError("not an image") from None
-        plan = plan_resize(size[0], size[1], item)
+        plan = checked_plan(size[0], size[1], item)
         out = {
             "in": list(size), "out": list(plan.out_size),
             "crop_box": list(plan.crop_box) if plan.crop_box else None,

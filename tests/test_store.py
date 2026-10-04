@@ -368,6 +368,163 @@ class Resize(StoreBase):
                                     self.dirs)
 
 
+class FixRound1(StoreBase):
+    """A3 review fix round 1."""
+
+    def test_two_stores_many_threads_keep_every_entry(self):
+        import threading
+        stores = [Store(self.store.root, self.store.assets_root) for _ in range(2)]
+        per_thread, threads = 300, 4
+
+        def work(i):
+            s = stores[i % 2]
+            for n in range(per_thread):
+                s.add_history("proj", {"status": "done", "prompt": f"{i}-{n}", "cost_usd": 0.01})
+
+        ts = [threading.Thread(target=work, args=(i,)) for i in range(threads)]
+        for t in ts:
+            t.start()
+        for t in ts:
+            t.join()
+        got = self.store.list_history("proj", limit=None)
+        self.assertEqual(len(got), per_thread * threads)
+        self.assertEqual(len({e["prompt"] for e in got}), per_thread * threads)
+        lines = (self.store.root / "proj" / "history.jsonl").read_bytes().splitlines()
+        self.assertEqual(len(lines), per_thread * threads)
+        for line in lines:
+            json.loads(line)
+
+    def _asset(self, size=(400, 200)):
+        return self.store.import_asset("proj", png_bytes(size))
+
+    def _item(self, **kw):
+        it = dict(DEFAULT_ITEM)
+        it.update(kw)
+        return it
+
+    def test_resize_extreme_plans_refused_named(self):
+        ref = self._asset()
+        cases = [
+            (dict(ratio="1:1000000", mode="max_mp"), "ratio"),
+            (dict(ratio="1:1000000", mode="longest_side"), "ratio"),
+            (dict(ratio="1000000:1"), "ratio"),
+            (dict(ratio="100000:1", ratio_action="pad"), "ratio"),
+            (dict(mode="scale_factor", scale_factor=1000, allow_upscale=True), "scale_factor"),
+            (dict(mode="longest_side", longest_side=10 ** 7, allow_upscale=True), "longest_side"),
+            (dict(mode="max_mp", max_mp=10 ** 6, allow_upscale=True), "max_mp"),
+            (dict(mode="longest_side", longest_side=1e300, allow_upscale=True), "longest_side"),
+        ]
+        folder = self.dirs["input"] / "luna_director" / "proj"
+        before = sorted(folder.iterdir())
+        for kw, field in cases:
+            for dry in (True, False):
+                with self.subTest(kw=kw, dry_run=dry):
+                    with self.assertRaises(ResizeStateError) as cm:
+                        self.store.resize_asset("proj", ref, self._item(**kw), self.dirs, dry_run=dry)
+                    self.assertIn(field, str(cm.exception))
+        self.assertEqual(sorted(folder.iterdir()), before)
+        # Inside the cap still works, upscale included.
+        ok = self.store.resize_asset("proj", ref, self._item(mode="scale_factor", scale_factor=4,
+                                                             allow_upscale=True), self.dirs, dry_run=True)
+        self.assertEqual(ok["out"], [1600, 800])
+
+    def test_snap_is_bounded(self):
+        validate_resize_item(self._item(snap=store_mod.SNAP_MAX))
+        for snap in (store_mod.SNAP_MAX + 1, 10 ** 9):
+            with self.assertRaises(ResizeStateError) as cm:
+                validate_resize_item(self._item(snap=snap))
+            self.assertIn("snap", str(cm.exception))
+        with self.assertRaises(ResizeStateError):
+            self.store.resize_asset("proj", self._asset(), self._item(snap=10 ** 9), self.dirs, dry_run=True)
+
+    def test_add_history_refuses_non_json_values(self):
+        path = self.store.root / "proj" / "history.jsonl"
+        self.add(prompt="kept")
+        size = path.stat().st_size
+        bad = [dict(cost_usd=float("nan")), dict(cost_usd=float("inf")), dict(est_cost_usd=-float("inf")),
+               dict(inputs=[Path("x.png")]), dict(params={"n": object()}),
+               dict(writer={"provider": "Gemini", "thinking": float("nan")})]
+        for kw in bad:
+            with self.subTest(kw=kw):
+                with self.assertRaises(ValueError):
+                    self.add(**kw)
+        self.assertEqual(path.stat().st_size, size)
+        self.assertEqual([e["prompt"] for e in self.store.list_history("proj")], ["kept"])
+
+    def test_windows_reserved_project_names(self):
+        names = ["con", "prn", "aux", "nul"] + [f"com{i}" for i in range(1, 10)] + [f"lpt{i}" for i in range(1, 10)]
+        for name in names:
+            with self.subTest(name=name):
+                with self.assertRaises(RefError):
+                    self.store.add_history(name, {"status": "done"})
+                with self.assertRaises(RefError):
+                    self.store.import_asset(name, png_bytes())
+                for spelled in (name, name.upper(), f" {name.title()} "):
+                    self.assertEqual(project_slug(spelled), f"{name}-project")
+                slug = project_slug(name)
+                self.assertEqual(self.store.add_history(slug, {"status": "done"})["project"], slug)
+        self.assertEqual(project_slug("con-1"), "con-1")
+        self.assertEqual(project_slug("com10"), "com10")
+
+    def _tmp_files(self, folder):
+        return [p.name for p in folder.iterdir() if p.name.endswith(".tmp")] if folder.exists() else []
+
+    def test_import_asset_existing_target_and_replace_race(self):
+        from unittest import mock
+        data = png_bytes(color=(1, 1, 1))
+        ref = self.store.import_asset("proj", data)
+        folder = self.dirs["input"] / "luna_director" / "proj"
+        target = folder / ref["name"]
+        target.unlink()
+        target.write_bytes(data)   # a pre-existing target: no temp file is written at all
+        with mock.patch.object(store_mod.os, "replace", side_effect=AssertionError("must not write")):
+            self.assertEqual(self.store.import_asset("proj", data), ref)
+        target.unlink()
+
+        def racing_replace(src, dst):   # another import wins between the check and the replace
+            Path(dst).write_bytes(data)
+            raise PermissionError("held open")
+
+        with mock.patch.object(store_mod.os, "replace", side_effect=racing_replace):
+            self.assertEqual(self.store.import_asset("proj", data), ref)
+        self.assertEqual(target.read_bytes(), data)
+        self.assertEqual(self._tmp_files(folder), [])
+        target.unlink()
+        with mock.patch.object(store_mod.os, "replace", side_effect=PermissionError("denied")):
+            with self.assertRaises(PermissionError):
+                self.store.import_asset("proj", data)
+        self.assertFalse(target.exists())
+        self.assertEqual(self._tmp_files(folder), [])
+
+    def test_import_asset_converts_other_formats_to_png(self):
+        folder = self.dirs["input"] / "luna_director" / "proj"
+        cases = [("TIFF", "RGB", (10, 20, 30)), ("TIFF", "CMYK", (0, 255, 0, 0)), ("BMP", "RGB", (5, 6, 7)),
+                 ("GIF", "P", 3), ("PPM", "RGB", (9, 8, 7)), ("TIFF", "RGBA", (1, 2, 3, 128)),
+                 ("TIFF", "I;16", 300)]
+        for fmt, mode, color in cases:
+            with self.subTest(fmt=fmt, mode=mode):
+                data = png_bytes((6, 4), color, mode, fmt)
+                ref = self.store.import_asset("proj", data)
+                self.assertRegex(ref["name"], r"^[0-9a-f]{16}\.png$")
+                path = resolve_ref(ref, self.dirs)
+                with Image.open(path) as im:
+                    self.assertEqual((im.format, im.size), ("PNG", (6, 4)))
+                    self.assertIn(im.mode, ("1", "L", "LA", "P", "RGB", "RGBA"))
+                    if mode == "RGB":
+                        self.assertEqual(im.getpixel((0, 0)), color)
+                    if mode == "RGBA":
+                        self.assertEqual(im.mode, "RGBA")
+                import hashlib
+                self.assertEqual(ref["name"][:16], hashlib.sha256(path.read_bytes()).hexdigest()[:16])
+                self.assertEqual(self.store.import_asset("proj", data), ref)   # still de-duplicated
+        self.assertEqual(self._tmp_files(folder), [])
+        for fmt, ext in (("PNG", "png"), ("JPEG", "jpg"), ("WEBP", "webp")):
+            data = png_bytes((5, 5), (40, 50, 60), "RGB", fmt)
+            ref = self.store.import_asset("proj", data)
+            self.assertTrue(ref["name"].endswith("." + ext))
+            self.assertEqual(resolve_ref(ref, self.dirs).read_bytes(), data)   # kept byte for byte
+
+
 class Guard(unittest.TestCase):
     def test_no_comfy_import(self):
         code = (f"import sys; sys.path.insert(0, {ROOT!r}); import luna_director.store; "
