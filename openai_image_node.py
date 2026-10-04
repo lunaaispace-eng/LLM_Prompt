@@ -24,6 +24,26 @@ Everything below was LIVE-VERIFIED on 2026-10-04 (~100 low-quality calls):
     as the fast default and sunburst for precision edits / fine detail.
   - Response: data[].b64_json (never a URL), plus usage with image token counts.
   - No seed parameter exists; the seed widget is only a re-run trigger.
+
+Second, deeper pass (2026-10-04, ~$1.3, scratch FINDINGS openai_img2):
+  - BILLING IS BY TOKENS, not per image: usage reports input text/image tokens
+    and output image (and on 1.x, text) tokens. Output image tokens are
+    deterministic per size x quality and identical for flare and sunburst --
+    1024x1024: low 196, medium 439, high 1756, xhigh 3122, max 7024. At $30/M
+    that is ~$0.006 / $0.013 / $0.053 / $0.094 / $0.211. gpt-image-2 `high` at
+    1024 used 7024 tokens (= 2.5 max), so 2.5 high is ~4x cheaper than it.
+    Reference images bill as input image tokens.
+  - NO reasoning / thinking / mode parameter exists on the Images API: every
+    spelling tried (reasoning_effort, reasoning, thinking, mode, ...) is a 400
+    "Unknown parameter". xhigh / max are just more output tokens and latency
+    (flare max ~49 s, sunburst max ~87 s at 1024).
+  - Reasoning lives only on the Responses API, on the MAINLINE model that calls
+    the image_generation tool (it rewrites the prompt; the rewrite comes back as
+    revised_prompt). Side-by-side on a 7-step text-heavy infographic: no
+    measurable gain in text accuracy -- direct medium spelled every label right
+    too. Higher effort changed the rewritten constraints and sometimes added
+    unrequested scenery, for +600-900 mainline tokens and +10 s. Single samples.
+    So `prompt_rewriter` below is opt-in and OFF by default.
 """
 
 from __future__ import annotations
@@ -67,6 +87,47 @@ BACKGROUNDS = ["auto", "opaque", "transparent"]
 FORMATS = ["png", "webp", "jpeg"]
 MODERATION = ["auto", "low"]
 FIDELITY = ["auto", "low", "high"]
+
+# USD per 1M tokens: (text in, image in, image out). Batch would be 50%.
+# From OpenAI's pricing page, 2026-10-04. Cached-input discounts are not
+# applied (the Images API reports no cached split for these calls).
+RATES = {
+    "gpt-image-2.5": (5.0, 8.0, 30.0),
+    "gpt-image-2": (5.0, 8.0, 30.0),
+    "gpt-image-1.5": (5.0, 8.0, 32.0),
+    "chatgpt-image-latest": (5.0, 8.0, 32.0),
+    "gpt-image-1-mini": (2.0, 2.5, 8.0),
+    "gpt-image-1": (5.0, 10.0, 40.0),
+}
+# Mainline models offered for the Responses-API prompt rewriter.
+REWRITERS = ["off", "gpt-6-sol", "gpt-5.6-sol", "gpt-6-luna", "gpt-5.6-luna"]
+
+
+def _rates_for(model: str):
+    best, n = None, -1
+    for k, v in RATES.items():
+        if model.startswith(k) and len(k) > n:
+            best, n = v, len(k)
+    return best
+
+
+def _cost_line(model: str, usage: dict) -> str:
+    """Image-model cost from `usage`. Output TEXT tokens (1.x only) are shown
+    but not priced: their rate is not on the image pricing table."""
+    rates = _rates_for(model)
+    if not usage or not rates:
+        return "n/a"
+    ind = usage.get("input_tokens_details") or {}
+    outd = usage.get("output_tokens_details") or {}
+    t_in = int(ind.get("text_tokens") or 0)
+    i_in = int(ind.get("image_tokens") or 0)
+    i_out = int(outd.get("image_tokens") or usage.get("output_tokens") or 0)
+    t_out = int(outd.get("text_tokens") or 0)
+    usd = (t_in * rates[0] + i_in * rates[1] + i_out * rates[2]) / 1e6
+    extra = f" (+{t_out} text-out tokens, unpriced)" if t_out else ""
+    return (f"${usd:.4f}  [in {t_in} text + {i_in} image, out {i_out} image tokens]"
+            + extra)
+
 
 _FIXED_SIZES = [(1024, 1024), (1536, 1024), (1024, 1536)]
 _MIN_PIX, _MAX_PIX, _MAX_EDGE = 655_360, 8_294_400, 3840
@@ -320,8 +381,11 @@ class OpenAIImageNode(io.ComfyNode):
                 # ===== GENERATION SETTINGS =====
                 io.Combo.Input(
                     "quality", options=QUALITIES, default="auto",
-                    tooltip="xhigh / max exist on 2.5 only; on other models they are "
-                            "lowered to high with a note."),
+                    tooltip="Billed by output tokens. 2.5 at 1024x1024: low 196 tok "
+                            "~$0.006, medium 439 ~$0.013, high 1756 ~$0.053, xhigh 3122 "
+                            "~$0.094, max 7024 ~$0.21 (~49 s flare / ~87 s sunburst). "
+                            "xhigh / max are 2.5-only and are NOT a reasoning mode - "
+                            "the Images API has none. Lowered to high elsewhere."),
                 io.Combo.Input(
                     "background", options=BACKGROUNDS, default="auto",
                     tooltip="transparent works on every model except gpt-image-2, and "
@@ -336,6 +400,18 @@ class OpenAIImageNode(io.ComfyNode):
                     tooltip="Edit only, and only gpt-image-1 / 1.5 / chatgpt-image-latest "
                             "(the others 400 on it — it is not sent to them)."),
 
+                io.Combo.Input(
+                    "prompt_rewriter", options=REWRITERS, default="off",
+                    tooltip="Opt-in. Routes the call through the Responses API: this "
+                            "mainline model reasons, rewrites the prompt and calls the "
+                            "image model as a tool. The rewrite lands in info. Tested "
+                            "2026-10-04: no gain in text accuracy over a direct call, "
+                            "sometimes adds unrequested detail, costs extra mainline "
+                            "tokens + ~10 s. Mask edits always go direct."),
+                io.Combo.Input(
+                    "rewriter_effort", options=["low", "medium", "high", "xhigh"],
+                    default="low", tooltip="reasoning.effort for the rewriter model."),
+
                 # ===== PLUMBING =====
                 io.Int.Input("width", default=0, min=0, max=32768, optional=True,
                              force_input=True,
@@ -344,8 +420,9 @@ class OpenAIImageNode(io.ComfyNode):
                                      "exactly this size."),
                 io.Int.Input("height", default=0, min=0, max=32768, optional=True,
                              force_input=True, tooltip="See width."),
-                io.Int.Input("timeout", default=300, min=30, max=900, step=10,
-                             tooltip="Complex prompts can take ~2 minutes."),
+                io.Int.Input("timeout", default=600, min=30, max=1800, step=10,
+                             tooltip="max quality took ~87 s on sunburst at 1024; "
+                                     "larger sizes take longer."),
                 io.Int.Input("max_retries", default=2, min=0, max=5,
                              tooltip="Retries on 5xx / network errors. A 400 is not retried."),
             ],
@@ -362,7 +439,8 @@ class OpenAIImageNode(io.ComfyNode):
                 reference_images=None, mask=None, invert_mask=False,
                 quality="auto", background="auto", output_format="png",
                 output_compression=100, moderation="low", input_fidelity="auto",
-                width=0, height=0, timeout=300, max_retries=2) -> io.NodeOutput:
+                prompt_rewriter="off", rewriter_effort="low",
+                width=0, height=0, timeout=600, max_retries=2) -> io.NodeOutput:
         key = _resolve_api_key("OpenAI", "")
         if not key:
             raise RuntimeError(
@@ -414,6 +492,30 @@ class OpenAIImageNode(io.ComfyNode):
                 notes.append("mask ignored - it needs a reference image to apply to")
             payload = {"json_body": params}
 
+        use_rewriter = prompt_rewriter != "off"
+        if use_rewriter and mask is not None:
+            notes.append("prompt_rewriter skipped - mask edits go direct to the Images API")
+            use_rewriter = False
+        if use_rewriter:
+            tool = {"type": "image_generation", "model": model, "quality": quality,
+                    "size": size, "background": background,
+                    "output_format": output_format, "moderation": moderation}
+            if "output_compression" in params:
+                tool["output_compression"] = params["output_compression"]
+            content = [{"type": "input_text", "text": prompt}]
+            for f in refs:
+                content.append({"type": "input_image", "image_url":
+                                "data:image/png;base64," + base64.b64encode(_png_bytes(f)).decode()})
+            if int(batch_count) > 1:
+                notes.append("prompt_rewriter makes one image per call - batch_count ignored")
+            path = "/responses"
+            payload = {"json_body": {
+                "model": prompt_rewriter,
+                "input": [{"role": "user", "content": content}],
+                "tools": [tool], "tool_choice": {"type": "image_generation"},
+                "reasoning": {"effort": rewriter_effort},
+            }}
+
         started = time.time()
         resp, attempt = None, 0
         while True:
@@ -430,7 +532,21 @@ class OpenAIImageNode(io.ComfyNode):
                 time.sleep(wait)
         elapsed = time.time() - started
 
-        decoded = [_decode(d["b64_json"]) for d in (resp.get("data") or []) if d.get("b64_json")]
+        revised = ""
+        if path == "/responses":
+            calls = [o for o in (resp.get("output") or []) if o.get("type") == "image_generation_call"]
+            decoded = [_decode(o["result"]) for o in calls if o.get("result")]
+            revised = " | ".join(o.get("revised_prompt") or "" for o in calls).strip(" |")
+            main_usage = resp.get("usage") or {}
+            usage = ((resp.get("tool_usage") or {}).get("image_gen")) or {}
+            mdet = main_usage.get("output_tokens_details") or {}
+            notes.append(f"rewriter {prompt_rewriter} ({rewriter_effort}): "
+                         f"{main_usage.get('input_tokens', 0)} in / "
+                         f"{main_usage.get('output_tokens', 0)} out tokens "
+                         f"({mdet.get('reasoning_tokens', 0)} reasoning), billed separately")
+        else:
+            decoded = [_decode(d["b64_json"]) for d in (resp.get("data") or []) if d.get("b64_json")]
+            usage = resp.get("usage") or {}
         if not decoded:
             raise RuntimeError(f"No image in the OpenAI response: {json.dumps(resp)[:500]}")
         images = _stack([d[0] for d in decoded])
@@ -440,7 +556,6 @@ class OpenAIImageNode(io.ComfyNode):
             images = _resize_exact(images, int(width), int(height))
             alphas = _resize_exact(alphas, int(width), int(height), mask=True)
 
-        usage = resp.get("usage") or {}
         info = "\n".join([
             f"model      : {model}",
             f"endpoint   : {path}" + (f" ({len(refs)} image(s)"
@@ -450,9 +565,10 @@ class OpenAIImageNode(io.ComfyNode):
             f"settings   : quality={quality} background={background} "
             f"format={output_format} moderation={moderation}",
             f"images     : {images.shape[0]}",
-            f"usage      : {json.dumps(usage)[:300]}",
+            f"cost       : {_cost_line(model, usage)}",
             f"elapsed    : {elapsed:.1f}s",
-        ] + [f"note       : {n}" for n in notes])
+        ] + ([f"revised    : {revised[:1500]}"] if revised else [])
+          + [f"note       : {n}" for n in notes])
         print(f"[GPT Image] {model} {path}: {images.shape[0]} image(s) {size} in {elapsed:.1f}s")
         for n in notes:
             print(f"[GPT Image] note: {n}")

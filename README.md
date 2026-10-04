@@ -44,7 +44,8 @@ support. See [Google's video input documentation](https://ai.google.dev/gemini-a
 | `Grok Image (API Key)` | Direct xAI Grok Imagine text-to-image using your own `XAI_API_KEY`. |
 | `Grok Image Edit (API Key)` | Direct xAI Grok Imagine image edit. |
 | `Grok Video (API Key)` | Direct xAI Grok Imagine text/image-to-video. |
-| `Grok Reference-to-Video (API Key)` | Direct xAI Grok Imagine video generation from reference images. |
+| `Grok Reference-to-Video (API Key)` | Direct xAI Grok Imagine video generation from up to 14 reference images and up to 3 voices. |
+| `Grok Video Frames (API Key)` | Direct xAI Grok Imagine video from a first frame, last frame and/or keyframes. |
 | `Grok Video Edit (API Key)` | Direct xAI Grok Imagine video edit. |
 | `Grok Video Extend (API Key)` | Direct xAI Grok Imagine video extension. |
 
@@ -287,6 +288,20 @@ used. Settings a model cannot take are lowered or dropped with a note in `info`,
 the first image (`invert_mask` flips it). The `alpha` output carries the transparency when
 `background` is `transparent`. There is no seed in the API; `seed` only re-runs the node.
 
+**Billing is by tokens, not per image.** `info` prints the cost computed from the response's
+`usage` (text in $5, image in $8, image out $30 per 1M on 2.5 and gpt-image-2). Output tokens
+are fixed per size and quality — at 1024x1024 on 2.5: low 196 (~$0.006), medium 439 (~$0.013),
+high 1756 (~$0.053), xhigh 3122 (~$0.094), max 7024 (~$0.21). Reference images bill as image
+input tokens. `xhigh` / `max` are 2.5-only and are just more tokens and time, not a reasoning
+mode: the Images API rejects every reasoning/thinking parameter.
+
+**`prompt_rewriter` (opt-in, off by default)** sends the job through the Responses API: a
+mainline model (`gpt-6-sol`, `gpt-5.6-sol`, …) reasons at `rewriter_effort`, rewrites the
+prompt and calls the image model as a tool; the rewrite is shown in `info`. In a side-by-side
+on a text-heavy infographic it gave no measurable gain in text accuracy over a direct call and
+sometimes added unrequested detail, for extra mainline tokens and ~10 s — so it is a prompt
+expander, not a quality switch. Mask edits always go direct.
+
 ## Gemini Omni Video (API Key)
 
 Google's Omni video model through the Interactions API (Omni rejects `generateContent`). Omni
@@ -323,6 +338,7 @@ Available Grok media nodes:
 - `Grok Image Edit (API Key)`
 - `Grok Video (API Key)`
 - `Grok Reference-to-Video (API Key)`
+- `Grok Video Frames (API Key)`
 - `Grok Video Edit (API Key)`
 - `Grok Video Extend (API Key)`
 
@@ -330,11 +346,20 @@ Per-model limits (checked against the live API, 2026-10-04):
 
 | Model | Notes |
 | --- | --- |
-| `grok-imagine-image`, `grok-imagine-image-2.0` | Edit takes up to 5 input images. `quality` is 2.0-only. |
-| `grok-imagine-image-quality` (alias `-pro`) | Edit takes up to 3 input images. |
-| `grok-imagine-video-1.5` | Text/image-to-video up to 1080p; the only model for reference-to-video (max 3 refs, 720p). |
-| `grok-imagine-video-1.5-lite` | Cheaper 1.5 tier: text/image-to-video, 480p–1080p, 1–15 s. No references, edit or extend. |
-| `grok-imagine-video` | The only model xAI accepts for video edit and extend. |
+| `grok-imagine-image` | $0.02. Edit takes up to 5 input images. |
+| `grok-imagine-image-2.0` | Resolution 1K / 1.5K / 2K, `quality` low / medium / auto; $0.04–0.08 by quality × resolution. Edit up to 5 images. |
+| `grok-imagine-image-quality` (alias `-pro`) | Edit up to 3 images. **Retires 2026-11-02**, then served as 2.0 at quality low. |
+| `grok-imagine-video-1.5` | Text/image-to-video up to 1080p ($0.08/s at 480p). Reference-to-video with up to **14** images and up to 3 voices, first/last frame and keyframes — all capped at 720p. |
+| `grok-imagine-video-1.5-lite` | Cheaper 1.5 tier (measured $0.02/s 480p, $0.03/s 720p, $0.14/s 1080p): text/image-to-video only. |
+| `grok-imagine-video` | $0.05/s. The only model xAI accepts for video edit (output ≤ 8.7 s, ≤ 720p) and extend (adds 2–10 s). |
+
+- `Grok Video Frames (API Key)` (1.5): pin a `first_frame`, a `last_frame` (interpolates between
+  the two) and up to 4 keyframes at given times (strictly inside the clip, 1/3 s grid).
+- `Grok Reference-to-Video`: `voice_1..3` pick from xAI's 26 preset voices (or
+  `custom_voice_ids`), referenced in the prompt as `<AUDIO_0>`…; images are `<IMAGE_0>`…; an
+  optional `first_frame` is pinned as `<IMAGE_0>`.
+- Video nodes have `generate_audio` (off strips the audio track). The console prints each job's
+  cost from xAI's `cost_in_usd_ticks`. `seed` is not an xAI field; it only re-runs the node.
 
 ## Prompt Presets
 

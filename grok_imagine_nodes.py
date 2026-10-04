@@ -60,14 +60,35 @@ _VIDEO_MODELS = ["grok-imagine-video-1.5", "grok-imagine-video-1.5-lite", "grok-
 _VIDEO_EDIT_MODELS = ["grok-imagine-video"]
 _VIDEO_RES = ["480p", "720p", "1080p"]
 
+# Full docs crawl + live probes, 2026-10-04 (scratch FINDINGS, ~$1.35):
+#  - reference_images: up to 14 on 1.5 (8 accepted, 40 -> "Maximum allowed is 14").
+#  - reference_audios: <= 3 {voice_id}, 1.5 only; tag them <AUDIO_n> in the prompt.
+#    Caller-supplied audio URLs are partner-only (403). Custom voice ids work too.
+#  - last_frame and keyframes (<= 4 {image, timestamp_s}, strictly inside the clip,
+#    1/3 s grid): 1.5 only; any reference / last_frame / keyframes request at 1080p
+#    is a 400. An `image` sent WITH any of those is the pinned first frame <IMAGE_0>.
+#  - generate_audio=false strips the audio track (ffprobe-checked, 1.5 and lite).
+#  - video edit/extend: classic model only; extend duration 2-10 (default 6).
+#  - poll statuses: pending | done | failed | expired; done can carry an empty url
+#    when moderation withheld it (video.respect_moderation=false).
+#  - aspect_ratio "auto" is a 422 on video — send null / omit.
+#  - seed is not an API field (silently ignored); it stays as a re-run trigger.
+#  - cost: usage.cost_in_usd_ticks on image responses and video polls, 1e10 = $1.
+_MAX_REFS = 14
+_VOICES = ["ara", "eve", "leo", "rex", "sal", "carina", "zagan", "helix", "orion", "luna",
+           "iris", "altair", "zenith", "perseus", "helios", "lux", "kepler", "rigel", "cosmo",
+           "celeste", "ursa", "sirius", "lumen", "castor", "naksh", "atlas"]
+_VOICE_OPTS = ["none"] + _VOICES
+
 
 def _check_video_resolution(model: str, resolution: str, mode: str = "") -> str:
     """Reject resolutions the chosen video model can't do, with a clear message."""
     if resolution == "1080p":
         if not model.startswith("grok-imagine-video-1.5"):
             raise ValueError("1080p requires grok-imagine-video-1.5 or -1.5-lite.")
-        if mode == "reference":
-            raise ValueError("Reference-to-video is capped at 720p by xAI.")
+        if mode in ("reference", "frames"):
+            raise ValueError("Reference / last_frame / keyframes requests are capped at "
+                             "720p by xAI (1080p is text- and image-to-video only).")
     return resolution
 
 
@@ -216,6 +237,7 @@ def _images_from_response(payload: dict, key: str) -> torch.Tensor:
             frames.append(_bytes_to_image_tensor(_download_bytes(item["url"], key)))
     if not frames:
         raise RuntimeError("xAI response contained no usable image url/b64.")
+    print(f"[Grok Imagine] {len(frames)} image(s), cost {_cost_str(payload)}")
     return torch.cat(frames, dim=0)
 
 
@@ -232,18 +254,35 @@ def _video_to_data_uri(video) -> str:
     return f"data:video/mp4;base64,{b64}"
 
 
+def _cost_str(payload: dict) -> str:
+    ticks = ((payload or {}).get("usage") or {}).get("cost_in_usd_ticks")
+    return f"${ticks / 1e10:.4f}" if isinstance(ticks, (int, float)) else "n/a"
+
+
 def _poll_video(request_id: str, key: str, poll_timeout: float, max_wait: float = 1800.0):
-    """Poll GET /videos/{id} until a video URL is returned. Returns the video url."""
-    terminal_fail = {"failed", "error", "canceled", "cancelled"}
+    """Poll GET /videos/{id} until done. Returns the video url.
+
+    Terminal states per xAI: done | failed | expired. A `done` with no url means
+    moderation withheld the clip — that is terminal too, not a reason to keep
+    polling (the old loop spun for 30 min on both `expired` and that case).
+    """
     start = time.time()
     while True:
         status = _get(f"/videos/{request_id}", key, timeout=poll_timeout)
         video = status.get("video") or {}
         st = (status.get("status") or "").lower()
+        err = status.get("error") or {}
         if video.get("url"):
+            print(f"[Grok Imagine] video {request_id[:12]} done, "
+                  f"{video.get('duration', '?')} s, cost {_cost_str(status)}")
             return video["url"]
-        if st in terminal_fail:
-            raise RuntimeError(f"xAI video job {request_id} failed (status={st}).")
+        if st == "done":
+            raise RuntimeError(f"xAI video job {request_id} finished without a video "
+                               "(withheld by moderation"
+                               + (f": {err.get('message')}" if err.get("message") else "") + ").")
+        if st in ("failed", "error", "expired", "canceled", "cancelled"):
+            raise RuntimeError(f"xAI video job {request_id} {st}"
+                               + (f" [{err.get('code')}]: {err.get('message')}" if err else "."))
         if time.time() - start > max_wait:
             raise RuntimeError(f"xAI video job {request_id} timed out after {max_wait:.0f}s (last status={st or 'unknown'}).")
         time.sleep(5.0)
@@ -303,10 +342,16 @@ class GrokImageAPINode:
         return {"required": {
             "model": (_IMAGE_MODELS,),
             "prompt": _PROMPT,
-            "aspect_ratio": (_IMAGE_AR,),
+            "aspect_ratio": (_IMAGE_AR + ["auto"], {
+                "tooltip": "'auto' (the API default) lets the model pick."}),
             "number_of_images": ("INT", {"default": 1, "min": 1, "max": 10}),
-            "resolution": (["1K", "2K"],),
-            "quality": (["default", "low", "medium"],),
+            "resolution": (["1K", "1.5K", "2K"], {
+                "tooltip": "1.5K added with Image 2.0 (Aug 2026). 2.0 price by quality "
+                           "x resolution: low $0.04/0.05/0.06, medium $0.06/0.07/0.08."}),
+            "quality": (["default", "low", "medium", "auto"], {
+                "tooltip": "'default' sends nothing (= auto). -quality/-pro do not take it. "
+                           "Note: -quality and -pro retire 2026-11-02 and are then served "
+                           "as 2.0 at quality=low."}),
             "seed": _SEED,
             "timeout_seconds": ("INT", {"default": 120, "min": 10, "max": 600}),
         }, "optional": {
@@ -326,11 +371,15 @@ class GrokImageAPINode:
             "n": int(number_of_images), "seed": int(seed),
             "response_format": "b64_json", "resolution": resolution.lower(),
         }
-        # `quality` is a grok-imagine-image-2.0-only field; older models 400 on it.
+        # `quality`: documented for 2.0; grok-imagine-image also accepted it live
+        # (2026-10-04). Not sent to -quality / -pro.
         if quality != "default":
-            if model != "grok-imagine-image-2.0":
-                raise ValueError("quality is only supported by grok-imagine-image-2.0.")
-            body["quality"] = quality
+            if model in ("grok-imagine-image-quality", "grok-imagine-image-pro"):
+                print(f"[Grok Imagine] quality not sent - {model} has no quality field")
+            else:
+                body["quality"] = quality
+        if aspect_ratio == "auto":
+            body.pop("aspect_ratio")
         resp = _post("/images/generations", key, body, timeout=float(timeout_seconds))
         images = _images_from_response(resp, key)
         if width and height and width > 0 and height > 0:
@@ -349,7 +398,7 @@ class GrokImageEditAPINode:
             "model": (_IMAGE_MODELS,),
             "image": ("IMAGE",),
             "prompt": _PROMPT,
-            "resolution": (["1K", "2K"],),
+            "resolution": (["1K", "1.5K", "2K"],),
             "number_of_images": ("INT", {"default": 1, "min": 1, "max": 10}),
             "aspect_ratio": (["auto"] + _IMAGE_AR,),
             "seed": _SEED,
@@ -392,6 +441,19 @@ class GrokImageEditAPINode:
         return (images,)
 
 
+_GEN_AUDIO = ("BOOLEAN", {"default": True,
+                          "tooltip": "Off strips the audio track (live-checked on 1.5 and lite)."})
+_PROMPT_OPT = ("STRING", {"multiline": True, "default": "",
+                          "tooltip": "Text prompt. Optional when an image, reference or frame "
+                                     "is connected. Refer to inputs as <IMAGE_0>, <IMAGE_1>... "
+                                     "and voices as <AUDIO_0>..."})
+
+
+def _video_ar(aspect_ratio: str):
+    # The string "auto" is a 422 on video; null lets the model choose.
+    return None if aspect_ratio == "auto" else aspect_ratio
+
+
 class GrokVideoAPINode:
     CATEGORY = "Luna/Grok"
     RETURN_TYPES = ("VIDEO",)
@@ -400,36 +462,50 @@ class GrokVideoAPINode:
     @classmethod
     def INPUT_TYPES(cls):
         return {"required": {
-            "model": (_VIDEO_MODELS,),
-            "prompt": _PROMPT,
+            "model": (_VIDEO_MODELS, {"tooltip": "1.5 $0.08/s at 480p (~$0.25/s at 1080p); "
+                                                 "1.5-lite ~$0.02/s 480p, $0.03/s 720p, "
+                                                 "$0.14/s 1080p (measured); classic $0.05/s."}),
+            "prompt": _PROMPT_OPT,
             "resolution": (_VIDEO_RES,),
             "aspect_ratio": (_VIDEO_AR,),
             "duration": ("INT", {"default": 6, "min": 1, "max": 15}),
             "seed": _SEED,
             "timeout_seconds": ("INT", {"default": 120, "min": 10, "max": 600}),
+            # appended last so saved workflows keep their widget positions
+            "generate_audio": _GEN_AUDIO,
         }, "optional": {"image": ("IMAGE",), "width": _WIDTH_IN, "height": _HEIGHT_IN}}
 
     def generate(self, model, prompt, resolution, aspect_ratio, duration, seed,
-                 timeout_seconds, image=None, width=0, height=0):
-        if not prompt.strip():
-            raise ValueError("Prompt is required.")
+                 timeout_seconds, generate_audio=True, image=None, width=0, height=0):
+        if not prompt.strip() and image is None:
+            raise ValueError("Prompt is required for text-to-video.")
         if width and height and width > 0 and height > 0:
-            aspect_ratio = _nearest_ar(int(width), int(height), _VIDEO_AR)
+            aspect_ratio = _nearest_ar(int(width), int(height), _VIDEO_AR[1:])
         _check_video_resolution(model, resolution)
         key = _resolve_xai_key()
         body = {
-            "model": model, "prompt": prompt, "resolution": resolution,
-            "duration": int(duration), "seed": int(seed),
-            "aspect_ratio": None if aspect_ratio == "auto" else aspect_ratio,
+            "model": model, "resolution": resolution,
+            "duration": int(duration), "aspect_ratio": _video_ar(aspect_ratio),
+            "generate_audio": bool(generate_audio),
         }
+        if prompt.strip():
+            body["prompt"] = prompt
         if image is not None:
             frames = list(_iter_images(image))
             if len(frames) != 1:
-                raise ValueError("Only one input image is supported.")
+                raise ValueError("Only one input image is supported (use Reference-to-Video for more).")
             body["image"] = {"url": _tensor_to_data_uri(frames[0])}
         init = _post("/videos/generations", key, body, timeout=float(timeout_seconds))
         url = _poll_video(init["request_id"], key, poll_timeout=float(timeout_seconds))
         return (_video_output(url, key),)
+
+
+def _voice_refs(voice_1, voice_2, voice_3, custom_voice_ids) -> list:
+    ids = [v for v in (voice_1, voice_2, voice_3) if v and v != "none"]
+    ids += [v.strip() for v in (custom_voice_ids or "").split(",") if v.strip()]
+    if len(ids) > 3:
+        raise ValueError(f"xAI takes at most 3 voices per request (got {len(ids)}).")
+    return [{"voice_id": v} for v in ids]
 
 
 class GrokVideoReferenceAPINode:
@@ -440,41 +516,137 @@ class GrokVideoReferenceAPINode:
     @classmethod
     def INPUT_TYPES(cls):
         return {"required": {
-            "model": (_VIDEO_MODELS,),
-            "prompt": _PROMPT,
-            "reference_images": ("IMAGE",),
-            "resolution": (["480p", "720p"],),  # xAI caps reference-to-video at 720p
-            "aspect_ratio": (_VIDEO_AR[1:],),  # no "auto"
-            "duration": ("INT", {"default": 6, "min": 2, "max": 15}),
+            "model": (["grok-imagine-video-1.5"], {
+                "tooltip": "Only 1.5 does reference-to-video; lite and classic are rejected."}),
+            "prompt": _PROMPT_OPT,
+            "resolution": (["480p", "720p"],),  # any reference request at 1080p is a 400
+            "aspect_ratio": (_VIDEO_AR,),
+            "duration": ("INT", {"default": 6, "min": 1, "max": 15}),
             "seed": _SEED,
             "timeout_seconds": ("INT", {"default": 120, "min": 10, "max": 600}),
+            # appended last so saved workflows keep their widget positions
+            "generate_audio": _GEN_AUDIO,
+            "voice_1": (_VOICE_OPTS, {"tooltip": "Preset voice, referenced as <AUDIO_0>."}),
+            "voice_2": (_VOICE_OPTS,),
+            "voice_3": (_VOICE_OPTS,),
         }, "optional": {
+            "reference_images": ("IMAGE", {"tooltip": "Up to 14 (live-verified), as <IMAGE_n>. "
+                                                      "A batch is expanded in order. Each extra "
+                                                      "image adds ~$0.01."}),
+            "first_frame": ("IMAGE", {"tooltip": "Optional pinned first frame; it becomes "
+                                                 "<IMAGE_0> and the references follow it."}),
+            "custom_voice_ids": ("STRING", {"default": "", "tooltip":
+                                 "Comma-separated custom voice ids (from /v1/custom-voices). "
+                                 "Counted with the presets; 3 total."}),
             "width": _WIDTH_IN,
             "height": _HEIGHT_IN,
         }}
 
-    def generate(self, model, prompt, reference_images, resolution, aspect_ratio, duration,
-                 seed, timeout_seconds, width=0, height=0):
-        if not prompt.strip():
-            raise ValueError("Prompt is required.")
+    def generate(self, model, prompt, resolution, aspect_ratio, duration, seed,
+                 timeout_seconds, generate_audio=True, voice_1="none", voice_2="none",
+                 voice_3="none", reference_images=None, first_frame=None,
+                 custom_voice_ids="", width=0, height=0):
         if width and height and width > 0 and height > 0:
             aspect_ratio = _nearest_ar(int(width), int(height), _VIDEO_AR[1:])
         _check_video_resolution(model, resolution, mode="reference")
-        # Only grok-imagine-video-1.5 does reference-to-video (1.5-lite is
-        # rejected by xAI), and it takes at most 3 reference images.
-        if model != "grok-imagine-video-1.5":
-            raise ValueError("Reference-to-video requires grok-imagine-video-1.5 "
-                             "(1.5-lite and the classic model are rejected by xAI).")
-        frames = list(_iter_images(reference_images))[:3]
-        if not frames:
-            raise ValueError("At least one reference image is required.")
+        frames = list(_iter_images(reference_images)) if reference_images is not None else []
+        if len(frames) > _MAX_REFS:
+            raise ValueError(f"xAI takes at most {_MAX_REFS} reference images (got {len(frames)}).")
+        voices = _voice_refs(voice_1, voice_2, voice_3, custom_voice_ids)
+        if not frames and not voices:
+            raise ValueError("Connect at least one reference image or pick a voice.")
         key = _resolve_xai_key()
-        init = _post("/videos/generations", key, {
-            "model": model, "prompt": prompt,
-            "reference_images": [{"url": _tensor_to_data_uri(f)} for f in frames],
-            "resolution": resolution, "duration": int(duration),
-            "aspect_ratio": aspect_ratio, "seed": int(seed),
-        }, timeout=float(timeout_seconds))
+        body = {
+            "model": model, "resolution": resolution, "duration": int(duration),
+            "aspect_ratio": _video_ar(aspect_ratio), "generate_audio": bool(generate_audio),
+        }
+        if prompt.strip():
+            body["prompt"] = prompt
+        if frames:
+            body["reference_images"] = [{"url": _tensor_to_data_uri(f)} for f in frames]
+        if voices:
+            body["reference_audios"] = voices
+        if first_frame is not None:
+            body["image"] = {"url": _tensor_to_data_uri(next(_iter_images(first_frame)))}
+        init = _post("/videos/generations", key, body, timeout=float(timeout_seconds))
+        url = _poll_video(init["request_id"], key, poll_timeout=float(timeout_seconds))
+        return (_video_output(url, key),)
+
+
+class GrokVideoFramesAPINode:
+    """First frame / last frame / keyframes -> video (grok-imagine-video-1.5)."""
+    CATEGORY = "Luna/Grok"
+    RETURN_TYPES = ("VIDEO",)
+    FUNCTION = "generate"
+
+    @classmethod
+    def INPUT_TYPES(cls):
+        kf = {}
+        for i in range(1, 5):
+            kf[f"keyframe_{i}"] = ("IMAGE", {"tooltip": f"Keyframe {i}, placed at keyframe_{i}_time."})
+            kf[f"keyframe_{i}_time"] = ("FLOAT", {"default": float(i), "min": 0.0, "max": 15.0,
+                                                  "step": 0.333, "tooltip":
+                                                  "Seconds. Must be strictly inside the clip; "
+                                                  "snapped to the 1/3 s grid xAI uses."})
+        return {"required": {
+            "model": (["grok-imagine-video-1.5"], {"tooltip": "1.5 only - lite and classic reject "
+                                                              "last_frame and keyframes."}),
+            "prompt": _PROMPT_OPT,
+            "resolution": (["480p", "720p"],),  # 1080p is a 400 with frames
+            "aspect_ratio": (_VIDEO_AR,),
+            "duration": ("INT", {"default": 6, "min": 1, "max": 15}),
+            "generate_audio": _GEN_AUDIO,
+            "seed": _SEED,
+            "timeout_seconds": ("INT", {"default": 120, "min": 10, "max": 600}),
+        }, "optional": {
+            "first_frame": ("IMAGE", {"tooltip": "Pinned first frame. With last_frame the clip "
+                                                 "interpolates between the two."}),
+            "last_frame": ("IMAGE", {"tooltip": "Pinned final frame. Can be used alone."}),
+            **kf,
+            "reference_images": ("IMAGE", {"tooltip": "Optional extra references (up to 14)."}),
+            "width": _WIDTH_IN,
+            "height": _HEIGHT_IN,
+        }}
+
+    def generate(self, model, prompt, resolution, aspect_ratio, duration, seed,
+                 timeout_seconds, generate_audio=True, first_frame=None, last_frame=None,
+                 reference_images=None, width=0, height=0, **kw):
+        if width and height and width > 0 and height > 0:
+            aspect_ratio = _nearest_ar(int(width), int(height), _VIDEO_AR[1:])
+        _check_video_resolution(model, resolution, mode="frames")
+        dur = int(duration)
+        keyframes = []
+        for i in range(1, 5):
+            img = kw.get(f"keyframe_{i}")
+            if img is None:
+                continue
+            t = round(float(kw.get(f"keyframe_{i}_time", i)) * 3) / 3.0
+            if not 0.0 < t < dur:
+                raise ValueError(f"keyframe_{i}_time {t:.2f}s must be strictly inside the "
+                                 f"{dur}s clip.")
+            keyframes.append({"image": {"url": _tensor_to_data_uri(next(_iter_images(img)))},
+                              "timestamp_s": round(t, 3)})
+        if first_frame is None and last_frame is None and not keyframes:
+            raise ValueError("Connect a first_frame, a last_frame or at least one keyframe.")
+        key = _resolve_xai_key()
+        body = {
+            "model": model, "resolution": resolution, "duration": dur,
+            "aspect_ratio": _video_ar(aspect_ratio), "generate_audio": bool(generate_audio),
+        }
+        if prompt.strip():
+            body["prompt"] = prompt
+        if first_frame is not None:
+            body["image"] = {"url": _tensor_to_data_uri(next(_iter_images(first_frame)))}
+        if last_frame is not None:
+            body["last_frame"] = {"url": _tensor_to_data_uri(next(_iter_images(last_frame)))}
+        if keyframes:
+            body["keyframes"] = sorted(keyframes, key=lambda k: k["timestamp_s"])
+        if reference_images is not None:
+            refs = list(_iter_images(reference_images))
+            if len(refs) > _MAX_REFS:
+                raise ValueError(f"xAI takes at most {_MAX_REFS} reference images.")
+            body["reference_images"] = [{"url": _tensor_to_data_uri(f)} for f in refs]
+        init = _post("/videos/generations", key, body, timeout=float(timeout_seconds))
         url = _poll_video(init["request_id"], key, poll_timeout=float(timeout_seconds))
         return (_video_output(url, key),)
 
@@ -487,9 +659,10 @@ class GrokVideoEditAPINode:
     @classmethod
     def INPUT_TYPES(cls):
         return {"required": {
-            "model": (_VIDEO_EDIT_MODELS,),
+            "model": (_VIDEO_EDIT_MODELS, {"tooltip": "Only the classic model accepts edits."}),
             "prompt": _PROMPT,
-            "video": ("VIDEO",),
+            "video": ("VIDEO", {"tooltip": "mp4. Output keeps its duration (capped at 8.7 s) "
+                                           "and aspect ratio, at most 720p."}),
             "seed": _SEED,
             "timeout_seconds": ("INT", {"default": 120, "min": 10, "max": 600}),
         }}
@@ -500,7 +673,7 @@ class GrokVideoEditAPINode:
         key = _resolve_xai_key()
         init = _post("/videos/edits", key, {
             "model": model, "prompt": prompt,
-            "video": {"url": _video_to_data_uri(video)}, "seed": int(seed),
+            "video": {"url": _video_to_data_uri(video)},
         }, timeout=float(timeout_seconds))
         url = _poll_video(init["request_id"], key, poll_timeout=float(timeout_seconds))
         return (_video_output(url, key),)
@@ -514,10 +687,14 @@ class GrokVideoExtendAPINode:
     @classmethod
     def INPUT_TYPES(cls):
         return {"required": {
-            "model": (_VIDEO_EDIT_MODELS,),
+            "model": (_VIDEO_EDIT_MODELS, {"tooltip": "Only the classic model accepts extensions."}),
             "prompt": _PROMPT,
             "video": ("VIDEO",),
-            "duration": ("INT", {"default": 8, "min": 2, "max": 15}),
+            # Live: 2-10 ("Duration must be between 2 and 10 seconds"), and it is
+            # the length ADDED, not the total. The old 2-15 / default 8 failed
+            # asynchronously above 10.
+            "duration": ("INT", {"default": 6, "min": 2, "max": 10,
+                                 "tooltip": "Seconds to ADD (2-10)."}),
             "seed": _SEED,
             "timeout_seconds": ("INT", {"default": 120, "min": 10, "max": 600}),
         }}
@@ -528,7 +705,8 @@ class GrokVideoExtendAPINode:
         key = _resolve_xai_key()
         init = _post("/videos/extensions", key, {
             "model": model, "prompt": prompt,
-            "video": {"url": _video_to_data_uri(video)}, "duration": int(duration),
+            "video": {"url": _video_to_data_uri(video)},
+            "duration": max(2, min(10, int(duration))),
         }, timeout=float(timeout_seconds))
         url = _poll_video(init["request_id"], key, poll_timeout=float(timeout_seconds))
         return (_video_output(url, key),)
@@ -539,6 +717,7 @@ NODE_CLASS_MAPPINGS = {
     "GrokImageEditAPINode": GrokImageEditAPINode,
     "GrokVideoAPINode": GrokVideoAPINode,
     "GrokVideoReferenceAPINode": GrokVideoReferenceAPINode,
+    "GrokVideoFramesAPINode": GrokVideoFramesAPINode,
     "GrokVideoEditAPINode": GrokVideoEditAPINode,
     "GrokVideoExtendAPINode": GrokVideoExtendAPINode,
 }
@@ -548,6 +727,7 @@ NODE_DISPLAY_NAME_MAPPINGS = {
     "GrokImageEditAPINode": "Grok Image Edit (API Key)",
     "GrokVideoAPINode": "Grok Video (API Key)",
     "GrokVideoReferenceAPINode": "Grok Reference-to-Video (API Key)",
+    "GrokVideoFramesAPINode": "Grok Video Frames (API Key)",
     "GrokVideoEditAPINode": "Grok Video Edit (API Key)",
     "GrokVideoExtendAPINode": "Grok Video Extend (API Key)",
 }
