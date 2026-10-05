@@ -5,7 +5,7 @@ import { ORIGINAL, chainDepth } from "../core/history.mjs";
 import {
   USE_IN_GRAPH_REASON, NO_ORIGINAL_REASON, historyEntries, stripRows, versionLabel,
   showRestart, restartHint, restartPatch, editHerePatch, applyRerun, historyPatch, statusLabel,
-  entryThumb, detailFields, resolvePair, mountCompare,
+  isBilledEntry, entryThumb, detailFields, resolvePair, mountCompare,
 } from "./compare.mjs";
 
 export {
@@ -136,7 +136,9 @@ export function mountHistory(root, store, client) {
       list.append(el("dt", { text: item.label }), el("dd", { text: item.value }));
     }
     const head = [el("p", { class: "ld-history-kicker", text: versionLabel(state.history, entry) })];
-    if (entry.status === "cancelled") head.push(el("p", { class: "ld-history-cancelled", text: statusLabel(entry) }));
+    if (entry.status === "cancelled" || isBilledEntry(entry)) {
+      head.push(el("p", { class: "ld-history-cancelled", text: statusLabel(entry) }));
+    }
     details.append(
       ...head, list,
       el("label", { class: "ld-field" }, [el("span", { text: "prompt" }), promptBox]),
@@ -186,7 +188,8 @@ export function mountHistory(root, store, client) {
       }, [
         button,
         el("span", { class: "ld-hlabel", text: row.label }),
-        row.entry?.status === "cancelled" ? el("span", { class: "ld-hstatus", text: statusLabel(row.entry) }) : null,
+        row.entry?.status === "cancelled" || isBilledEntry(row.entry)
+          ? el("span", { class: "ld-hstatus", text: statusLabel(row.entry) }) : null,
         el("span", { class: "ld-hpicks" }, [pick("a"), pick("b")]),
       ]);
     }));

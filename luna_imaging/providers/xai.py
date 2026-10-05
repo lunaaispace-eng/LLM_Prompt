@@ -57,11 +57,11 @@ def _download(url: str, key: str, timeout: float) -> bytes:
             raise
     except urllib.error.HTTPError as e:
         raise ProviderError(f"xAI image download failed: HTTP {e.code} (the generation was "
-                            f"already billed)", status=e.code) from None
+                            f"already billed)", status=e.code, billed=True) from None
     except (urllib.error.URLError, OSError) as e:
         reason = getattr(e, "reason", e)
         raise ProviderError(f"xAI image download failed: {reason} (the generation was "
-                            f"already billed)") from None
+                            f"already billed)", billed=True) from None
 
 
 def run(req: EditRequest, key: str) -> EditResult:

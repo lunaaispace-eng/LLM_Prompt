@@ -1,9 +1,16 @@
 import { el, ensureCss } from "./dom.mjs";
 import { createQueue, ACTIVE } from "../core/queue.mjs";
 import { batchSummary } from "../core/generate.mjs";
+import { billedCostLabel, isBilledEntry } from "./compare.mjs";
 import { installQueueActions } from "./run_queue.mjs";
 export { runCurrent, cancelJob, cancelBatch, refreshDayCost, installQueueActions } from "./run_queue.mjs";
 const money = (n, fallback = "—") => Number.isFinite(n) ? `$${n.toFixed(2)}` : fallback;
+export function queueFailureText(job) {
+  if (job?.error?.code === "billed" || isBilledEntry(job?.entry)) {
+    return billedCostLabel(job.actual ?? job.entry?.cost_usd);
+  }
+  return job?.error ? `${job.error.code}: ${job.error.message}` : "";
+}
 export function elapsedLabel(job, now = Date.now()) {
   if (!Number.isFinite(job.startedAt)) return "";
   const seconds = Math.max(0, Math.floor(((job.finishedAt ?? now) - job.startedAt) / 1000));
@@ -67,7 +74,8 @@ export function mountQueue(root, store, client) {
     } else if (job.cancelledAfterSend) {
       state.append(el("small", { text: "Cancel requested; the provider still bills a call already sent." }));
     }
-    if (job.error) state.append(el("small", { class: "ld-queue-error", text: `${job.error.code}: ${job.error.message}` }));
+    const failureText = queueFailureText(job);
+    if (failureText) state.append(el("small", { class: "ld-queue-error", text: failureText }));
     const action = running || job.state === "queued" ? el("button", { type: "button", class: "ld-btn", text: "Cancel", onclick: () => { void cancel(job); } }) : "";
     return el("div", { class: `ld-queue-row${child ? " ld-queue-child" : ""}` }, [name, state,
       money(job.est_cost_usd, "after run"), money(job.actual ?? job.entry?.cost_usd), action]);

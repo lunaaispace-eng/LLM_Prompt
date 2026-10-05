@@ -377,6 +377,8 @@ def _named(exc: BaseException) -> tuple[str, str]:
     if isinstance(exc, ValueError):
         return "refused", str(exc)
     if isinstance(exc, ProviderError):
+        if exc.billed:
+            return "billed", str(exc)
         return ("timeout" if "timed out" in str(exc).lower() else "provider"), str(exc)
     if isinstance(exc, TimeoutError):
         return "timeout", str(exc) or "timed out"
@@ -568,7 +570,10 @@ class JobRunner:
             else:
                 message = self._scrub(failure.message)
                 error = {"code": failure.code, "message": message}
-                entry = self._record_error(job, message, seconds)
+                # A billed failure keeps the estimate as its cost. The ledger stores the code on the
+                # existing `error` field so history can say so after a reload; other errors stay a string.
+                cost = job.est if failure.code == "billed" else None
+                entry = self._record_error(job, error if failure.code == "billed" else message, seconds, cost)
                 status = "error"
         except Exception:
             # Scrubbing and recording may themselves fail. Do not expose that exception's text:
@@ -646,7 +651,7 @@ class JobRunner:
                             est_cost_usd=job.est, seconds=seconds, mode=mode_from_info(result.info), error=None)
         return self._add(job, entry, {"status": status, "outputs": outputs, "cost_usd": result.cost_usd})
 
-    def _record_error(self, job: _Job, message: str, seconds: float) -> dict | None:
-        entry = build_entry(job.spec, status="error", outputs=[], cost_usd=None, est_cost_usd=job.est,
-                            seconds=seconds, mode=None, error=message)
-        return self._add(job, entry, {"status": "error", "outputs": [], "cost_usd": None})
+    def _record_error(self, job: _Job, error, seconds: float, cost_usd=None) -> dict | None:
+        entry = build_entry(job.spec, status="error", outputs=[], cost_usd=cost_usd, est_cost_usd=job.est,
+                            seconds=seconds, mode=None, error=error)
+        return self._add(job, entry, {"status": "error", "outputs": [], "cost_usd": cost_usd})

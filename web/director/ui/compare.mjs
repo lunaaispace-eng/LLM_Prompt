@@ -148,8 +148,18 @@ export function money(n) {
   return n == null || n === "" || !Number.isFinite(x) ? null : "$" + x.toFixed(2);
 }
 
+export function isBilledEntry(entry) {
+  return !!(entry && entry.error && typeof entry.error === "object" && entry.error.code === "billed");
+}
+
+export function billedCostLabel(cost) {
+  const figure = money(cost);
+  return "billed — no image · " + (figure == null ? "cost unknown" : figure);
+}
+
 export function statusLabel(entry) {
   if (!entry) return "";
+  if (isBilledEntry(entry)) return billedCostLabel(entry.cost_usd);
   if (entry.status !== "cancelled") return entry.status || "";
   const cost = money(entry.cost_usd);
   return cost == null ? "cancelled" : "cancelled · " + cost;

@@ -74,6 +74,7 @@ class CoreScaffold(unittest.TestCase):
                 h.post_json("http://x", {}, {}, 1)
         self.assertIsNone(cm.exception.status)
         self.assertFalse(cm.exception.retryable)
+        self.assertTrue(cm.exception.billed)
         self.assertIn("may still have been billed", str(cm.exception))
 
     # F5: only failures before the request reached the server are retried (a paid POST must
@@ -103,6 +104,7 @@ class CoreScaffold(unittest.TestCase):
         self.assertEqual((n, sleeps), (3, 2))
         self.assertTrue(err.retryable)
         self.assertIsNone(err.status)
+        self.assertFalse(err.billed)
         self.assertNotIn("billed", str(err))
 
     def test_read_failures_are_not_retried(self):
@@ -122,6 +124,7 @@ class CoreScaffold(unittest.TestCase):
                 n, sleeps, err = self._post_calls(fail)
                 self.assertEqual((n, sleeps), (1, 0))
                 self.assertFalse(err.retryable)
+                self.assertTrue(err.billed)
                 self.assertIn("may still have been billed", str(err))
 
     def test_invalid_json_on_200_not_retried(self):
@@ -129,6 +132,7 @@ class CoreScaffold(unittest.TestCase):
 
         n, sleeps, err = self._post_calls(lambda: _io.BytesIO(b"<html>not json</html>"))
         self.assertEqual((n, sleeps), (1, 0))
+        self.assertTrue(err.billed)
         self.assertIn("invalid JSON", str(err))
         self.assertIn("may still have been billed", str(err))
 
@@ -142,7 +146,7 @@ class CoreScaffold(unittest.TestCase):
             return fail
 
         n, sleeps, err = self._post_calls(http_error(400))
-        self.assertEqual((n, sleeps, err.status), (1, 0, 400))
+        self.assertEqual((n, sleeps, err.status, err.billed), (1, 0, 400, False))
         n, sleeps, err = self._post_calls(http_error(503))
         self.assertEqual((n, sleeps, err.status), (3, 2, 503))
 
@@ -156,6 +160,9 @@ class CoreScaffold(unittest.TestCase):
         with self.assertRaises(ProviderError):
             with_retries(fn, 3)
         self.assertEqual(len(calls), 1)
+        plain = ProviderError("x")
+        self.assertFalse(plain.billed)
+        self.assertFalse(plain.retryable)
 
 
 if __name__ == "__main__":
