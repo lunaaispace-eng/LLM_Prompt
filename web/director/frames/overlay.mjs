@@ -1,6 +1,7 @@
 // D2 studio shell. Panels mount from SLOT_TABLE; a slot with no row stays empty.
 // A13–A18a each add one row (and, if needed, one id in a tab's `slots` list).
 import { clear, el, ensureCss, projectSlug } from "../ui/dom.mjs";
+import { mountCanvas } from "../ui/canvas_view.mjs";
 import { mountSettings } from "../ui/settings.mjs";
 
 export const USE_IN_GRAPH_REASON =
@@ -9,6 +10,7 @@ export const USE_IN_GRAPH_REASON =
 // Shell rows only. Later tasks append {slot, module, mount}.
 export const SLOT_TABLE = [
   { slot: "settings", module: "ui/settings.mjs", mount: mountSettings },
+  { slot: "canvas", module: "ui/canvas_view.mjs", mount: mountCanvas },
 ];
 
 // Each tab carries its own layout. Stage A has no Packages entry and no placeholder.
