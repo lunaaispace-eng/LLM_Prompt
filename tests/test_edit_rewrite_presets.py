@@ -62,6 +62,33 @@ def shared_runs(text: str) -> list[str]:
 
 
 class EditRewritePresets(unittest.TestCase):
+    def test_negative_on_example_uses_writer_edit_split(self):
+        writer = _comfy.load("luna_director.writer")
+        for name in FILES:
+            with self.subTest(preset=name):
+                text = read(name)
+                system = text.split("### Example", 1)[0]
+                self.assertIn('only when the context does not say "no negative prompt"', system)
+                examples = re.split(r"^### Example[^\n]*\n", text, flags=re.MULTILINE)[1:]
+                enabled = []
+                for example in examples:
+                    input_text, output = example.split("Output:\n", 1)
+                    if writer.NEGATIVE_OFF_LINE not in input_text:
+                        enabled.append((input_text, output))
+                self.assertEqual(len(enabled), 1)
+                input_text, output = enabled[0]
+                self.assertTrue(output.strip().startswith("[POSITIVE]"))
+                positive, negative = writer.split_positive_negative(output, True)
+                self.assertTrue(positive.strip())
+                self.assertTrue(negative.strip())
+                self.assertNotIn("[POSITIVE]", positive)
+                self.assertNotIn("[NEGATIVE]", negative)
+                target = re.search(r"TARGET IMAGE MODEL: (\S+)", input_text).group(1)
+                req = writer.WriterRequest(target_model=target, operation="edit", negative=True)
+                expected = writer.build_context(req, ["Image 1: the picture"], ["Image 1 = the full picture"])
+                actual = input_text.split("Input:\n", 1)[1].split("Request:", 1)[0].strip()
+                self.assertEqual(actual, expected)
+
     def test_every_mapped_title_exists(self):
         node = _comfy.load("llm_prompt_node")
         titles = node.load_system_prompts()
