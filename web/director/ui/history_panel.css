@@ -9,13 +9,7 @@
     "queue queue queue";
 }
 
-.luna-director .ld-grid[data-mode="generate"] {
-  grid-template-rows: minmax(0, 1fr) auto auto;
-  grid-template-areas:
-    "refs generate"
-    "history history"
-    "queue queue";
-}
+/* The Generate grid, history row included, is laid out by generate.css (A18a). */
 
 .luna-director .ld-slot[data-slot="history"] {
   grid-area: history;
