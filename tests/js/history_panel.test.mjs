@@ -1,7 +1,9 @@
+import "./_dom_shim.mjs";
 import test from "node:test";
 import assert from "node:assert/strict";
 import { createStore } from "../../web/director/core/store.mjs";
 import { ORIGINAL, defaultComparePair } from "../../web/director/core/history.mjs";
+import { assetUrl } from "../../web/director/ui/tools_bar.mjs";
 import { SLOT_TABLE, TABS } from "../../web/director/frames/overlay.mjs";
 import { resolvePair } from "../../web/director/ui/compare.mjs";
 import {
@@ -182,6 +184,46 @@ test("a billed failure is labelled billed — no image, with its cost or cost un
   const unknown = { status: "error", cost_usd: null, outputs: [], error: { code: "billed", message: "x" } };
   assert.equal(statusLabel(unknown), "billed — no image · cost unknown");
   assert.equal(statusLabel({ status: "error", cost_usd: 0.04, error: "plain failure" }), "error");
+});
+
+test("synthetic original thumbnail is the root input picture", () => {
+  const input = { name: "source.png", subfolder: "shots", type: "input" };
+  const entry = {
+    id: "e1", parent: null, ts: "0", status: "done",
+    inputs: [input], outputs: [{ name: "out.png", type: "output" }],
+  };
+  const rows = stripRows([entry]);
+  assert.equal(rows[0].synthetic, true);
+  assert.equal(rows[0].id, ORIGINAL);
+  assert.deepEqual(entryThumb(rows[0]), input);
+  assert.equal(entryThumb(rows[1].entry).name, "out.png");
+  assert.equal(assetUrl(entryThumb(rows[0]), {
+    viewUrl: (ref) => "/view?filename=" + ref.name + "&subfolder=" + ref.subfolder + "&type=" + ref.type,
+  }), "/view?filename=source.png&subfolder=shots&type=input");
+
+  const store = createStore({ project: "album", history: [entry] });
+  const host = document.createElement("div");
+  document.body.append(host);
+  const handle = mountHistory(host, store, {
+    viewUrl: (ref) => "/view?filename=" + encodeURIComponent(ref.name) + "&type=" + encodeURIComponent(ref.type || "input"),
+  });
+  const img = host.querySelector("[data-id='original'] img");
+  assert.ok(img, "original row shows an image");
+  assert.match(img.getAttribute("src"), /type=input/);
+  assert.match(decodeURIComponent(img.getAttribute("src")), /source\.png/);
+  assert.equal(host.querySelector(".ld-history-blank"), null);
+  handle.destroy();
+  host.remove();
+});
+
+test("automatic writer preset is labelled auto", () => {
+  const auto = detailFields({ ...cloud, writer: { ...cloud.writer, preset: null } });
+  assert.equal(auto.find((f) => f.id === "preset").value, "auto");
+  const blank = detailFields({ ...cloud, writer: { provider: "Gemini", model: "gemini-3-flash", preset: "" } });
+  assert.equal(blank.find((f) => f.id === "preset").value, "auto");
+  assert.equal(detailFields(cloud).find((f) => f.id === "preset").value, "Edit Rewrite");
+  assert.equal(detailFields({ id: "plain", status: "done", prompt: "no writer" }).find((f) => f.id === "preset").value, "—");
+  assert.equal(detailFields({ id: "think", writer: { thinking: true } }).find((f) => f.id === "preset").value, "—");
 });
 
 test("Edit from here passes the studio state and makes the version the canvas", () => {

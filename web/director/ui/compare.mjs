@@ -66,7 +66,10 @@ export function stripRows(entries, opts = {}) {
     if (!entry.hidden || includeHidden) {
       const editRoot = !entry.parent && !entry.batch && !entry.tier && entry.inputs && entry.inputs[0];
       if (editRoot && !entry.hidden) {
-        rows.push({ id: ORIGINAL, depth, label: "original", synthetic: true, rootId: entry.id, entry: null });
+        rows.push({
+          id: ORIGINAL, depth, label: "original", synthetic: true, rootId: entry.id, entry: null,
+          inputs: entry.inputs,
+        });
         next = depth + 1;
       }
       rows.push({
@@ -166,12 +169,23 @@ export function statusLabel(entry) {
 }
 
 export function entryThumb(entry) {
+  // A synthetic "original" row has no output. Its picture is the root entry's first input.
+  if (entry?.synthetic) return Array.isArray(entry.inputs) && entry.inputs.length ? entry.inputs[0] : null;
   return Array.isArray(entry?.outputs) && entry.outputs.length ? entry.outputs[0] : null;
 }
 
 function shown(value) {
   if (value == null || value === "") return "—";
   return typeof value === "object" ? JSON.stringify(value) : String(value);
+}
+
+// preset: null means the writer picked the target's automatic preset. No writer object stays "—".
+function presetShown(entry) {
+  const w = entry?.writer;
+  const used = !!w && typeof w === "object"
+    && !!(w.provider || w.model || Object.prototype.hasOwnProperty.call(w, "preset"));
+  if (!used) return "";
+  return w.preset == null || w.preset === "" ? "auto" : w.preset;
 }
 
 function negativeValue(entry) {
@@ -192,7 +206,7 @@ export function detailFields(entry) {
     field("engine", "engine", [e.engine, e.model].filter(Boolean).join(": ")),
     field("provider", "provider", w.provider || ""),
     field("writer_model", "writer model", w.model || ""),
-    field("preset", "preset", w.preset || ""),
+    field("preset", "preset", presetShown(e)),
     field("thinking", "thinking", w.thinking ? "on" : "off"),
     field("negative", "negative", negativeValue(e)),
     ...PARAM_FIELDS.map(([key, label, id]) => field(id, label, p[key])),

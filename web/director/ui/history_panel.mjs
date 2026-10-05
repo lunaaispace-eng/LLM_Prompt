@@ -158,7 +158,7 @@ export function mountHistory(root, store, client) {
     hint.textContent = restartHint(depth);
     empty.hidden = rows.length > 0;
     strip.replaceChildren(...rows.map((row) => {
-      const thumb = entryThumb(row.entry);
+      const thumb = entryThumb(row.synthetic ? row : row.entry);
       const img = thumb
         ? el("img", { alt: "", src: assetUrl(thumb, client), draggable: "false" })
         : el("span", { class: "ld-history-blank", text: row.synthetic ? "original" : "—" });
