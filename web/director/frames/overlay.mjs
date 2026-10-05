@@ -4,6 +4,7 @@ import { clear, el, ensureCss, projectSlug } from "../ui/dom.mjs";
 import { mountCanvas } from "../ui/canvas_view.mjs";
 import { mountSettings } from "../ui/settings.mjs";
 import { mountWriter } from "../ui/writer_panel.mjs";
+import { mountEngine } from "../ui/engine_panel.mjs";
 
 export const USE_IN_GRAPH_REASON =
   "open the studio from a launcher node to send a result to the graph";
@@ -13,6 +14,7 @@ export const SLOT_TABLE = [
   { slot: "settings", module: "ui/settings.mjs", mount: mountSettings },
   { slot: "canvas", module: "ui/canvas_view.mjs", mount: mountCanvas },
   { slot: "writer", module: "ui/writer_panel.mjs", mount: mountWriter },
+  { slot: "engine", module: "ui/engine_panel.mjs", mount: mountEngine },
 ];
 
 // Each tab carries its own layout. Stage A has no Packages entry and no placeholder.
