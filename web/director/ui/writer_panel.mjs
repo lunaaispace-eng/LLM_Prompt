@@ -50,10 +50,10 @@ export async function loadWriterModels(provider, serverUrl = "", fetchApi = mode
 
 export async function writePrompt(store, client, config) {
   if (writerButtonState(store.get(), !!config).disabled) return false;
-  const body = buildWriteBody(store.get(), config);
   store.set({ writer: { ...store.get().writer, busy: true, error: null } });
   try {
-    const result = await client.write(body);
+    if (store.get().mode !== "generate" && store.get().engine.params.operation === "inpaint") await store.act("uploadMask");
+    const result = await client.write(buildWriteBody(store.get(), config));
     store.set(mergeWriterResult(store.get(), result));
   } catch (err) {
     store.set(mergeWriterError(store.get(), err));

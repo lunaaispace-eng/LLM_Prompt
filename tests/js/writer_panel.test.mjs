@@ -20,7 +20,7 @@ const config = {
 function ready(over = {}) {
   const s = defaultState();
   return { ...s, request: "  Keep my words\nexactly.  ",
-    engine: { ...s.engine, model: "target" },
+    engine: { ...s.engine, model: "target", params: { ...s.engine.params, operation: "edit" } },
     writer: { ...s.writer, model: "local.gguf" }, ...over };
 }
 

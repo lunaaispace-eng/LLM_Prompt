@@ -5,7 +5,7 @@ import { refLimit } from "../../web/director/core/writer_req.mjs";
 import { SLOT_TABLE } from "../../web/director/frames/overlay.mjs";
 import {
   controlsFor, optionsFor, selectCloudModel, seedLabel, cloudCanRun, cloudSpec,
-  estimateLabel, submitCloud, registerEngineSide, engineSides, mountEngine,
+  estimateLabel, registerEngineSide, engineSides, mountEngine,
 } from "../../web/director/ui/engine_panel.mjs";
 
 const operations = { generate: 0, edit: 3, compose: 4, inpaint: 3, outpaint: 3 };
@@ -28,7 +28,7 @@ const config = { cloud: [
 function state(operation = "inpaint") {
   const s = defaultState();
   return { ...s, project: "test", asset: { name: "canvas.png", type: "input", subfolder: "" },
-    mask: { w: 2, h: 1, data: new Uint8ClampedArray([0, 255]) }, prompt: "Keep my exact prompt",
+    maskEmpty: false, mask: { w: 2, h: 1, data: new Uint8ClampedArray([0, 255]) }, prompt: "Keep my exact prompt",
     engine: { ...s.engine, model: "first", params: { ...s.engine.params, operation, seed: 482913 } },
     refs: Array.from({ length: 5 }, (_, i) => ({ role: "style", ref: { name: `ref${i}.png`, type: "input" } })),
   };
@@ -82,9 +82,8 @@ test("switch keeps supported values and missing models produce no patch", () => 
 test("cloud canRun uses all three S4 named reasons and treats whitespace prompt as empty", () => {
   const s = state();
   assert.deepEqual(cloudCanRun({ ...s, asset: null }), { ok: false, reason: "Run disabled: no image" });
-  for (const mask of [null, { w: 2, h: 1, data: new Uint8ClampedArray(2) }, { name: "mask.png", empty: true }]) {
-    assert.deepEqual(cloudCanRun({ ...s, mask }), { ok: false, reason: "Run disabled: the mask is empty" });
-  }
+  assert.deepEqual(cloudCanRun({ ...s, maskEmpty: true }), { ok: false, reason: "Run disabled: the mask is empty" });
+  assert.equal(cloudCanRun({ ...s, mask: null, maskEmpty: false }).ok, true);
   assert.deepEqual(cloudCanRun({ ...s, prompt: " \n " }), { ok: false, reason: "Run disabled: no prompt" });
   assert.deepEqual(cloudCanRun(s), { ok: true, reason: "" });
   assert.equal(cloudCanRun({ ...state("edit"), mask: null }).ok, true);
@@ -138,34 +137,4 @@ test("estimate formats known cost, xAI/unknown cost, and unavailable replies", (
   assert.equal(estimateLabel({ total: 0, unknown: ["unknown-model"] }), "estimate: after run");
   assert.equal(estimateLabel({ total: 0, per_model: [{ est_cost_usd: null }] }), "estimate: after run");
   assert.equal(estimateLabel(null), "estimate: unavailable");
-});
-
-test("submission uploads a snapshot of pixel mask, sends spec and records the returned cloud job", async () => {
-  const store = createStore(state()), calls = [];
-  const before = store.get();
-  const mask = { name: "uploaded-mask.png", type: "input" };
-  const client = {
-    async importAsset(blob, project) { calls.push([blob, project]); return { ref: mask }; },
-    async runCloud(body) { calls.push(body); return { job_id: "job-1", est_cost_usd: 0.05 }; },
-  };
-  await submitCloud(store, client, config, { sid: "test-sid", maskBlob: async (snapshot) => {
-    assert.notEqual(snapshot.data, before.mask.data);
-    assert.deepEqual(snapshot.data, before.mask.data);
-    return "mask-blob";
-  } });
-  assert.deepEqual(calls[0], ["mask-blob", "test"]);
-  assert.deepEqual(calls[1], { sid: "test-sid", project: "test", spec: cloudSpec(before, config, mask) });
-  assert.equal(store.get().jobs["job-1"].state, "queued");
-  assert.equal(store.get().jobs["job-1"].serverId, "job-1");
-  assert.equal(store.get().mask, before.mask);
-  assert.equal(store.get().prompt, before.prompt);
-});
-
-test("disabled submission never calls the API; a failed run preserves all inputs", async () => {
-  const store = createStore({ ...state(), asset: null });
-  const disabled = await submitCloud(store, { runCloud() { assert.fail("disabled run sent"); } }, config);
-  assert.equal(disabled.reason, "Run disabled: no image");
-  const live = createStore(state("edit")), before = live.get();
-  await assert.rejects(submitCloud(live, { async runCloud() { throw new Error("refused"); } }, config), /refused/);
-  assert.equal(live.get(), before);
 });

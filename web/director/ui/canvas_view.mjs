@@ -1,5 +1,6 @@
 // Image canvas: zoom, pan, mask tools, outpaint handles, crop frame. Maths stays in core/.
 import { el, ensureCss } from "./dom.mjs";
+import { createMaskHandoff } from "./mask_handoff.mjs";
 import {
   makeView, zoomAt, pan, toImage, normBox, outpaintMargins, anchorFromFrame,
 } from "../core/geometry.mjs";
@@ -9,11 +10,8 @@ import {
   assetIdentity, assetSize, assetUrl, buildToolRegistry, commandForKey, cropFrameOf,
   isTypingTarget, maskPngBlob, maskTintRgba, mountTools, readMargins,
 } from "./tools_bar.mjs";
-
 const SIDE = { left: 0, top: 1, right: 2, bottom: 3 };
-
 function px(n) { return n + "px"; }
-
 export function mountCanvas(host, store, client) {
   ensureCss(new URL("./canvas_view.css", import.meta.url));
   const photo = el("img", { class: "ld-photo", alt: "", draggable: "false" });
@@ -42,30 +40,30 @@ export function mountCanvas(host, store, client) {
   const toolsHost = el("div", { class: "ld-tools-host" });
   const column = el("div", { class: "ld-canvas-col" }, [stage, status]);
   const root = el("div", { class: "ld-canvas" }, [el("div", { class: "ld-canvas-main" }, [toolsHost, column])]);
-
   let view = { imgW: 1, imgH: 1, viewW: 1, viewH: 1, zoom: 1, panX: 0, panY: 0 };
   let mask = null, history = createUndo(), shown = "", fitted = false, maskOn = true, space = false;
   let stroke = null, box0 = null, op0 = null, pan0 = null, cropDrag = null, cropPos = null, cropKey = "";
   let live = false, raf = 0, last = null, bar = null;
+  const handoff = createMaskHandoff(store, client, () => maskPngBlob(mask));
+  const changed = () => handoff.changed(mask, shown);
   const maskCtx = maskCanvas.getContext("2d");
-
   const radius = () => (Number(store.get().brush) || 1) / 2;
   const snap = () => new Uint8ClampedArray(mask.data);
   const syncHist = () => bar?.setHistory({ canUndo: history.canUndo, canRedo: history.canRedo });
-
   function commit() {
     if (!mask) return;
     history.push(snap());
+    changed();
     live = false;
     syncHist();
   }
   function restore(data) {
     if (!mask || !data || data.length !== mask.data.length) return;
     mask.data.set(data);
+    changed();
     paintNow();
     syncHist();
   }
-
   function paintNow() {
     if (!mask) return;
     if (maskCanvas.width !== mask.w || maskCanvas.height !== mask.h) {
@@ -77,16 +75,13 @@ export function mountCanvas(host, store, client) {
     img.data.set(px);
     maskCtx.putImageData(img, 0, 0);
   }
-
-  const dirty = () => { if (!raf) raf = requestAnimationFrame(() => { raf = 0; paintNow(); }); };
-
+  const dirty = () => { changed(); if (!raf) raf = requestAnimationFrame(() => { raf = 0; paintNow(); }); };
   function writeMargins(next) {
     const cur = readMargins(store.get());
     if (cur.every((v, i) => v === next[i])) return;
     const engine = store.get().engine;
     store.set({ engine: { ...engine, params: { ...engine.params, outpaint: next } } });
   }
-
   function place() {
     const state = store.get();
     const z = view.zoom || 1;
@@ -134,25 +129,24 @@ export function mountCanvas(host, store, client) {
       ring.dataset.tool = state.tool;
     }
   }
-
   function fit() {
     if (!mask || stage.clientWidth < 2 || stage.clientHeight < 2) return;
     view = makeView({ imgW: mask.w, imgH: mask.h, viewW: stage.clientWidth, viewH: stage.clientHeight });
     fitted = true;
     place();
   }
-
   function adopt(w, h) {
     if (mask && mask.w === w && mask.h === h) { place(); return; }
-    mask = create(w, h);
+    mask = handoff.saved(shown) || create(w, h);
+    changed();
     history = createUndo();
     history.push(snap());
     fitted = false; cropPos = null; cropKey = ""; live = false; stroke = null; box0 = null;
     paintNow(); syncHist(); fit();
   }
-
   function dropImage() {
     mask = null;
+    changed();
     history = createUndo();
     fitted = false;
     photo.removeAttribute("src");
@@ -164,6 +158,7 @@ export function mountCanvas(host, store, client) {
     const key = assetIdentity(asset);
     if (key === shown) return;
     shown = key;
+    mask = handoff.saved(key);
     const size = assetSize(asset);
     const url = assetUrl(asset, client);
     if (!size && !url) { dropImage(); return; }
@@ -173,13 +168,11 @@ export function mountCanvas(host, store, client) {
       if (photo.getAttribute("src") !== url) photo.src = url;
     } else photo.removeAttribute("src");
   }
-
   function at(ev) {
     const r = stage.getBoundingClientRect();
     const p = [ev.clientX - r.left, ev.clientY - r.top], [x, y] = toImage(view, p[0], p[1]);
     return { p, x, y };
   }
-
   function onPaint(info, value) {
     if (!mask) return;
     if (info.phase === "down") {
@@ -199,7 +192,6 @@ export function mountCanvas(host, store, client) {
       paintNow();
     }
   }
-
   function onBox(info) {
     if (!mask) return;
     if (info.phase === "down") box0 = { x: info.x, y: info.y };
@@ -220,7 +212,6 @@ export function mountCanvas(host, store, client) {
       paintNow();
     }
   }
-
   function onOutpaint(info) {
     if (!info.side) return;
     if (info.phase === "down") {
@@ -234,7 +225,6 @@ export function mountCanvas(host, store, client) {
     writeMargins(next);
     if (info.phase === "up") op0 = null;
   }
-
   function dropPreview() {
     if (live) commit();
     stroke = null;
@@ -262,9 +252,7 @@ export function mountCanvas(host, store, client) {
     const data = dir < 0 ? history.undo() : history.redo();
     if (data) restore(data);
   }
-
   const registry = buildToolRegistry({ paint: onPaint, box: onBox, outpaint: onOutpaint, invert: onInvert });
-
   function moveCrop(left, top, frame) {
     const slackW = mask.w - frame.fw;
     const slackH = mask.h - frame.fh;
@@ -279,7 +267,6 @@ export function mountCanvas(host, store, client) {
     if (prev.crop_anchor && prev.crop_anchor.x === anchor.x && prev.crop_anchor.y === anchor.y) return;
     store.set({ resize: { ...resize, state: { ...prev, crop_anchor: anchor } } });
   }
-
   function onPointer(ev) {
     ev.stopPropagation();
     if (!mask) return;
@@ -317,7 +304,6 @@ export function mountCanvas(host, store, client) {
     pan0 = null;
     if (stroke || box0) registry.find((tool) => tool.id === store.get().tool)?.onPointer?.({ phase: "up", x: hit.x, y: hit.y });
   }
-
   function onKey(ev) {
     if (!root.contains(ev.target) || isTypingTarget(ev.target)) return;
     if (ev.code === "Space") {
@@ -333,14 +319,12 @@ export function mountCanvas(host, store, client) {
     else if (cmd.tool) store.set({ tool: cmd.tool });
     else if (cmd.command) step(cmd.command === "undo" ? -1 : 1);
   }
-
   store.register("maskInvert", () => onInvert());
   store.register("maskClear", () => onClear());
   store.register("maskUndo", () => step(-1));
   store.register("maskRedo", () => step(1));
   bar = mountTools(toolsHost, store, registry);
   syncHist();
-
   photo.addEventListener("load", () => {
     if (!root.isConnected || photo.dataset.key !== shown) return;
     if (photo.naturalWidth > 0 && photo.naturalHeight > 0) adopt(photo.naturalWidth, photo.naturalHeight);
@@ -373,7 +357,6 @@ export function mountCanvas(host, store, client) {
     if (root.contains(ev.target)) ev.stopPropagation();
   };
   document.addEventListener("keyup", onKeyUp, true);
-
   const off = store.subscribe(() => { syncAsset(); place(); });
   const ro = new ResizeObserver(() => {
     if (!mask) return;
@@ -384,9 +367,9 @@ export function mountCanvas(host, store, client) {
   host.append(root);
   syncAsset();
   place();
-
   return {
     destroy() {
+      handoff.destroy();
       off();
       bar.destroy();
       ro.disconnect();

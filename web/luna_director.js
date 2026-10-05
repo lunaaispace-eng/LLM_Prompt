@@ -4,6 +4,7 @@ import { api } from "/scripts/api.js";
 import { createClient } from "./director/core/api_client.mjs";
 import { createStore } from "./director/core/store.mjs";
 import { installFrameActions, mountOverlay } from "./director/frames/overlay.mjs";
+import { installQueueActions } from "./director/ui/queue_panel.mjs";
 import { connectSocket } from "./director/socket.mjs";
 import { registerLunaCollapse } from "./luna_collapse.mjs";
 import { registerLunaHelp } from "./luna_help.mjs";
@@ -28,14 +29,16 @@ async function ensureStudio() {
   if (studio) return studio;
   const store = createStore();
   const client = createClient(api.fetchApi.bind(api), "");
+  const queue = installQueueActions(store, client);
   let bound = null;
   installFrameActions(store, () => bound);
   const socket = await connectSocket({
     apiBase: wsBase(),
-    onMessage() {},
+    onMessage(msg) { void queue.message(msg); },
     onBinary() {},
-    onReconnect() {},
+    onReconnect() { void queue.reconnect(); },
   });
+  store.set({ socketSid: socket.sid });
   studio = {
     store,
     client,
@@ -58,6 +61,7 @@ export async function openStudio(node) {
     socket: current.socket,
     node: node || null,
   });
+  void installQueueActions(current.store, current.client).reconnect();
 }
 
 function selectedLauncher() {

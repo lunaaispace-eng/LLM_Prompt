@@ -3,8 +3,7 @@ import { el, ensureCss } from "./dom.mjs";
 import { defaultState } from "../core/store.mjs";
 import { findModel } from "../core/generate.mjs";
 import { refLimit, sentRefs } from "../core/writer_req.mjs";
-import { isEmpty } from "../core/maskops.mjs";
-import { maskPngBlob } from "./tools_bar.mjs";
+import { runCurrent, installQueueActions } from "./run_queue.mjs";
 
 const defaults = defaultState().engine.params;
 const sides = new Map(), listeners = new Set();
@@ -68,9 +67,7 @@ export function seedLabel(model) {
 
 export function cloudCanRun(state) {
   if (!state.asset) return { ok: false, reason: "Run disabled: no image" };
-  const mask = state.mask;
-  if (state.engine.params.operation === "inpaint" && (!mask || mask.empty === true
-    || (mask.data ? isEmpty(mask) : !(mask.ref?.name || mask.name)))) {
+  if (state.engine.params.operation === "inpaint" && state.maskEmpty !== false) {
     return { ok: false, reason: "Run disabled: the mask is empty" };
   }
   if (!String(state.prompt || "").trim()) return { ok: false, reason: "Run disabled: no prompt" };
@@ -95,23 +92,6 @@ export function cloudSpec(state, config, maskRef = refOf(state.mask)) {
 export function estimateLabel(result) {
   if (result?.unknown?.length || result?.per_model?.some((m) => m.est_cost_usd == null)) return "estimate: after run";
   return Number.isFinite(result?.total) ? `estimate: $${result.total.toFixed(2)}` : "estimate: unavailable";
-}
-
-export async function submitCloud(store, client, config, { sid = "", maskBlob = maskPngBlob } = {}) {
-  const state = store.get();
-  const allowed = cloudCanRun(state);
-  if (!allowed.ok) return allowed;
-  let mask = refOf(state.mask);
-  // PNG upload is only needed for a pixel mask; an existing file ref is sent unchanged.
-  if (state.engine.params.operation === "inpaint" && state.mask?.data) {
-    const snapshot = { ...state.mask, data: new Uint8ClampedArray(state.mask.data) };
-    mask = (await client.importAsset(await maskBlob(snapshot), state.project)).ref;
-  }
-  const job = await client.runCloud({ sid, project: state.project, spec: cloudSpec(state, config, mask) });
-  store.set({ jobs: { ...store.get().jobs, [job.job_id]: {
-    ...job, serverId: job.job_id, kind: "cloud", model: state.engine.model, state: "queued",
-  } } });
-  return job;
 }
 
 const LABELS = { operation: "Operation", quality: "Quality", aspect_ratio: "Aspect ratio", resolution: "Resolution",
@@ -206,6 +186,7 @@ function mountCloud(root, store, client) {
       const cfg = await client.config();
       if (!alive) return;
       config = cfg;
+      store.set({ cloudConfig: cfg });
       model.replaceChildren(...(cfg.cloud || []).map((g) => el("optgroup", { label: g.provider },
         (g.models || []).map((m) => el("option", { value: m.id, text: m.id })))));
       const id = findModel(cfg, store.get().engine.model)?.id || cfg.cloud?.flatMap((g) => g.models)[0]?.id;
@@ -220,19 +201,15 @@ function mountCloud(root, store, client) {
   render(); void load();
   return {
     get ready() { return !!findModel(config, store.get().engine.model); },
-    async run() {
-      let sid = "";
-      try { sid = globalThis.sessionStorage?.getItem("luna.director.sid") || ""; } catch (_) { /* private mode */ }
-      return submitCloud(store, client, config, { sid });
-    },
     destroy() { alive = false; ++sequence; clearTimeout(timer); off(); },
   };
 }
 
 registerEngineSide("cloud", { label: "Cloud", mount: mountCloud, canRun: cloudCanRun });
 
-/** A side mounts its controls and returns {destroy, run, ready}; ready defaults to true. */
+/** A side mounts its controls and returns {destroy, ready}; ready defaults to true. */
 export function mountEngine(root, store, client) {
+  installQueueActions(store, client);
   ensureCss(new URL("./engine_panel.css", import.meta.url));
   const panel = el("div", { class: "ld-engine" });
   const switcher = el("div", { class: "ld-engine-switch", role: "group", "aria-label": "Engine kind" });
@@ -262,7 +239,7 @@ export function mountEngine(root, store, client) {
   run.addEventListener("click", async () => {
     if (run.disabled) return;
     busy = true; error = ""; render();
-    try { await handle.run(); }
+    try { await runCurrent(store, client); }
     catch (_) { error = "Run failed; image, mask and prompt kept. Try again."; }
     finally { busy = false; render(); }
   });
