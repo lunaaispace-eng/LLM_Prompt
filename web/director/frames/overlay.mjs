@@ -7,6 +7,7 @@ import { mountReferences } from "../ui/references_panel.mjs";
 import { mountSettings } from "../ui/settings.mjs";
 import { mountWriter } from "../ui/writer_panel.mjs";
 import { mountEngine } from "../ui/engine_panel.mjs";
+import { mountHistory } from "../ui/history_panel.mjs";
 
 export const USE_IN_GRAPH_REASON =
   "open the studio from a launcher node to send a result to the graph";
@@ -19,17 +20,18 @@ export const SLOT_TABLE = [
   { slot: "assets", module: "ui/assets_panel.mjs", mount: mountAssets },
   { slot: "refs", module: "ui/references_panel.mjs", mount: mountReferences },
   { slot: "engine", module: "ui/engine_panel.mjs", mount: mountEngine },
+  { slot: "history", module: "ui/history_panel.mjs", mount: mountHistory },
 ];
 
 // Each tab carries its own layout. Stage A has no Packages entry and no placeholder.
 export const TABS = [
-  { id: "edit", label: "Edit", slots: ["assets", "refs", "canvas", "writer", "engine", "queue"] },
-  { id: "generate", label: "Generate", slots: ["refs", "generate", "queue"] },
+  { id: "edit", label: "Edit", slots: ["assets", "refs", "canvas", "writer", "engine", "queue", "history"] },
+  { id: "generate", label: "Generate", slots: ["refs", "generate", "queue", "history"] },
 ];
 
 const LABELS = {
   assets: "Assets", refs: "References", canvas: "Canvas", writer: "Writer",
-  engine: "Engine", queue: "Run queue", generate: "Generate",
+  engine: "Engine", queue: "Run queue", generate: "Generate", history: "History",
 };
 
 const ENDED = new Set(["done", "error", "cancelled"]);
