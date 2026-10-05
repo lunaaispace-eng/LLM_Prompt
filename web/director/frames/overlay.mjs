@@ -9,6 +9,7 @@ import { mountWriter } from "../ui/writer_panel.mjs";
 import { mountQueue } from "../ui/queue_panel.mjs";
 import { mountEngine } from "../ui/engine_panel.mjs";
 import { mountHistory } from "../ui/history_panel.mjs";
+import { mountGenerate } from "../ui/generate_tab.mjs";
 
 export const USE_IN_GRAPH_REASON =
   "open the studio from a launcher node to send a result to the graph";
@@ -23,6 +24,7 @@ export const SLOT_TABLE = [
   { slot: "engine", module: "ui/engine_panel.mjs", mount: mountEngine },
   { slot: "history", module: "ui/history_panel.mjs", mount: mountHistory },
   { slot: "queue", module: "ui/queue_panel.mjs", mount: mountQueue },
+  { slot: "generate", module: "ui/generate_tab.mjs", mount: mountGenerate },
 ];
 
 // Each tab carries its own layout. Stage A has no Packages entry and no placeholder.

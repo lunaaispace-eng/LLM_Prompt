@@ -1,0 +1,59 @@
+/* S10 v2, using the shell's Luna tokens. The existing reference and queue panels stay shared. */
+.ld-grid[data-mode="generate"] {
+  grid-template-columns: 220px minmax(260px, 1fr) 280px;
+  grid-template-rows: minmax(260px, auto) minmax(190px, 1fr) auto auto;
+  grid-template-areas: "refs prompt sidebar" "results results sidebar" "queue queue queue" "history history history";
+  overflow-y: auto;
+}
+.ld-grid[data-mode="generate"] > [data-slot="generate"],
+.ld-grid[data-mode="generate"] > [data-slot="generate"] > .ld-slot-body,
+.ld-generate { display: contents; }
+.ld-grid[data-mode="generate"] > [data-slot="generate"] > header { display: none; }
+.ld-grid[data-mode="generate"] > [data-slot="history"] { grid-area: history; max-height: 180px; }
+.ld-g-prompt { grid-area: prompt; }
+.ld-g-sidebar { grid-area: sidebar; display: flex; flex-direction: column; gap: 10px; min-width: 0; }
+.ld-g-results { grid-area: results; }
+.ld-g-card { background: var(--panel); border: 1px solid var(--border); border-radius: var(--radius); padding: 12px; min-width: 0; }
+.ld-g-card h3 { margin: 0 0 10px; font-size: 14px; }
+.ld-g-card .ld-field { display: grid; grid-template-columns: 78px minmax(0, 1fr); align-items: center; gap: 8px; margin-bottom: 8px; }
+.ld-g-card input:not([type="checkbox"]), .ld-g-card textarea, .ld-g-card select {
+  width: 100%; min-width: 0; box-sizing: border-box; color: var(--text); background: var(--bg);
+  border: 1px solid var(--border); border-radius: 5px; padding: 6px; font: inherit;
+}
+.ld-g-card textarea { resize: vertical; }
+.ld-g-card summary { cursor: pointer; margin: 12px 0; }
+.ld-g-heading, .ld-g-idea, .ld-g-preset, .ld-g-seed, .ld-g-negative, .ld-g-toggle { display: flex; align-items: center; gap: 8px; }
+.ld-g-heading { margin-bottom: 10px; }
+.ld-g-heading h3 { margin: 0; }
+.ld-g-idea textarea { flex: 1; }
+.ld-g-primary { background: var(--accent); color: var(--bg); font-weight: 600; }
+.ld-g-tag { border: 1px solid var(--accent); border-radius: 4px; color: var(--accent); padding: 2px 5px; font-size: 11px; }
+.ld-g-toggle { margin: 8px 0; }
+.ld-g-models { max-height: 180px; overflow-y: auto; margin: 8px 0; }
+.ld-g-model { display: flex; gap: 6px; align-items: center; padding: 4px 0; overflow-wrap: anywhere; font-size: 12px; }
+.ld-g-engine { flex: 1; }
+.ld-g-operation { border: 1px solid var(--border); border-radius: 5px; padding: 8px; font-size: 12px; overflow-wrap: anywhere; }
+.ld-g-engine > .ld-g-primary { width: 100%; margin-top: 10px; }
+.ld-g-segment { display: flex; gap: 2px; }
+.ld-g-segment [aria-pressed="true"] { color: var(--bg); background: var(--accent); }
+.ld-g-segment button { flex: 1; }
+.ld-g-result-row { display: grid; grid-template-columns: 150px minmax(0, 1fr); align-items: center; gap: 8px; margin-bottom: 10px; }
+.ld-g-model-label { overflow-wrap: anywhere; font-size: 12px; }
+.ld-g-tiles { display: flex; gap: 8px; overflow-x: auto; padding: 2px; }
+.ld-g-tile { position: relative; flex: 0 0 130px; border: 2px solid var(--border); background: var(--bg); padding: 0; border-radius: 5px; overflow: hidden; cursor: pointer; }
+.ld-g-tile[aria-pressed="true"] { border-color: var(--accent); }
+.ld-g-tile img { display: block; width: 130px; height: 95px; object-fit: contain; }
+.ld-g-tile span { display: block; color: var(--text); padding: 3px; font-size: 11px; }
+.ld-g-actions, .ld-g-final-menu { display: flex; flex-wrap: wrap; justify-content: center; gap: 8px; margin: 10px 0; }
+.ld-g-refine { display: grid; grid-template-columns: auto minmax(0, 1fr) auto; align-items: center; gap: 10px; }
+.ld-g-state { padding: 14px; border: 1px dashed var(--border); border-radius: 5px; margin: 8px 0; }
+.ld-g-error { color: var(--danger); border-color: var(--danger); }
+.ld-g-indeterminate { height: 4px; margin-top: 10px; overflow: hidden; background: var(--border); }
+.ld-g-indeterminate::after { content: ""; display: block; height: 100%; width: 25%; background: var(--accent); animation: ld-g-slide 1.2s ease-in-out infinite alternate; }
+@keyframes ld-g-slide { from { transform: translateX(0); } to { transform: translateX(300%); } }
+.ld-generate [hidden], .ld-g-card [hidden], .ld-g-sidebar [hidden] { display: none; }
+@media (max-width: 1000px) {
+  .ld-grid[data-mode="generate"] { grid-template-columns: 180px minmax(240px, 1fr); grid-template-areas: "refs prompt" "sidebar sidebar" "results results" "queue queue" "history history"; }
+  .ld-g-sidebar { display: grid; grid-template-columns: 1fr 1fr; }
+}
+@media (prefers-reduced-motion: reduce) { .ld-g-indeterminate::after { animation: none; } }

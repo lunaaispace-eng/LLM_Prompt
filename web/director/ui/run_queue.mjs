@@ -109,7 +109,13 @@ export function installQueueActions(store, client) {
     } catch (e) { store.set({ queueError: failure(e) }); }
     finally { reconciling--; if (drain && !reconciling) pump(); }
   }
-  const control = { pump, message, reconnect, patch, rereadCost };
+  async function replay(ids) {
+    for (const id of ids) {
+      const messages = early.get(id) || []; early.delete(id);
+      for (const msg of messages) await message(msg);
+    }
+  }
+  const control = { pump, message, reconnect, patch, rereadCost, replay };
   controllers.set(store, control);
   store.register("runCurrent", () => runCurrent(store, client));
   store.register("cancelJob", (_s, id, confirmed) => cancelJob(store, client, id, confirmed));
@@ -129,6 +135,46 @@ export async function runCurrent(store, client) {
   put(store, { id, kind: "cloud", state: "queued", model: state.engine.model, operation: state.engine.params.operation,
     project: state.project, body: { sid: state.socketSid, project: state.project, spec: cloudSpec(state, config) } });
   return await control.pump(id) || id;
+}
+
+// Batch expansion/concurrency live on the server. Register its jobs in the same queue/socket bridge.
+async function acceptSubmission(store, client, send, metadata, batchInfo = null) {
+  const control = installQueueActions(store, client), state = store.get();
+  const pendingId = `cloud-submit-${++serial}`;
+  put(store, { id: pendingId, kind: "cloud", state: "uploading", project: state.project, ...metadata });
+  try {
+    const result = await send(state.socketSid, state.project);
+    const queue = createQueue();
+    const jobs = (result.jobs || [result]).map((job) => ({
+      ...metadata, id: job.job_id, serverId: job.job_id, kind: "cloud", state: "uploading",
+      project: state.project, model: job.model || metadata.model, variant: job.variant ?? metadata.variant,
+      est_cost_usd: job.est_cost_usd, startedAt: null, batchInfo,
+    }));
+    if (batchInfo) {
+      batchInfo = { ...batchInfo, batch_id: result.batch_id };
+      for (const job of jobs) job.batchInfo = batchInfo;
+      queue.addBatch(result.batch_id, jobs);
+    } else for (const job of jobs) queue.add(job);
+    const next = { ...store.get().jobs }; delete next[pendingId];
+    for (const job of queue.jobs()) next[job.id] = job;
+    store.set({ jobs: next, ...(batchInfo ? { generate: { ...store.get().generate, batch: batchInfo, selected: null } } : {}) });
+    await control.replay(jobs.map((job) => job.serverId));
+    await control.reconnect(false);
+    return result;
+  } catch (e) {
+    remove(store, pendingId);
+    throw e;
+  }
+}
+
+export function submitBatch(store, client, batch) {
+  return acceptSubmission(store, client, (sid, project) => client.runBatch(sid, project, batch), {},
+    { idea: batch.request, models: batch.models, count: batch.count, tier: batch.tier });
+}
+
+export function submitFinal(store, client, entry, choice) {
+  return acceptSubmission(store, client, (sid, project) => client.final(sid, project, entry.id, choice),
+    { model: entry.model, batch: entry.batch, variant: entry.variant, tier: "final", operation: "edit" });
 }
 
 export async function cancelJob(store, client, id, confirmed = false) {
