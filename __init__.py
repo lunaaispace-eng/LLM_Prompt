@@ -93,6 +93,17 @@ try:
 except Exception as e:  # pragma: no cover
     print(f"[LLM_Prompt] Luna Image Studio (API Key) node not loaded: {e}")
 
+# Luna Director launcher (D2). Optional like the other nodes.
+try:
+    from .luna_director_node import (
+        NODE_CLASS_MAPPINGS as _DIRECTOR_NODES,
+        NODE_DISPLAY_NAME_MAPPINGS as _DIRECTOR_NAMES,
+    )
+    NODE_CLASS_MAPPINGS.update(_DIRECTOR_NODES)
+    NODE_DISPLAY_NAME_MAPPINGS.update(_DIRECTOR_NAMES)
+except Exception as e:  # pragma: no cover
+    print(f"[LLM_Prompt] Luna Director launcher node not loaded: {e}")
+
 # Luna Director routes (/luna/director/*, /luna/studio/*); optional like the nodes.
 try:
     from server import PromptServer
