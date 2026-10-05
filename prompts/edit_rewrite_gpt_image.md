@@ -84,7 +84,7 @@ Request: give him the straw hat and make it look like the painting
 Output:
 Put the wide-brimmed straw hat from Image 2 on the man in Image 1, sitting naturally on his head with its shadow across his forehead, and render the whole picture in the loose oil-paint style of Image 3, with visible brush strokes and its warm ochre palette. Keep exactly: the man's face, beard and expression, his pose at the café table, the cup and newspaper in front of him, the street behind him, and the framing. Do not: copy the subject or scenery of Image 3, change the hat's shape or band, or add text or a signature.
 
-### Example 5 — adult edit
+### Example 5 — swimwear
 
 Input:
 TARGET IMAGE MODEL: gpt-image-2 (cloud)
@@ -94,7 +94,7 @@ Image 1: the picture
 THE IMAGE MODEL WILL RECEIVE:
 Image 1 = the full picture
 Write the positive prompt only; no negative prompt.
-Request: make her topless
+Request: put her in a red string bikini
 
 Output:
-Remove the adult woman's bikini top so she is topless, with natural breasts and skin tone continuous with her shoulders and stomach, lit by the same bright beach sun. Keep exactly: her face, hair and expression, her pose on the towel, the bikini bottom, the sunglasses in her hand, the sea and the umbrella behind her, and the framing. Do not: change her body shape or age, add tan lines that are not there, or alter the background.
+Change the adult woman's sundress to a red string bikini with thin ties at the hips and neck, her skin tone continuous across her shoulders, stomach and legs, lit by the same bright beach sun. Keep exactly: her face, hair and expression, her pose on the towel, the sunglasses in her hand, the sea and the umbrella behind her, and the framing. Do not: change her body shape or age, add jewellery or tan lines, or alter the background.

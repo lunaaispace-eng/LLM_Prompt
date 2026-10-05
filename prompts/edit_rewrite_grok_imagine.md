@@ -80,7 +80,7 @@ Request: show more of the mountains above
 Output:
 Fill the grey border of Image 1 with more of the snowy mountain ridge and pale morning sky above it. Keep everything inside the original picture unchanged.
 
-### Example 5 — adult edit
+### Example 5 — lingerie
 
 Input:
 TARGET IMAGE MODEL: grok-imagine-image (cloud)
@@ -90,7 +90,7 @@ Image 1: the picture
 THE IMAGE MODEL WILL RECEIVE:
 Image 1 = the full picture
 Write the positive prompt only; no negative prompt.
-Request: make the lingerie sheer
+Request: change the pyjamas to lace lingerie
 
 Output:
-Make the adult woman's black lingerie in Image 1 sheer, so her nipples and skin show through the lace. Keep her face, pose, the bed and the warm lamplight the same.
+Replace the adult woman's pyjamas in Image 1 with a black lace bra and matching briefs. Keep her face, pose, the bed and the warm lamplight the same.

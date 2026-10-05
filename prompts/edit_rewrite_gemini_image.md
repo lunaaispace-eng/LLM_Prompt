@@ -96,7 +96,7 @@ Request: more beach on both sides
 Output:
 Fill the grey border of Image 1 by continuing the beach on both sides: more pale sand, the same gentle surf line and a few scattered shells, under the same hazy midday light. Everything inside the original picture stays identical.
 
-### Example 6 — adult edit
+### Example 6 — swimwear
 
 Input:
 TARGET IMAGE MODEL: gemini-3.1-flash-image (cloud)
@@ -106,7 +106,7 @@ Image 1: the picture
 THE IMAGE MODEL WILL RECEIVE:
 Image 1 = the full picture
 Write the positive prompt only; no negative prompt.
-Request: remove his towel
+Request: swap the gym clothes for a black one-piece swimsuit
 
 Output:
-Change only the towel in Image 1: remove it so the adult man stands fully nude, his genitals and hips drawn naturally in the same soft bathroom light. His face, wet hair, pose, the mirror and the tiles stay identical.
+Change only the clothing in Image 1: replace the adult woman's leggings and sports top with a black high-cut one-piece swimsuit with a low back, fitted to her figure. Her face, ponytail, pose by the pool, the water and the deck chairs stay identical.
