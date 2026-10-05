@@ -18,11 +18,14 @@ function stampDisc(m, cx, cy, r, value) {
 }
 
 // Brush / eraser: a disc of `radius` pixels along the line. value 255 marks, 0 erases.
+// Radius is rounded: a brush size divided by the view zoom is often fractional, and a
+// fractional radius makes the disc walk fractional row indices.
 export function stampLine(m, x0, y0, x1, y1, radius, value) {
+  const r = Math.max(0, Math.round(Number.isFinite(radius) ? radius : 0));
   const steps = Math.max(1, Math.ceil(Math.max(Math.abs(x1 - x0), Math.abs(y1 - y0))));
   for (let i = 0; i <= steps; i++) {
     const t = i / steps;
-    stampDisc(m, Math.round(x0 + (x1 - x0) * t), Math.round(y0 + (y1 - y0) * t), radius, value);
+    stampDisc(m, Math.round(x0 + (x1 - x0) * t), Math.round(y0 + (y1 - y0) * t), r, value);
   }
   return m;
 }

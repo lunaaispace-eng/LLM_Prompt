@@ -79,3 +79,22 @@ test("clear empties the mask", () => {
   clear(m);
   assert.ok(isEmpty(m));
 });
+
+test("stampLine rounds a fractional radius and writes only whole in-range indices", () => {
+  const m = create(15, 15);
+  stampLine(m, 7.2, 7.8, 10.4, 8.1, 2.6, 255);
+  const rounded = create(15, 15);
+  stampLine(rounded, 7.2, 7.8, 10.4, 8.1, 3, 255);
+  assert.deepEqual(Array.from(m.data), Array.from(rounded.data));
+  assert.ok(count(m) > 0);
+  for (let y = 0; y < m.h; y++) {
+    for (let x = 0; x < m.w; x++) {
+      if (!m.data[y * m.w + x]) continue;
+      const index = y * m.w + x;
+      assert.equal(Number.isInteger(x), true);
+      assert.equal(Number.isInteger(y), true);
+      assert.equal(Number.isInteger(index), true);
+      assert.ok(index >= 0 && index < m.data.length);
+    }
+  }
+});
