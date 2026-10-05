@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import concurrent.futures
 import logging
+import math
 import re
 import threading
 import time
@@ -221,12 +222,22 @@ def normalize_spec(spec: dict) -> dict:
     if out["tier"] is not None and out["tier"] not in TIERS:
         raise ValueError(f"tier must be draft, final or null, got {out['tier']!r}")
     n = out["n"]
-    if isinstance(n, bool) or not isinstance(n, int) or n < 1:
-        raise ValueError(f"n must be a whole number >= 1, got {n!r}")
+    if isinstance(n, bool) or not isinstance(n, int) or not 1 <= n <= 8:
+        raise ValueError(f"n must be a whole number in 1..8, got {n!r}")
+    padding = out["crop_padding"]
+    if (isinstance(padding, bool) or not isinstance(padding, (int, float))
+            or not math.isfinite(padding) or not 0 <= padding <= 1):
+        raise ValueError("crop_padding must be a finite number in 0..1")
+    feather = out["feather_px"]
+    if isinstance(feather, bool) or not isinstance(feather, int) or feather < 0:
+        raise ValueError("feather_px must be a whole number >= 0")
     if out["outpaint"] is not None:
         margins = out["outpaint"]
         if not isinstance(margins, (list, tuple)) or len(margins) != 4:
             raise ValueError("outpaint must be four margins (left, top, right, bottom)")
+        if any(isinstance(v, bool) or not isinstance(v, (int, float)) or not math.isfinite(v)
+               or not 0 <= v <= 2048 for v in margins):
+            raise ValueError("outpaint margins must be finite numbers in 0..2048")
         out["outpaint"] = [int(v) for v in margins]
     return out
 
@@ -245,8 +256,8 @@ def _check_batch(batch: dict) -> dict:
     for m in models:
         provider_for(m if isinstance(m, str) else "")
     count = batch.get("count")
-    if isinstance(count, bool) or not isinstance(count, int) or count < 1:
-        raise ValueError(f"count must be a whole number >= 1, got {count!r}")
+    if isinstance(count, bool) or not isinstance(count, int) or not 1 <= count <= 8:
+        raise ValueError(f"count must be a whole number in 1..8, got {count!r}")
     mode = batch.get("variants_mode")
     if mode not in ("same", "varied"):
         raise ValueError(f"variants_mode must be same or varied, got {mode!r}")
@@ -521,7 +532,9 @@ class JobRunner:
         return data
 
     def _scrub(self, text: str) -> str:
-        for key in self._keys:
+        with self._lock:
+            keys = list(self._keys)
+        for key in keys:
             if key:
                 text = text.replace(key, "***")
         return text
@@ -548,16 +561,24 @@ class JobRunner:
         except Exception as exc:   # pragma: no cover - _call names every failure
             failure = _Failure(*_named(exc), sent=True)
         seconds = round(time.monotonic() - started, 2)
-        with self._lock:
-            cancelled = job.cancel_requested
-        if failure is None:
-            status = "cancelled" if cancelled else "done"
-            entry, error = self._record(job, result, status, seconds), None
-        else:
-            message = self._scrub(failure.message)
-            error = {"code": failure.code, "message": message}
-            entry = self._record_error(job, message, seconds)
-            status = "error"
+        try:
+            if failure is None:
+                entry, error = self._record(job, result, "done", seconds), None
+                status = entry["status"] if entry is not None else "error"
+            else:
+                message = self._scrub(failure.message)
+                error = {"code": failure.code, "message": message}
+                entry = self._record_error(job, message, seconds)
+                status = "error"
+        except Exception:
+            # Scrubbing and recording may themselves fail. Do not expose that exception's text:
+            # it can contain a key, and no failure here may leave the job running.
+            status, entry = "error", None
+            error = {"code": "internal", "message": "job result could not be safely recorded"}
+            try:
+                entry = self._record_error(job, error["message"], seconds)
+            except Exception:
+                log.error("failed to record terminal error for job %s", job.job_id)
         with self._lock:
             job.state, job.entry, job.error = status, entry, error
             payload = self._payload(job)
@@ -619,6 +640,8 @@ class JobRunner:
                                 est_cost_usd=job.est, seconds=seconds, mode=mode_from_info(result.info),
                                 error=message)
             return self._add(job, entry, {"status": "error", "outputs": outputs, "cost_usd": result.cost_usd})
+        with self._lock:
+            status = "cancelled" if job.cancel_requested else status
         entry = build_entry(job.spec, status=status, outputs=outputs, cost_usd=result.cost_usd,
                             est_cost_usd=job.est, seconds=seconds, mode=mode_from_info(result.info), error=None)
         return self._add(job, entry, {"status": status, "outputs": outputs, "cost_usd": result.cost_usd})
