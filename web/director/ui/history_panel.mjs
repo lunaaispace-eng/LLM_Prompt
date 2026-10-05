@@ -5,7 +5,7 @@ import { ORIGINAL, chainDepth } from "../core/history.mjs";
 import {
   USE_IN_GRAPH_REASON, NO_ORIGINAL_REASON, historyEntries, stripRows, versionLabel,
   showRestart, restartHint, restartPatch, editHerePatch, applyRerun, historyPatch, statusLabel,
-  entryThumb, detailFields, resolvePair, mountCompare,
+  entryThumb, detailFields, resolvePair, mountCompare, rerunButton,
 } from "./compare.mjs";
 
 export {
@@ -215,10 +215,16 @@ export function mountHistory(root, store, client) {
     }
   }
 
+  // A job that ends (done / error / cancelled) has just written a ledger entry: reload, as on a project change.
+  let endedSeen = "";
   function onStore() {
-    const project = store.get().project || "";
-    if (project !== projectSeen) {
+    const s = store.get();
+    const project = s.project || "";
+    const ended = Object.values(s.jobs || {}).filter((j) => j && /^(done|error|cancelled)$/.test(j.state))
+      .map((j) => j.id).sort().join(",");
+    if (project !== projectSeen || ended !== endedSeen) {
       projectSeen = project;
+      endedSeen = ended;
       load(project);
     }
     render();
