@@ -22,15 +22,26 @@ import time
 import uuid
 from typing import Callable
 
-from luna_imaging import studio
-from luna_imaging.capabilities import caps_for, provider_for
-from luna_imaging.cost import gemini_cost, openai_estimate
-from luna_imaging.http import ProviderError
-from luna_imaging.providers import gemini as _gemini
-from luna_imaging.providers import openai as _openai
-from luna_imaging.providers import xai as _xai
-from luna_imaging.sizes import openai_size
-from luna_imaging.types import EditRequest
+try:  # inside the pack (ComfyUI, tests/_comfy.py)
+    from ..luna_imaging import studio
+    from ..luna_imaging.capabilities import caps_for, provider_for
+    from ..luna_imaging.cost import gemini_cost, openai_estimate
+    from ..luna_imaging.http import ProviderError
+    from ..luna_imaging.providers import gemini as _gemini
+    from ..luna_imaging.providers import openai as _openai
+    from ..luna_imaging.providers import xai as _xai
+    from ..luna_imaging.sizes import openai_size
+    from ..luna_imaging.types import EditRequest
+except ImportError:  # imported as a top-level package (pure tests)
+    from luna_imaging import studio
+    from luna_imaging.capabilities import caps_for, provider_for
+    from luna_imaging.cost import gemini_cost, openai_estimate
+    from luna_imaging.http import ProviderError
+    from luna_imaging.providers import gemini as _gemini
+    from luna_imaging.providers import openai as _openai
+    from luna_imaging.providers import xai as _xai
+    from luna_imaging.sizes import openai_size
+    from luna_imaging.types import EditRequest
 
 from .store import ENTRY_KEYS
 

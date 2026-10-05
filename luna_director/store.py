@@ -31,7 +31,10 @@ from typing import Callable
 
 from PIL import Image, ImageOps
 
-from luna_imaging.resize import MODES, plan_resize, apply_state
+try:  # inside the pack (ComfyUI, tests/_comfy.py)
+    from ..luna_imaging.resize import MODES, plan_resize, apply_state
+except ImportError:  # imported as a top-level package (pure tests)
+    from luna_imaging.resize import MODES, plan_resize, apply_state
 
 SUBDIR = "luna_director"
 SLUG_MAX = 48
