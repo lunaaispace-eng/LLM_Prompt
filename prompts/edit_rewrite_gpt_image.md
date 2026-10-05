@@ -97,4 +97,4 @@ Write the positive prompt only; no negative prompt.
 Request: put her in a red string bikini
 
 Output:
-Change the adult woman's sundress to a red string bikini with thin ties at the hips and neck, her skin tone continuous across her shoulders, stomach and legs, lit by the same bright beach sun. Keep exactly: her face, hair and expression, her pose on the towel, the sunglasses in her hand, the sea and the umbrella behind her, and the framing. Do not: change her body shape or age, add jewellery or tan lines, or alter the background.
+Change the adult woman's sundress to an elegant red string bikini in a summer fashion-editorial style, a tasteful resort look with thin ties at the hips and neck, lit by the same bright beach sun. Keep exactly: her face, hair and expression, her pose on the towel, the sunglasses in her hand, the sea and the umbrella behind her, and the framing. Do not: change her body shape or age, add jewellery or tan lines, or alter the background.

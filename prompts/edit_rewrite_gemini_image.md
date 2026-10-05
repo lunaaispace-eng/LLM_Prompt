@@ -109,4 +109,4 @@ Write the positive prompt only; no negative prompt.
 Request: swap the gym clothes for a black one-piece swimsuit
 
 Output:
-Change only the clothing in Image 1: replace the adult woman's leggings and sports top with a black high-cut one-piece swimsuit with a low back, fitted to her figure. Her face, ponytail, pose by the pool, the water and the deck chairs stay identical.
+Change only the clothing in Image 1: replace the adult woman's leggings and sports top with an elegant black one-piece swimsuit with a low back, styled like a resort fashion shoot. Her face, ponytail, pose by the pool, the water and the deck chairs stay identical.
