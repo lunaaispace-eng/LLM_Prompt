@@ -101,7 +101,7 @@ def _error_response(exc: BaseException, writer_error=None) -> web.Response:
         return _err(400, "bad_ref", str(exc))
     if isinstance(exc, ResizeStateError):
         return _err(400, "bad_state", str(exc))
-    if isinstance(exc, (_Refused, ValueError, KeyError, TypeError)):
+    if isinstance(exc, (_Refused, ValueError, KeyError)):
         msg = exc.args[0] if isinstance(exc, KeyError) and exc.args else str(exc)
         return _err(400, "refused", str(msg))
     log.error("director route failed: %s", _scrub(f"{type(exc).__name__}: {exc}"))
@@ -123,6 +123,21 @@ def _need_str(body: dict, key: str) -> str:
     if not isinstance(v, str) or not v:
         raise _Refused(f"{key} is required")
     return v
+
+
+def _bool(body: dict, key: str, default: bool) -> bool:
+    value = body.get(key, default)
+    if not isinstance(value, bool):
+        raise _Refused(f"{key} must be a JSON boolean")
+    return value
+
+
+def _number(value, name: str, *, integer=False, minimum=None, maximum=None):
+    if (isinstance(value, bool) or not isinstance(value, int if integer else (int, float))
+            or (not integer and not math.isfinite(value))
+            or (minimum is not None and value < minimum) or (maximum is not None and value > maximum)):
+        raise _Refused(f"{name} must be a {'whole' if integer else 'finite'} number within its bounds")
+    return value
 
 
 def _pack(name: str):
@@ -213,8 +228,8 @@ def _margins(v) -> list[int]:
         raise _Refused("outpaint must be four margins (left, top, right, bottom)")
     out = []
     for x in v:
-        if isinstance(x, bool) or not isinstance(x, (int, float)) or not math.isfinite(x) or x < 0:
-            raise _Refused("outpaint margins must be numbers >= 0")
+        if isinstance(x, bool) or not isinstance(x, (int, float)) or not math.isfinite(x) or not 0 <= x <= 2048:
+            raise _Refused("outpaint margins must be numbers in 0..2048")
         out.append(int(x))
     return out
 
@@ -224,9 +239,28 @@ def build_writer_request(writer, body: dict, dirs: dict):
     unknown = set(body) - set(WRITE_KEYS)
     if unknown:
         raise _Refused(f"unknown write keys: {', '.join(sorted(unknown))}")
-    send = body.get("send") or {}
+    send = body.get("send", {})
     if not isinstance(send, dict):
         raise _Refused("send must be {canvas, mask, refs}")
+    for key in send:
+        _bool(send, key, True)
+    for key, default in (("thinking", False), ("negative", True), ("sections", False)):
+        _bool(body, key, default)
+    variants = _number(body.get("variants", 1), "variants", integer=True, minimum=1)
+    for key, lo, hi in (("crop_padding", 0, 1), ("vision_mp", 0, None)):
+        if key in body:
+            _number(body[key], key, minimum=lo, maximum=hi)
+    gguf = body.get("gguf", {})
+    if not isinstance(gguf, dict):
+        raise _Refused("gguf must be an object")
+    # Values passed to the GGUF node's numeric conversions must be validated at the body boundary.
+    for key in ("max_tokens", "seed", "n_ctx", "n_gpu_layers", "top_k", "image_min_tokens", "image_max_tokens"):
+        if key in gguf:
+            _number(gguf[key], f"gguf.{key}", integer=True)
+    for key in ("temperature", "top_p", "min_p", "repetition_penalty", "presence_penalty", "frequency_penalty",
+                "video_fps", "vision_mp"):
+        if key in gguf:
+            _number(gguf[key], f"gguf.{key}")
     refs = body.get("refs") or []
     if not isinstance(refs, list) or not all(isinstance(r, dict) and isinstance(r.get("ref"), dict) for r in refs):
         raise _Refused("refs must be a list of {role, ref}")
@@ -240,17 +274,17 @@ def build_writer_request(writer, body: dict, dirs: dict):
     if size is not None:
         if not isinstance(size, (list, tuple)) or len(size) != 2:
             raise _Refused("size must be [width, height] or null")
-        size = (int(size[0]), int(size[1]))
+        size = tuple(_number(v, "size", integer=True, minimum=1) for v in size)
     kw = dict(
         provider=body.get("provider") or "", model=body.get("model") or "", preset=body.get("preset") or None,
         target_model=body.get("target_model") or "", operation=body.get("operation") or "edit",
         request=body.get("request") or "", canvas=canvas, mask=mask,
         refs=[(str(r.get("role") or ""), _open(r["ref"], dirs)) for r in refs],
-        send_canvas=bool(send.get("canvas", True)), send_mask=bool(send.get("mask", True)),
-        send_refs=bool(send.get("refs", True)), thinking=bool(body.get("thinking", False)),
-        negative=bool(body.get("negative", True)), server_url=body.get("server_url") or "",
-        gguf=body.get("gguf") or {}, size=size, variants=int(body.get("variants") or 1),
-        sections=bool(body.get("sections", False)), exact_text=body.get("exact_text") or "",
+        send_canvas=_bool(send, "canvas", True), send_mask=_bool(send, "mask", True),
+        send_refs=_bool(send, "refs", True), thinking=_bool(body, "thinking", False),
+        negative=_bool(body, "negative", True), server_url=body.get("server_url") or "",
+        gguf=gguf, size=size, variants=variants,
+        sections=_bool(body, "sections", False), exact_text=body.get("exact_text") or "",
         feedback=body.get("feedback") or "", prior_prompt=body.get("prior_prompt") or "",
         result=_open(body["result"], dirs) if body.get("result") else None,
     )
@@ -309,7 +343,13 @@ def register_routes(routes: web.RouteTableDef, deps: Deps) -> None:
             data = None
 
         def go():
-            raw = data if data is not None else resolve_ref(src, deps.dirs).read_bytes()
+            if data is not None:
+                raw = data
+            else:
+                path = resolve_ref(src, deps.dirs)
+                if not path.is_file():
+                    raise RefError("ref does not exist or is not a file")
+                raw = path.read_bytes()
             return {"ref": deps.store.import_asset(project, raw)}
         return web.json_response(await run(go))
 
@@ -324,8 +364,11 @@ def register_routes(routes: web.RouteTableDef, deps: Deps) -> None:
         state = body.get("state") or {}
         if not isinstance(state, dict):
             raise _Refused("state must be {all?, items?}")
-        dry = bool(body.get("dry_run", False))
+        dry = _bool(body, "dry_run", False)
         items = parse_state(state, len(refs))
+        for item in items:
+            for key in ("max_mp", "longest_side", "scale_factor", "snap"):
+                _number(item[key], key, integer=key == "snap", minimum=0)
 
         def go():
             return {"items": [deps.store.resize_asset(project, r, it, deps.dirs, dry_run=dry)
@@ -374,6 +417,8 @@ def register_routes(routes: web.RouteTableDef, deps: Deps) -> None:
         body = await _json(request)
         sid, project = body.get("sid") or "", _need_str(body, "project")
         entry_id = _need_str(body, "entry_id")
+        if body.get("choice") is not None and not isinstance(body["choice"], dict):
+            raise _Refused("choice must be an object or null")
         return web.json_response(await run(deps.jobs.submit_final, sid, project, entry_id, body.get("choice")))
 
     @routes.get("/luna/studio/jobs")
