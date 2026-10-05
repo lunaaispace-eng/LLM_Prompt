@@ -42,6 +42,7 @@ export function createStore(initial = {}, actions = {}) {
       return () => subs.delete(fn);
     },
     register(name, fn) { table.set(name, fn); },
+    has(name) { return table.has(name); },
     act(name, ...args) {
       const fn = table.get(name);
       if (!fn) throw new Error(`unknown store action: ${name}`);
