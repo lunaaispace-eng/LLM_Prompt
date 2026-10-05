@@ -1,5 +1,5 @@
 // Image canvas: zoom, pan, mask tools, outpaint handles, crop frame. Maths stays in core/.
-import { el } from "./dom.mjs";
+import { el, ensureCss } from "./dom.mjs";
 import {
   makeView, zoomAt, pan, toImage, normBox, outpaintMargins, anchorFromFrame,
 } from "../core/geometry.mjs";
@@ -15,6 +15,7 @@ const SIDE = { left: 0, top: 1, right: 2, bottom: 3 };
 function px(n) { return n + "px"; }
 
 export function mountCanvas(host, store, client) {
+  ensureCss(new URL("./canvas_view.css", import.meta.url));
   const photo = el("img", { class: "ld-photo", alt: "", draggable: "false" });
   const maskCanvas = el("canvas", { class: "ld-mask", "aria-hidden": "true" });
   const boxEl = el("div", { class: "ld-box", hidden: true });

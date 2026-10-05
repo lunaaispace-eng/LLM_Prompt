@@ -1,0 +1,139 @@
+/* Canvas slot (A13). Mask tint follows the approved drawing; chrome stays on the Luna tokens. */
+.ld-slot[data-slot="canvas"] .ld-slot-body {
+  overflow: hidden;
+  display: flex;
+  flex-direction: column;
+}
+
+.ld-canvas { flex: 1 1 auto; min-height: 0; display: flex; flex-direction: column; }
+
+.ld-canvas-main { flex: 1 1 auto; min-height: 0; display: flex; }
+
+.ld-tools-host { flex: 0 0 auto; border-right: 1px solid var(--border); }
+
+.ld-tools {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  width: 132px;
+  padding: 6px;
+  box-sizing: border-box;
+}
+
+.ld-tool {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  width: 100%;
+  padding: 4px 6px;
+  background: transparent;
+  color: var(--text);
+  border: 1px solid transparent;
+  border-radius: 6px;
+  cursor: pointer;
+  font: inherit;
+  text-align: left;
+}
+
+.ld-tool kbd { margin-left: auto; color: var(--muted); font: inherit; font-size: 11px; }
+
+.ld-tool[aria-pressed="true"] { border-color: var(--accent); color: var(--accent); }
+
+.ld-tool:disabled { opacity: 0.4; cursor: default; }
+
+.ld-tool-gap { height: 6px; }
+
+.ld-canvas-col { flex: 1 1 auto; min-width: 0; min-height: 0; display: flex; flex-direction: column; }
+
+.ld-stage {
+  position: relative;
+  flex: 1 1 auto;
+  min-height: 0;
+  overflow: hidden;
+  background: var(--bg);
+  touch-action: none;
+}
+
+.ld-stage[data-tool="brush"],
+.ld-stage[data-tool="eraser"] { cursor: none; }
+
+.ld-stage[data-tool="box"] { cursor: crosshair; }
+
+.ld-stage.ld-space,
+.ld-stage.ld-space * { cursor: grab; }
+
+.ld-world { position: absolute; left: 0; top: 0; transform-origin: 0 0; pointer-events: none; }
+
+.ld-photo { display: block; }
+
+.ld-mask { position: absolute; inset: 0; width: 100%; height: 100%; pointer-events: none; }
+
+.ld-box, .ld-crop, .ld-outpaint { position: absolute; box-sizing: border-box; }
+
+.ld-box {
+  border: 1px dashed #22c9a0;
+  background: rgba(34, 201, 160, 0.22);
+  pointer-events: none;
+}
+
+.ld-crop { border-style: dashed; border-color: var(--accent); pointer-events: auto; cursor: move; }
+
+.ld-outpaint { border: 1px dashed var(--processing); pointer-events: none; }
+
+.ld-handle {
+  position: absolute;
+  padding: 0;
+  background: var(--panel);
+  border: 1px solid var(--accent);
+  border-radius: 2px;
+  pointer-events: auto;
+}
+
+.ld-handle[data-side="left"] { left: 0; top: 50%; transform: translate(-50%, -50%); cursor: ew-resize; }
+.ld-handle[data-side="right"] { left: 100%; top: 50%; transform: translate(-50%, -50%); cursor: ew-resize; }
+.ld-handle[data-side="top"] { left: 50%; top: 0; transform: translate(-50%, -50%); cursor: ns-resize; }
+.ld-handle[data-side="bottom"] { left: 50%; top: 100%; transform: translate(-50%, -50%); cursor: ns-resize; }
+
+.ld-ring {
+  position: absolute;
+  border: 1px solid #22c9a0;
+  border-radius: 50%;
+  transform: translate(-50%, -50%);
+  pointer-events: none;
+}
+
+.ld-ring[data-tool="eraser"] { border-style: dashed; border-color: var(--text); }
+
+.ld-pan-hint {
+  position: absolute;
+  left: 8px;
+  bottom: 8px;
+  margin: 0;
+  color: var(--muted);
+  font-size: 12px;
+  pointer-events: none;
+}
+
+.ld-stage .ld-empty:not([hidden]) {
+  position: absolute;
+  inset: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  margin: 0;
+  text-align: center;
+}
+
+.ld-canvas-status {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+  padding: 6px 8px;
+  border-top: 1px solid var(--border);
+  color: var(--muted);
+}
+
+.ld-zoom { min-width: 4.5em; }
+
+.ld-brush { width: 120px; accent-color: var(--accent); }
