@@ -93,6 +93,14 @@ try:
 except Exception as e:  # pragma: no cover
     print(f"[LLM_Prompt] Luna Image Studio (API Key) node not loaded: {e}")
 
+# Luna Director routes (/luna/director/*, /luna/studio/*); optional like the nodes.
+try:
+    from server import PromptServer
+    from .luna_director import routes as _director_routes
+    _director_routes.install(PromptServer.instance)
+except Exception as e:  # pragma: no cover
+    print(f"[LLM_Prompt] Luna Director routes not loaded: {e}")
+
 __all__ = ["NODE_CLASS_MAPPINGS", "NODE_DISPLAY_NAME_MAPPINGS"]
 
 WEB_DIRECTORY = "./web"
