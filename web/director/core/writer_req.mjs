@@ -51,7 +51,7 @@ export function buildWriteBody(state, config, target = null) {
       mask_mode: state.engine.params.mask_mode, crop_padding: state.engine.params.crop_padding,
       size: sizeFor(g.params.aspect_ratio, g.params.resolution),
       variants: g.variantsMode === "varied" ? g.params.count : 1, sections: true,
-      exact_text: g.exactText || "", feedback: "", prior_prompt: "", result: null,
+      exact_text: g.exactText || "", feedback: "", prior_prompt: "", result: null, outpaint: null,
     };
   }
   const p = state.engine.params;
@@ -59,6 +59,7 @@ export function buildWriteBody(state, config, target = null) {
     ...common, canvas: state.asset, mask: state.mask, target_model: state.engine.model, operation: p.operation,
     request: state.request, mask_mode: p.mask_mode, crop_padding: p.crop_padding, size: null, variants: 1,
     sections: false, exact_text: "", feedback: "", prior_prompt: "", result: null,
+    outpaint: p.operation === "outpaint" && Array.isArray(p.outpaint) ? p.outpaint : null, // the route grows the canvas
   };
 }
 

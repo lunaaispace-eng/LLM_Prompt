@@ -37,7 +37,7 @@ test("sentRefs keeps order and cuts at the limit", () => {
 
 const WRITE_KEYS = ["canvas", "mask", "refs", "provider", "model", "preset", "target_model", "operation", "request",
   "send", "thinking", "negative", "mask_mode", "crop_padding", "vision_mp", "server_url", "gguf",
-  "size", "variants", "sections", "exact_text", "feedback", "prior_prompt", "result"].sort();
+  "size", "variants", "sections", "exact_text", "feedback", "prior_prompt", "result", "outpaint"].sort();
 
 test("buildWriteBody has exactly the A6 keys, carries switches and drops refs past the limit", () => {
   const st = edit({ refs: refs(5), writer: { ...edit().writer, provider: "Custom", model: "m", thinking: true,
@@ -195,4 +195,12 @@ test("the nominal write size never becomes width/height", () => {
   assert.deepEqual(b.size, [2048, 1152]);
   const st = gen();
   assert.ok(!("width" in st.generate.params) && !("height" in st.generate.params));
+});
+
+test("an outpaint write carries the margins; any other write sends outpaint null", () => {
+  const margins = [64, 0, 64, 0];
+  const st = edit({ engine: { ...edit().engine, params: { ...edit().engine.params, operation: "outpaint", outpaint: margins } } });
+  assert.deepEqual(buildWriteBody(st, config).outpaint, margins);
+  const inpaint = edit({ engine: { ...edit().engine, params: { ...edit().engine.params, operation: "inpaint", outpaint: margins } } });
+  assert.equal(buildWriteBody(inpaint, config).outpaint, null);
 });
