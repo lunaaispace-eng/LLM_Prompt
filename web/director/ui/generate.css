@@ -1,7 +1,7 @@
 /* S10 v2, using the shell's Luna tokens. The existing reference and queue panels stay shared. */
 .ld-grid[data-mode="generate"] {
   grid-template-columns: 220px minmax(260px, 1fr) 280px;
-  grid-template-rows: minmax(260px, auto) minmax(190px, 1fr) auto auto;
+  grid-template-rows: minmax(260px, 1fr) minmax(190px, 1fr) auto auto;
   grid-template-areas: "refs prompt sidebar" "results results sidebar" "queue queue queue" "history history history";
   overflow-y: auto;
 }
@@ -11,7 +11,10 @@
 .ld-grid[data-mode="generate"] > [data-slot="generate"] > header { display: none; }
 .ld-grid[data-mode="generate"] > [data-slot="history"] { grid-area: history; max-height: 180px; }
 .ld-g-prompt { grid-area: prompt; }
-.ld-g-sidebar { grid-area: sidebar; display: flex; flex-direction: column; gap: 10px; min-width: 0; }
+.ld-g-sidebar {
+  grid-area: sidebar; display: flex; flex-direction: column; gap: 10px;
+  min-width: 0; min-height: 0; overflow-y: auto;
+}
 .ld-g-results { grid-area: results; }
 .ld-g-card { background: var(--panel); border: 1px solid var(--border); border-radius: var(--radius); padding: 12px; min-width: 0; }
 .ld-g-card h3 { margin: 0 0 10px; font-size: 14px; }
@@ -54,6 +57,6 @@
 .ld-generate [hidden], .ld-g-card [hidden], .ld-g-sidebar [hidden] { display: none; }
 @media (max-width: 1000px) {
   .ld-grid[data-mode="generate"] { grid-template-columns: 180px minmax(240px, 1fr); grid-template-areas: "refs prompt" "sidebar sidebar" "results results" "queue queue" "history history"; }
-  .ld-g-sidebar { display: grid; grid-template-columns: 1fr 1fr; }
+  .ld-g-sidebar { display: grid; grid-template-columns: 1fr 1fr; min-height: auto; overflow: visible; }
 }
 @media (prefers-reduced-motion: reduce) { .ld-g-indeterminate::after { animation: none; } }

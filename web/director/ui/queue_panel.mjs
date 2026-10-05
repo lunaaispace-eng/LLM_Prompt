@@ -50,7 +50,10 @@ export function mountQueue(root, store, client) {
   const popup = el("div", { class: "ld-queue-confirm", role: "alertdialog", "aria-label": "Cancel running job?", hidden: true });
   const failure = el("p", { role: "alert", class: "ld-queue-error" });
   panel.append(el("p", { class: "ld-muted", text: "cloud: up to 3 at once" }),
-    el("div", { class: "ld-queue-row ld-muted" }, ["job", "state / elapsed", "estimate", "actual", ""]), body, popup, failure, footer);
+    el("div", { class: "ld-queue-row ld-muted" }, [
+      el("span", { text: "job" }), el("span", { text: "state / elapsed" }),
+      el("span", { text: "estimate" }), el("span", { text: "actual" }), el("span"),
+    ]), body, popup, failure, footer);
   root.append(panel);
   async function cancel(row, confirmed = false) {
     try {
