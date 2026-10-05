@@ -15,10 +15,10 @@ export function queueRows(state) {
   const batches = new Map(queue.batches().map((b) => [b.batchId, b]));
   const seen = new Set(), rows = [];
   for (const job of jobs) {
-    if (!job.batch || job.tier === "final" || job.entry?.tier === "final") { rows.push(job); continue; }
+    if (!job.batch || (!job.batchInfo && (job.tier === "final" || job.entry?.tier === "final"))) { rows.push(job); continue; }
     if (seen.has(job.batch)) continue;
     seen.add(job.batch);
-    const group = batches.get(job.batch), children = group.jobs.filter((j) => j.tier !== "final" && j.entry?.tier !== "final");
+    const group = batches.get(job.batch), children = group.jobs.filter((j) => j.batchInfo || (j.tier !== "final" && j.entry?.tier !== "final"));
     const q = createQueue(); q.addBatch(job.batch, children);
     const batch = job.batchInfo || (state.generate?.batch?.batch_id === job.batch || state.generate?.batch?.id === job.batch
       ? state.generate.batch : {}) || {};
