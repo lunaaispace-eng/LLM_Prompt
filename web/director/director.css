@@ -247,3 +247,25 @@
 }
 
 .ld-muted { margin: 8px 0 0; font-size: 12px; }
+
+.ld-writer { padding: 4px 10px 12px; }
+.ld-writer .ld-field select,
+.ld-writer .ld-field textarea {
+  background: var(--bg);
+  color: var(--text);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  padding: 5px 8px;
+  font: inherit;
+  min-width: 0;
+}
+.ld-writer textarea { resize: vertical; }
+.ld-writer-switches { display: flex; flex-wrap: wrap; gap: 8px; margin: 10px 0; }
+.ld-writer-toggle { display: flex; align-items: center; gap: 4px; font-size: 12px; }
+.ld-writer-toggle input { accent-color: var(--accent); }
+.ld-writer .ld-btn { width: 100%; }
+.ld-writer-primary { display: flex; align-items: center; justify-content: center; gap: 6px; background: var(--accent); color: var(--bg); }
+.ld-writer-use { border-color: var(--accent); color: var(--accent); }
+.ld-writer-error { color: var(--danger); overflow-wrap: anywhere; }
+.ld-writer [hidden] { display: none; }
+.ld-writer :disabled { opacity: 0.55; cursor: default; }

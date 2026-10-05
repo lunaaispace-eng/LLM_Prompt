@@ -2,6 +2,7 @@
 // A13–A18a each add one row (and, if needed, one id in a tab's `slots` list).
 import { clear, el, ensureCss, projectSlug } from "../ui/dom.mjs";
 import { mountSettings } from "../ui/settings.mjs";
+import { mountWriter } from "../ui/writer_panel.mjs";
 
 export const USE_IN_GRAPH_REASON =
   "open the studio from a launcher node to send a result to the graph";
@@ -9,6 +10,7 @@ export const USE_IN_GRAPH_REASON =
 // Shell rows only. Later tasks append {slot, module, mount}.
 export const SLOT_TABLE = [
   { slot: "settings", module: "ui/settings.mjs", mount: mountSettings },
+  { slot: "writer", module: "ui/writer_panel.mjs", mount: mountWriter },
 ];
 
 // Each tab carries its own layout. Stage A has no Packages entry and no placeholder.
