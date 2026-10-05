@@ -23,6 +23,9 @@ _SIZES = {
     "gemini-2.5-flash-image": ["1K"],
 }
 _DEFAULT_SIZES = ["1K", "2K", "4K"]
+# The label "0.5K" stays for pricing and the UI; the API takes "512" for it (TESTED 2026-10-05: HTTP 400
+# "Unsupported image_size '0.5K'. Supported values are: 1K, 2K, 4K, 512, 512P, 512PX.").
+API_SIZE = {"0.5K": "512"}
 _DEFAULT_PRICE_SIZE = "1K"
 
 # Copied from gemini_image_node.ASPECT_RATIOS (without "auto"): the aspectRatio values the API takes.
@@ -128,7 +131,7 @@ def run(req: EditRequest, key: str) -> EditResult:
             fallback = _clamp_size(size, sizes)
             info.append(f"{req.model} does not accept {size} - clamped to {fallback}")
             size = fallback
-        image_config["imageSize"] = size
+        image_config["imageSize"] = API_SIZE.get(size, size)
 
     gen_config: dict = {"responseModalities": ["TEXT", "IMAGE"]}
     if image_config:

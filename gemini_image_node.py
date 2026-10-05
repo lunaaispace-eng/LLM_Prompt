@@ -480,7 +480,8 @@ class GeminiImageNode(io.ComfyNode):
                 fallback = caps["sizes"][-1]
                 notes.append(f"{model} does not accept {size} - clamped to {fallback}")
                 size = fallback
-            img_kwargs["image_size"] = size
+            # "0.5K" is the label; the API takes "512" (HTTP 400 on "0.5K", TESTED 2026-10-05).
+            img_kwargs["image_size"] = "512" if size == "0.5K" else size
         # person_generation deliberately never sent — Vertex-only, see the note
         # at the top of this file.
 

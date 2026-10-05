@@ -78,6 +78,12 @@ class GeminiTests(unittest.TestCase):
         self.assertEqual(fake.calls[0][2]["generationConfig"]["imageConfig"],
                          {"aspectRatio": "16:9", "imageSize": "2K"})
 
+    def test_half_k_sent_as_512_priced_as_half_k(self):
+        # The API rejects "0.5K" (HTTP 400, live 2026-10-05) and takes "512"; the label and price stay 0.5K.
+        res, fake = run(req(model="gemini-3.1-flash-image", resolution="0.5K"))
+        self.assertEqual(fake.calls[0][2]["generationConfig"]["imageConfig"]["imageSize"], "512")
+        self.assertAlmostEqual(res.cost_usd, 0.045)
+
     def test_resolution_clamped_with_note(self):
         res, fake = run(req(model="gemini-2.5-flash-image", resolution="4K"))
         cfg = fake.calls[0][2]["generationConfig"]["imageConfig"]
