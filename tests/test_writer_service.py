@@ -108,6 +108,16 @@ class PresetsMapTest(unittest.TestCase):
 
 
 class AssembleParseTest(unittest.TestCase):
+    def test_generate_pipe_stays_in_subject(self):
+        for negative in (None, "blur"):
+            with self.subTest(negative=negative):
+                block = _variant_block(1, "a cat | a dog", negative)
+                parsed = PW.parse_generate_output(block, 1)[0]
+                self.assertEqual(parsed["sections"]["subject"], "a cat | a dog")
+                self.assertTrue(all(parsed["sections"].values()))
+                self.assertIn("a cat | a dog", parsed["positive"])
+                self.assertEqual(parsed["negative"], negative or "")
+
     def test_assemble_prompt_matches_fixture(self):
         with open(FIXTURE, encoding="utf-8") as f:
             cases = json.load(f)["cases"]
@@ -377,6 +387,14 @@ class WriterDispatchTest(unittest.TestCase):
         self.assertEqual(len(res.legend), 3)
         self.assertGreaterEqual(res.seconds, 0)
 
+    def test_server_url_only_forwarded_for_custom(self):
+        for provider in ("OpenAI", "Custom"):
+            with self.subTest(provider=provider):
+                _, fake = self._write_api(_req(self.W, provider=provider,
+                                              server_url="https://fake.example/v1"))
+                self.assertEqual(fake.calls[0]["server_url"],
+                                 "https://fake.example/v1" if provider == "Custom" else "")
+
     def test_user_preset_wins(self):
         res, fake = self._write_api(_req(self.W, preset="Image Edit"))
         self.assertEqual(fake.calls[0]["system_prompt"], "Image Edit")
@@ -544,6 +562,21 @@ class WriterDispatchTest(unittest.TestCase):
         res, fake = self._write_api(self._gen_req(variants=3, sections=True), _Api(ok3))
         self.assertEqual(len(fake.calls), 1)
         self.assertEqual(len(res.variants), 3)
+
+    def test_retry_filters_all_blocks_before_limiting(self):
+        first = "\n".join(_variant_block(i, "a lighthouse keeper on wet rocks") for i in range(1, 4))
+        retry = "\n".join([_variant_block(1, "a lighthouse keeper on wet rocks"),
+                           _variant_block(2, "a tram in neon rain"),
+                           _variant_block(3, "a fox crossing a frozen lake")])
+        req = self._gen_req(variants=3, sections=True)
+        request_text = req.request
+        res, fake = self._write_api(req, _Api(first, retry))
+        self.assertEqual(len(fake.calls), 2)
+        self.assertIn("VARIANTS: 2", fake.calls[1]["context"])
+        self.assertIn("ALREADY USED:", fake.calls[1]["context"])
+        self.assertEqual(len(res.variants), 3)
+        self.assertTrue(self.W.distinct_variants([v["positive"] for v in res.variants]))
+        self.assertEqual(req.request, request_text)
 
     def test_generate_negative_off_drops_every_negative(self):
         reply = "\n\n".join([_variant_block(1, "a keeper", "blur"), _variant_block(2, "a tram in rain", "text")])

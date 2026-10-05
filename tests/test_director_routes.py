@@ -2,10 +2,12 @@
 (temp folders). Loaded through tests/_comfy.py, so the routes import the pack's own modules."""
 import io
 import json
+import os
 import shutil
 import tempfile
 import types
 from pathlib import Path
+from unittest import mock
 
 import _comfy
 from aiohttp import FormData, web
@@ -217,12 +219,95 @@ class DirectorRoutes(AioHTTPTestCase):
         status, err = await self._post("/luna/director/write", self._write_body(a["ref"]))
         self.assertEqual((status, err["error"]["code"]), (400, "no_key"))
 
+    async def test_route_errors_scrub_environment_file_and_key_patterns(self):
+        _, a = await self._asset()
+        api = _comfy.load("llm_prompt_api_node")
+        keys = ["FAKE-ENV-CREDENTIAL", "FAKE-FILE-CREDENTIAL", "FAKE-ALIAS-CREDENTIAL",
+                "sk-FAKE0123456789", "xai-FAKE0123456789", "AIzaFAKE012345678901234567"]
+        self.writer.raise_with = writer_mod.WriterError("provider", "failure " + " ".join(keys))
+        with mock.patch.dict(os.environ, {"OPENAI_API_KEY": keys[0], "XAI_API_KEY": keys[2]}), \
+                mock.patch.object(api, "_load_env_file_keys", return_value={"OPENAI_API_KEY": keys[1]}):
+            status, err = await self._post("/luna/director/write", self._write_body(a["ref"]))
+        self.assertEqual((status, err["error"]["code"]), (400, "provider"))
+        for key in keys:
+            self.assertNotIn(key, json.dumps(err))
+        self.assertIn("[key removed]", err["error"]["message"])
+
     async def test_ref_traversal_400(self):
         bad = {"name": "../../secret.png", "subfolder": "", "type": "input"}
         status, err = await self._post("/luna/director/write", self._write_body(bad))
         self.assertEqual((status, err["error"]["code"]), (400, "bad_ref"))
         status, err = await self._post("/luna/director/asset", {"project": PROJECT, "from_ref": bad})
         self.assertEqual((status, err["error"]["code"]), (400, "bad_ref"))
+
+    async def test_asset_missing_or_directory_ref_is_bad_ref(self):
+        Path(self.dirs["input"], "directory").mkdir()
+        for name in ("missing.png", "directory"):
+            with self.subTest(name=name):
+                status, err = await self._post("/luna/director/asset", {"project": PROJECT,
+                    "from_ref": {"name": name, "subfolder": "", "type": "input"}})
+                self.assertEqual((status, err["error"]["code"]), (400, "bad_ref"))
+
+    async def test_outpaint_margin_cap_refused(self):
+        _, a = await self._asset()
+        status, err = await self._post("/luna/director/write",
+            self._write_body(a["ref"], operation="outpaint", outpaint=[2049, 0, 0, 0]))
+        self.assertEqual((status, err["error"]["code"]), (400, "refused"))
+        self.assertEqual(self.writer.requests, [])
+        self.assertEqual(routes_mod._margins([2048, 0, 0, 0]), [2048, 0, 0, 0])
+
+    async def test_body_flags_require_json_booleans(self):
+        _, a = await self._asset()
+        for flag in ("thinking", "negative", "sections"):
+            for value in ("false", 0, None, []):
+                with self.subTest(flag=flag, value=value):
+                    status, err = await self._post("/luna/director/write",
+                        self._write_body(a["ref"], **{flag: value}))
+                    self.assertEqual((status, err["error"]["code"]), (400, "refused"))
+        for flag in ("canvas", "mask", "refs", "extra"):
+            with self.subTest(send=flag):
+                status, err = await self._post("/luna/director/write",
+                    self._write_body(a["ref"], send={flag: "false"}))
+                self.assertEqual((status, err["error"]["code"]), (400, "refused"))
+        status, err = await self._post("/luna/director/resize",
+            {"project": PROJECT, "refs": [a["ref"]], "dry_run": "false"})
+        self.assertEqual((status, err["error"]["code"]), (400, "refused"))
+        self.assertEqual(self.writer.requests, [])
+
+    async def test_body_numeric_conversions_refused(self):
+        _, a = await self._asset()
+        for over in ({"variants": {}}, {"size": [{}, 1024]}, {"variants": "2"},
+                     {"crop_padding": {}}, {"vision_mp": {}}, {"gguf": []},
+                     {"gguf": {"image_max_tokens": {}}}, {"gguf": {"frequency_penalty": []}}):
+            with self.subTest(over=over):
+                status, err = await self._post("/luna/director/write", self._write_body(a["ref"], **over))
+                self.assertEqual((status, err["error"]["code"]), (400, "refused"))
+        status, err = await self._post("/luna/director/resize", {"project": PROJECT,
+            "refs": [a["ref"]], "state": {"all": {"mode": "longest_side", "longest_side": {}}}})
+        self.assertEqual((status, err["error"]["code"]), (400, "refused"))
+
+    async def test_internal_typeerror_returns_500(self):
+        _, a = await self._asset()
+        self.writer.raise_with = TypeError("fake internal failure")
+        status, err = await self._post("/luna/director/write", self._write_body(a["ref"]))
+        self.assertEqual((status, err["error"]["code"]), (500, "internal"))
+
+    def test_huge_outpaint_margin_refused(self):
+        with self.assertRaises(routes_mod._Refused):
+            routes_mod._margins([10 ** 400, 0, 0, 0])
+
+    async def test_unknown_writer_error_returns_internal(self):
+        _, a = await self._asset()
+        self.writer.raise_with = writer_mod.WriterError("fake_unknown", "fake unexpected failure")
+        status, err = await self._post("/luna/director/write", self._write_body(a["ref"]))
+        self.assertEqual((status, err["error"]["code"]), (500, "internal"))
+
+    async def test_run_and_batch_count_caps_refused(self):
+        status, err = await self._post("/luna/studio/run", {"project": PROJECT,
+            "spec": {"model": "gpt-image-2", "operation": "generate", "prompt": "a fox", "n": 9}})
+        self.assertEqual((status, err["error"]["code"]), (400, "refused"))
+        status, err = await self._post("/luna/studio/batch", {"project": PROJECT, "batch": _batch(count=9)})
+        self.assertEqual((status, err["error"]["code"]), (400, "refused"))
 
     # ---- assets and resize
 

@@ -137,6 +137,61 @@ class Harness(unittest.TestCase):
 
 
 class CloudJobTests(Harness):
+    def test_scrub_failure_always_emits_terminal_error(self):
+        self.fake = FakeRun(error=RuntimeError("fake provider failure"))
+        with mock.patch.object(self.runner, "_scrub", side_effect=RuntimeError("fake scrub failure")):
+            out = self.runner.submit_cloud(SID, PROJECT, self.spec())
+            self.finish()
+        self.assertEqual(self.states(out["job_id"]), ["queued", "running", "error"])
+        self.assertEqual(self.runner.jobs_for(SID)[0]["state"], "error")
+        self.assertEqual(self.last(out["job_id"])["error"]["code"], "internal")
+
+    def test_record_failure_always_emits_terminal_error(self):
+        with mock.patch.object(self.runner, "_record", side_effect=RuntimeError("fake record failure")):
+            out = self.runner.submit_cloud(SID, PROJECT, self.spec())
+            self.finish()
+        self.assertEqual(self.states(out["job_id"])[-1], "error")
+
+    def test_scrub_snapshots_keys_under_lock(self):
+        runner = self.runner
+        class CheckedKeys(set):
+            def __iter__(self):
+                self_test.assertTrue(runner._lock.locked())
+                return super().__iter__()
+        self_test = self
+        with runner._lock:
+            runner._keys = CheckedKeys([KEY])
+        self.assertEqual(runner._scrub("failure " + KEY), "failure ***")
+
+    def test_numeric_spec_fields_refused_before_queue(self):
+        invalid = {"crop_padding": [{"bad": True}, "0.25", True, -0.1, 1.1, float("nan"), float("inf")],
+                   "feather_px": [{}, "16", True, -1, 0.5, float("inf")],
+                   "n": [9], "outpaint": [[2049, 0, 0, 0], [-1, 0, 0, 0],
+                                              [float("nan"), 0, 0, 0], [{}, 0, 0, 0]]}
+        for field, values in invalid.items():
+            for value in values:
+                with self.subTest(field=field, value=value), self.assertRaises(ValueError):
+                    self.runner.submit_cloud(SID, PROJECT, self.spec(**{field: value}))
+        self.assertEqual(self.runner.jobs_for(SID), [])
+        self.assertEqual(self.fake.calls, [])
+
+    def test_numeric_spec_boundaries_accepted(self):
+        spec = jobs.normalize_spec(self.spec(crop_padding=1, feather_px=0, n=8, outpaint=[2048] * 4))
+        self.assertEqual((spec["crop_padding"], spec["feather_px"], spec["n"], spec["outpaint"]),
+                         (1, 0, 8, [2048] * 4))
+
+    def test_explicit_null_numbers_and_huge_margins_refused(self):
+        for over in ({"crop_padding": None}, {"feather_px": None}, {"n": None},
+                     {"crop_padding": 10 ** 400}, {"outpaint": [10 ** 400, 0, 0, 0]}):
+            with self.subTest(over=over), self.assertRaises(ValueError):
+                jobs.normalize_spec(self.spec(**over))
+
+    def test_batch_count_cap_refused_before_queue(self):
+        with self.assertRaises(ValueError):
+            self.runner.submit_batch(SID, PROJECT, self.batch(count=9))
+        self.assertEqual(self.runner.jobs_for(SID), [])
+        self.assertEqual(self.fake.calls, [])
+
     def test_events_order(self):
         out = self.runner.submit_cloud(SID, PROJECT, self.spec())
         self.finish()
@@ -278,6 +333,28 @@ class CloudJobTests(Harness):
 
 
 class CancelTests(Harness):
+    def test_cancel_during_save_keeps_image_and_cost(self):
+        started, release = threading.Event(), threading.Event()
+        save = self.store.save_png
+        def blocked_save(*args):
+            started.set()
+            self.assertTrue(release.wait(WAIT))
+            return save(*args)
+        with mock.patch.object(self.store, "save_png", side_effect=blocked_save):
+            out = self.runner.submit_cloud(SID, PROJECT, self.spec())
+            try:
+                self.assertTrue(started.wait(WAIT))
+                self.assertTrue(self.runner.cancel(out["job_id"]))
+            finally:
+                release.set()
+            self.finish()
+        entry = self.entry_of(out["job_id"])
+        self.assertEqual(self.states(out["job_id"])[-1], "cancelled")
+        self.assertEqual(entry["status"], "cancelled")
+        self.assertEqual(entry["cost_usd"], 0.01)
+        self.assertEqual(len(entry["outputs"]), 1)
+        self.assertAlmostEqual(self.store.day_cost(date.today().isoformat()), 0.01)
+
     max_workers = 1
 
     def test_cancel_before_start_never_calls_run(self):
