@@ -279,9 +279,9 @@ _VARIANT_RE = re.compile(r"\[VARIANT\s*\d+\]", re.IGNORECASE)
 _SECTION_RE = re.compile(r"\[(SUBJECT|STYLE|COMPOSITION|LIGHTING|CAMERA)\]", re.IGNORECASE)
 
 
-def parse_generate_output(text: str, n: int) -> list[dict]:
-    """`[VARIANT n]` blocks -> [{positive, negative, sections}], at most n. Each block's negative is
-    split by output_cleaner.split_positive_negative; with section tags the positive is assembled from
+def parse_generate_output(text: str, n: int | None = None) -> list[dict]:
+    """`[VARIANT n]` blocks -> [{positive, negative, sections}], at most n (all when None).
+    Only a [NEGATIVE] tag splits a generate block; with section tags the positive is assembled from
     them, without tags the text is the prompt and `sections` is None. No variant tags = one variant."""
     text = (text or "").strip()
     if not text:
@@ -294,7 +294,9 @@ def parse_generate_output(text: str, n: int) -> list[dict]:
         blocks = [text]
     out = []
     for block in blocks:
-        positive, negative = split_positive_negative(block.strip(), True)
+        parts = re.split(r"\[\s*NEGATIVE\s*\]", block.strip(), maxsplit=1, flags=re.IGNORECASE)
+        positive, _ = split_positive_negative(parts[0], False)
+        negative = parts[1].strip() if len(parts) > 1 else ""
         marks = list(_SECTION_RE.finditer(positive))
         sections = None
         if marks:
@@ -305,7 +307,7 @@ def parse_generate_output(text: str, n: int) -> list[dict]:
             positive = assemble_prompt(sections)
         if positive or negative:
             out.append({"positive": positive.strip(), "negative": negative.strip(), "sections": sections})
-    return out[:max(1, int(n))]
+    return out if n is None else out[:max(1, int(n))]
 
 
 def _words(text: str) -> set[str]:
@@ -490,7 +492,7 @@ def write(req: WriterRequest) -> WriterResult:
         retry_ctx = build_context(req, legend, model_legend, already_used=[v["positive"] for v in kept],
                                   variants=n - len(kept), **ctx)
         raw2, _, log2 = _call(req, title, preset_text, retry_ctx, sent, False)
-        kept = _keep_distinct(kept, parse_generate_output(raw2, n - len(kept)), n)
+        kept = _keep_distinct(kept, parse_generate_output(raw2), n)
         log = "\n".join(p for p in (log, log2, "retried once for distinct variants") if p)
     if len(kept) < n:
         raise WriterError("provider", f"writer returned {len(kept)} distinct prompts of {n}")
