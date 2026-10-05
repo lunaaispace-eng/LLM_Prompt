@@ -1,6 +1,6 @@
 // Studio settings. Stage A has no server settings bag; these fields are the shared writer values.
 // API keys are never shown or accepted here.
-import { el } from "./dom.mjs";
+import { el, projectSlug } from "./dom.mjs";
 
 function field(label, input) {
   return el("label", { class: "ld-field" }, [el("span", { text: label }), input]);
@@ -20,7 +20,7 @@ export function mountSettings(root, store, client) {
   }
 
   project.addEventListener("change", () => {
-    store.set({ project: project.value.trim() || "default" });
+    store.set({ project: projectSlug(project.value) });
   });
   vision.addEventListener("change", () => {
     const n = Number(vision.value);

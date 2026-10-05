@@ -17,6 +17,17 @@ export function el(tag, attrs = {}, children = []) {
   return node;
 }
 
+const RESERVED = new Set(["con", "prn", "aux", "nul",
+  ...Array.from({ length: 9 }, (_, i) => `com${i + 1}`), ...Array.from({ length: 9 }, (_, i) => `lpt${i + 1}`)]);
+
+// The same rule as luna_director/store.py project_slug: the routes accept only [a-z0-9-], at most 48.
+export function projectSlug(name) {
+  const ascii = String(name ?? "").normalize("NFKD").replace(/[^\x00-\x7f]/g, "").toLowerCase();
+  const slug = ascii.replace(/[^a-z0-9]+/g, "-").replace(/^-+|-+$/g, "").slice(0, 48).replace(/^-+|-+$/g, "")
+    || "default";
+  return RESERVED.has(slug) ? `${slug}-project` : slug;
+}
+
 export function clear(node) {
   node.replaceChildren();
 }

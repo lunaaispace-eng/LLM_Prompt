@@ -1,6 +1,6 @@
 // D2 studio shell. Panels mount from SLOT_TABLE; a slot with no row stays empty.
 // A13–A18a each add one row (and, if needed, one id in a tab's `slots` list).
-import { clear, el, ensureCss } from "../ui/dom.mjs";
+import { clear, el, ensureCss, projectSlug } from "../ui/dom.mjs";
 import { mountSettings } from "../ui/settings.mjs";
 
 export const USE_IN_GRAPH_REASON =
@@ -86,7 +86,7 @@ export function mountOverlay({ app, api, store, client, socket, node }) {
   if (node) {
     const saved = readDirectorState(node);
     store.set({
-      project: saved.project || store.get().project || "default",
+      project: projectSlug(saved.project || store.get().project),
       selected: saved.selected ?? null,
       prompt: typeof saved.prompt === "string" ? saved.prompt : (store.get().prompt || ""),
     });
@@ -217,7 +217,7 @@ export function mountOverlay({ app, api, store, client, socket, node }) {
   }
 
   project.addEventListener("change", () => {
-    store.set({ project: project.value.trim() || "default" });
+    store.set({ project: projectSlug(project.value) });
   });
   settingsBtn.addEventListener("click", () => {
     settingsPanel.hidden = !settingsPanel.hidden;
