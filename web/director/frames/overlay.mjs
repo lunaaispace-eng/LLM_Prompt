@@ -1,7 +1,9 @@
 // D2 studio shell. Panels mount from SLOT_TABLE; a slot with no row stays empty.
 // A13–A18a each add one row (and, if needed, one id in a tab's `slots` list).
 import { clear, el, ensureCss, projectSlug } from "../ui/dom.mjs";
+import { mountAssets } from "../ui/assets_panel.mjs";
 import { mountCanvas } from "../ui/canvas_view.mjs";
+import { mountReferences } from "../ui/references_panel.mjs";
 import { mountSettings } from "../ui/settings.mjs";
 
 export const USE_IN_GRAPH_REASON =
@@ -11,6 +13,8 @@ export const USE_IN_GRAPH_REASON =
 export const SLOT_TABLE = [
   { slot: "settings", module: "ui/settings.mjs", mount: mountSettings },
   { slot: "canvas", module: "ui/canvas_view.mjs", mount: mountCanvas },
+  { slot: "assets", module: "ui/assets_panel.mjs", mount: mountAssets },
+  { slot: "refs", module: "ui/references_panel.mjs", mount: mountReferences },
 ];
 
 // Each tab carries its own layout. Stage A has no Packages entry and no placeholder.
@@ -83,6 +87,7 @@ function focusable(root) {
 export function mountOverlay({ app, api, store, client, socket, node }) {
   void app;
   void api;
+  store.boundNode = node || null;
   ensureCss(new URL("../director.css", import.meta.url));
 
   if (node) {
