@@ -6,6 +6,7 @@ import { mountCanvas } from "../ui/canvas_view.mjs";
 import { mountReferences } from "../ui/references_panel.mjs";
 import { mountSettings } from "../ui/settings.mjs";
 import { mountWriter } from "../ui/writer_panel.mjs";
+import { mountQueue } from "../ui/queue_panel.mjs";
 import { mountEngine } from "../ui/engine_panel.mjs";
 
 export const USE_IN_GRAPH_REASON =
@@ -19,6 +20,7 @@ export const SLOT_TABLE = [
   { slot: "assets", module: "ui/assets_panel.mjs", mount: mountAssets },
   { slot: "refs", module: "ui/references_panel.mjs", mount: mountReferences },
   { slot: "engine", module: "ui/engine_panel.mjs", mount: mountEngine },
+  { slot: "queue", module: "ui/queue_panel.mjs", mount: mountQueue },
 ];
 
 // Each tab carries its own layout. Stage A has no Packages entry and no placeholder.
