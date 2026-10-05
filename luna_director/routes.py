@@ -96,7 +96,9 @@ def _error_response(exc: BaseException, writer_error=None) -> web.Response:
         code = getattr(exc, "code", "provider")
         if code == "busy":
             return _err(409, code, str(exc))
-        return _err(400 if code in WRITER_CODES_400 else 500, code, str(exc))
+        if code in WRITER_CODES_400:
+            return _err(400, code, str(exc))
+        return _err(500, "internal", str(exc))
     if isinstance(exc, RefError):
         return _err(400, "bad_ref", str(exc))
     if isinstance(exc, ResizeStateError):
@@ -134,9 +136,15 @@ def _bool(body: dict, key: str, default: bool) -> bool:
 
 def _number(value, name: str, *, integer=False, minimum=None, maximum=None):
     if (isinstance(value, bool) or not isinstance(value, int if integer else (int, float))
-            or (not integer and not math.isfinite(value))
             or (minimum is not None and value < minimum) or (maximum is not None and value > maximum)):
         raise _Refused(f"{name} must be a {'whole' if integer else 'finite'} number within its bounds")
+    if not integer:
+        try:
+            finite = math.isfinite(value)
+        except OverflowError:
+            finite = False
+        if not finite:
+            raise _Refused(f"{name} must be a finite number")
     return value
 
 
@@ -228,7 +236,7 @@ def _margins(v) -> list[int]:
         raise _Refused("outpaint must be four margins (left, top, right, bottom)")
     out = []
     for x in v:
-        if isinstance(x, bool) or not isinstance(x, (int, float)) or not math.isfinite(x) or not 0 <= x <= 2048:
+        if isinstance(x, bool) or not isinstance(x, (int, float)) or not 0 <= x <= 2048 or not math.isfinite(x):
             raise _Refused("outpaint margins must be numbers in 0..2048")
         out.append(int(x))
     return out

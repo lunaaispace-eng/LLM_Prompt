@@ -292,6 +292,16 @@ class DirectorRoutes(AioHTTPTestCase):
         status, err = await self._post("/luna/director/write", self._write_body(a["ref"]))
         self.assertEqual((status, err["error"]["code"]), (500, "internal"))
 
+    def test_huge_outpaint_margin_refused(self):
+        with self.assertRaises(routes_mod._Refused):
+            routes_mod._margins([10 ** 400, 0, 0, 0])
+
+    async def test_unknown_writer_error_returns_internal(self):
+        _, a = await self._asset()
+        self.writer.raise_with = writer_mod.WriterError("fake_unknown", "fake unexpected failure")
+        status, err = await self._post("/luna/director/write", self._write_body(a["ref"]))
+        self.assertEqual((status, err["error"]["code"]), (500, "internal"))
+
     async def test_run_and_batch_count_caps_refused(self):
         status, err = await self._post("/luna/studio/run", {"project": PROJECT,
             "spec": {"model": "gpt-image-2", "operation": "generate", "prompt": "a fox", "n": 9}})

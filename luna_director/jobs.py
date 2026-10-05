@@ -200,7 +200,7 @@ def normalize_spec(spec: dict) -> dict:
         raise ValueError(f"unknown spec keys: {', '.join(sorted(unknown))}")
     out = {k: spec.get(k) for k in SPEC_KEYS}
     for k, v in _DEFAULTS.items():
-        if out[k] is None:
+        if out[k] is None and (k not in spec or k not in ("crop_padding", "feather_px", "n")):
             out[k] = v
     provider_for(out["model"] if isinstance(out["model"], str) else "")   # ValueError on an unknown model
     if out["operation"] not in OPERATIONS:
@@ -226,7 +226,7 @@ def normalize_spec(spec: dict) -> dict:
         raise ValueError(f"n must be a whole number in 1..8, got {n!r}")
     padding = out["crop_padding"]
     if (isinstance(padding, bool) or not isinstance(padding, (int, float))
-            or not math.isfinite(padding) or not 0 <= padding <= 1):
+            or not 0 <= padding <= 1 or not math.isfinite(padding)):
         raise ValueError("crop_padding must be a finite number in 0..1")
     feather = out["feather_px"]
     if isinstance(feather, bool) or not isinstance(feather, int) or feather < 0:
@@ -235,8 +235,8 @@ def normalize_spec(spec: dict) -> dict:
         margins = out["outpaint"]
         if not isinstance(margins, (list, tuple)) or len(margins) != 4:
             raise ValueError("outpaint must be four margins (left, top, right, bottom)")
-        if any(isinstance(v, bool) or not isinstance(v, (int, float)) or not math.isfinite(v)
-               or not 0 <= v <= 2048 for v in margins):
+        if any(isinstance(v, bool) or not isinstance(v, (int, float)) or not 0 <= v <= 2048
+               or not math.isfinite(v) for v in margins):
             raise ValueError("outpaint margins must be finite numbers in 0..2048")
         out["outpaint"] = [int(v) for v in margins]
     return out

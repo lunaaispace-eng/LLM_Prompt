@@ -180,6 +180,12 @@ class CloudJobTests(Harness):
         self.assertEqual((spec["crop_padding"], spec["feather_px"], spec["n"], spec["outpaint"]),
                          (1, 0, 8, [2048] * 4))
 
+    def test_explicit_null_numbers_and_huge_margins_refused(self):
+        for over in ({"crop_padding": None}, {"feather_px": None}, {"n": None},
+                     {"crop_padding": 10 ** 400}, {"outpaint": [10 ** 400, 0, 0, 0]}):
+            with self.subTest(over=over), self.assertRaises(ValueError):
+                jobs.normalize_spec(self.spec(**over))
+
     def test_batch_count_cap_refused_before_queue(self):
         with self.assertRaises(ValueError):
             self.runner.submit_batch(SID, PROJECT, self.batch(count=9))
