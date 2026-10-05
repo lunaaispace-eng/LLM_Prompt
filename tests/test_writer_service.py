@@ -377,6 +377,14 @@ class WriterDispatchTest(unittest.TestCase):
         self.assertEqual(len(res.legend), 3)
         self.assertGreaterEqual(res.seconds, 0)
 
+    def test_server_url_only_forwarded_for_custom(self):
+        for provider in ("OpenAI", "Custom"):
+            with self.subTest(provider=provider):
+                _, fake = self._write_api(_req(self.W, provider=provider,
+                                              server_url="https://fake.example/v1"))
+                self.assertEqual(fake.calls[0]["server_url"],
+                                 "https://fake.example/v1" if provider == "Custom" else "")
+
     def test_user_preset_wins(self):
         res, fake = self._write_api(_req(self.W, preset="Image Edit"))
         self.assertEqual(fake.calls[0]["system_prompt"], "Image Edit")

@@ -2,10 +2,12 @@
 (temp folders). Loaded through tests/_comfy.py, so the routes import the pack's own modules."""
 import io
 import json
+import os
 import shutil
 import tempfile
 import types
 from pathlib import Path
+from unittest import mock
 
 import _comfy
 from aiohttp import FormData, web
@@ -216,6 +218,20 @@ class DirectorRoutes(AioHTTPTestCase):
         self.writer.raise_with = writer_mod.WriterError("no_key", "no key")
         status, err = await self._post("/luna/director/write", self._write_body(a["ref"]))
         self.assertEqual((status, err["error"]["code"]), (400, "no_key"))
+
+    async def test_route_errors_scrub_environment_file_and_key_patterns(self):
+        _, a = await self._asset()
+        api = _comfy.load("llm_prompt_api_node")
+        keys = ["FAKE-ENV-CREDENTIAL", "FAKE-FILE-CREDENTIAL", "FAKE-ALIAS-CREDENTIAL",
+                "sk-FAKE0123456789", "xai-FAKE0123456789", "AIzaFAKE012345678901234567"]
+        self.writer.raise_with = writer_mod.WriterError("provider", "failure " + " ".join(keys))
+        with mock.patch.dict(os.environ, {"OPENAI_API_KEY": keys[0], "XAI_API_KEY": keys[2]}), \
+                mock.patch.object(api, "_load_env_file_keys", return_value={"OPENAI_API_KEY": keys[1]}):
+            status, err = await self._post("/luna/director/write", self._write_body(a["ref"]))
+        self.assertEqual((status, err["error"]["code"]), (400, "provider"))
+        for key in keys:
+            self.assertNotIn(key, json.dumps(err))
+        self.assertIn("[key removed]", err["error"]["message"])
 
     async def test_ref_traversal_400(self):
         bad = {"name": "../../secret.png", "subfolder": "", "type": "input"}

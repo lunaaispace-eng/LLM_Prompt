@@ -448,7 +448,8 @@ def _call(req: WriterRequest, title: str, preset_text: str, context: str,
             provider=req.provider, model_name=req.model, system_prompt=title,
             custom_system_prompt=preset_text, user_prompt=req.request, context=context,
             width=width, height=height, images_b64=[_png_b64(img) for _, img in items],
-            split_output=split_output, timeout_seconds=max(1, int(req.timeout)), server_url=req.server_url,
+            split_output=split_output, timeout_seconds=max(1, int(req.timeout)),
+            server_url=req.server_url if req.provider == "Custom" else "",
             **_thinking_api(req.provider, req.model, req.thinking))
     except Exception as e:
         raise classify_error(e) from e

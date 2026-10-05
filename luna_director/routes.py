@@ -16,6 +16,8 @@ import importlib
 import io
 import logging
 import math
+import os
+import re
 from dataclasses import dataclass, field
 from datetime import date
 from pathlib import Path
@@ -71,7 +73,22 @@ class _Refused(ValueError):
 
 
 def _err(status: int, code: str, message: str) -> web.Response:
-    return web.json_response({"error": {"code": code, "message": message}}, status=status)
+    return web.json_response({"error": {"code": code, "message": _scrub(message)}}, status=status)
+
+
+def _scrub(message: str) -> str:
+    api = _pack("llm_prompt_api_node")
+    names = {"OPENAI_API_KEY", "XAI_API_KEY"}
+    for cfg in api.PROVIDERS.values():
+        env = cfg.get("env_var")
+        names.update(env if isinstance(env, list) else [env] if env else [])
+    file_keys = api._load_env_file_keys()
+    keys = {value.strip() for name in names for value in (os.environ.get(name), file_keys.get(name))
+            if value and value.strip()}
+    for key in sorted(keys, key=len, reverse=True):
+        message = message.replace(key, "[key removed]")
+    return re.sub(r"sk-[A-Za-z0-9_\-]{12,}|xai-[A-Za-z0-9_\-]{12,}|AIza[0-9A-Za-z_\-]{20,}",
+                  "[key removed]", message)
 
 
 def _error_response(exc: BaseException, writer_error=None) -> web.Response:
@@ -87,7 +104,7 @@ def _error_response(exc: BaseException, writer_error=None) -> web.Response:
     if isinstance(exc, (_Refused, ValueError, KeyError, TypeError)):
         msg = exc.args[0] if isinstance(exc, KeyError) and exc.args else str(exc)
         return _err(400, "refused", str(msg))
-    log.exception("director route failed")
+    log.error("director route failed: %s", _scrub(f"{type(exc).__name__}: {exc}"))
     return _err(500, "internal", f"{type(exc).__name__}: {exc}")
 
 
