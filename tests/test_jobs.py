@@ -279,6 +279,50 @@ class CloudJobTests(Harness):
         self.finish()
         self.assertEqual(self.last(out["job_id"])["error"]["code"], "provider")
 
+    def test_billed_failure_keeps_estimate_as_cost(self):
+        # Post-send network error: the provider may have charged. OpenAI has a pre-run estimate.
+        self.fake.error = ProviderError(
+            f"network error after the request was sent: timed out {KEY}", billed=True)
+        out = self.runner.submit_cloud(SID, PROJECT, self.spec())
+        self.finish()
+        est = out["est_cost_usd"]
+        self.assertIsNotNone(est)
+        ev = self.last(out["job_id"])
+        entry = self.entry_of(out["job_id"])
+        self.assertEqual(ev["error"]["code"], "billed")
+        self.assertEqual(entry["error"]["code"], "billed")
+        self.assertEqual(ev["error"]["message"], entry["error"]["message"])
+        self.assertIn("network error after the request was sent", entry["error"]["message"])
+        self.assertNotIn(KEY, entry["error"]["message"])
+        self.assertNotIn(KEY, json.dumps(self.events))
+        self.assertAlmostEqual(entry["cost_usd"], est)
+        self.assertEqual(entry["outputs"], [])
+        self.assertEqual(entry["status"], "error")
+        self.assertEqual(set(entry), set(ENTRY_KEYS))
+        self.assertAlmostEqual(self.store.day_cost(date.today().isoformat()), est)
+
+        # xAI download failure: billed, and xAI has no pre-run estimate.
+        self.fake.error = ProviderError(
+            "xAI image download failed: refused (the generation was already billed)", billed=True)
+        out = self.runner.submit_cloud(SID, PROJECT, self.spec(model=GROK))
+        self.finish()
+        entry = self.entry_of(out["job_id"])
+        self.assertIsNone(out["est_cost_usd"])
+        self.assertEqual(self.last(out["job_id"])["error"]["code"], "billed")
+        self.assertEqual(entry["error"]["code"], "billed")
+        self.assertIn("already billed", entry["error"]["message"])
+        self.assertIsNone(entry["cost_usd"])
+
+        # A failure before the request was sent is not billed and has no cost.
+        self.fake.error = ProviderError("network error: connection refused", retryable=True)
+        out = self.runner.submit_cloud(SID, PROJECT, self.spec())
+        self.finish()
+        entry = self.entry_of(out["job_id"])
+        self.assertEqual(self.last(out["job_id"])["error"]["code"], "provider")
+        self.assertIsInstance(entry["error"], str)
+        self.assertIsNone(entry["cost_usd"])
+        self.assertAlmostEqual(self.store.day_cost(date.today().isoformat()), est)
+
     def test_bad_spec_refused_at_submit(self):
         with self.assertRaises(ValueError):
             self.runner.submit_cloud(SID, PROJECT, self.spec(model="dall-e-9"))

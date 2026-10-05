@@ -2,7 +2,7 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import { createStore, defaultState } from "../../web/director/core/store.mjs";
 import { createMaskHandoff } from "../../web/director/ui/mask_handoff.mjs";
-import { runCurrent, cancelJob, cancelBatch, installQueueActions, queueRows, elapsedLabel, mountQueue } from "../../web/director/ui/queue_panel.mjs";
+import { runCurrent, cancelJob, cancelBatch, installQueueActions, queueRows, elapsedLabel, mountQueue, queueFailureText } from "../../web/director/ui/queue_panel.mjs";
 import { writePrompt } from "../../web/director/ui/writer_panel.mjs";
 import { SLOT_TABLE } from "../../web/director/frames/overlay.mjs";
 const config = { cloud: [{ models: [{ id: "model", ref_limit: { inpaint: 1, edit: 1 } }] }] };
@@ -26,6 +26,14 @@ function setup(operation = "inpaint") {
   change();
   return { store, client, calls, server, handoff, change, control: installQueueActions(store, client) };
 }
+test("a billed queue row says billed — no image, with its cost or cost unknown", () => {
+  assert.equal(queueFailureText({ error: { code: "billed", message: "raw provider text" }, entry: { cost_usd: 0.2 } }),
+    "billed — no image · $0.20");
+  assert.equal(queueFailureText({ error: { code: "billed", message: "raw" }, entry: { cost_usd: null } }),
+    "billed — no image · cost unknown");
+  assert.equal(queueFailureText({ error: { code: "provider", message: "nope" } }), "provider: nope");
+  assert.equal(queueFailureText({}), "");
+});
 test("run uploads mask once per version, sends socket sid/spec, and stores serverId; action is shared", async () => {
   const { store, client, calls, change } = setup();
   const first = await runCurrent(store, client);

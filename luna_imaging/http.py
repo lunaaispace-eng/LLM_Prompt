@@ -24,12 +24,16 @@ class ProviderError(RuntimeError):
     `retryable` marks a failure that happened before the request reached the server
     (connect / send, wrapped by urllib in URLError), so sending it again cannot bill twice.
     `with_retries` retries those, 429 and 5xx - nothing else.
+    `billed` is set by the raise site when the provider may already have charged
+    (the response was unreadable, or an xAI image download failed after generation).
     """
 
-    def __init__(self, message: str, status: int | None = None, retryable: bool = False):
+    def __init__(self, message: str, status: int | None = None, retryable: bool = False,
+                 billed: bool = False):
         super().__init__(message)
         self.status = status
         self.retryable = retryable
+        self.billed = billed
 
 
 def _error_message(raw: str) -> str:
@@ -67,9 +71,10 @@ def _send(url: str, headers: dict, data: bytes, content_type: str, timeout: floa
     except (http.client.HTTPException, TimeoutError, OSError) as e:
         # Raised while waiting for / reading the response: the server may have the request.
         raise ProviderError(f"network error after the request was sent: {e}{_BILLED}",
-                            status=None) from None
+                            status=None, billed=True) from None
     except ValueError as e:
-        raise ProviderError(f"invalid JSON in response: {e}{_BILLED}", status=None) from None
+        raise ProviderError(f"invalid JSON in response: {e}{_BILLED}", status=None,
+                            billed=True) from None
 
 
 def post_json(url: str, headers: dict, body: dict, timeout: float) -> dict:

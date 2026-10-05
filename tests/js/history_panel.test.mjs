@@ -175,6 +175,15 @@ test("a cancelled entry is labelled cancelled, with its cost and kept image", ()
   assert.equal(entryThumb({ status: "cancelled", outputs: [] }), null);
 });
 
+test("a billed failure is labelled billed — no image, with its cost or cost unknown", () => {
+  const paid = { status: "error", cost_usd: 0.04, outputs: [], error: { code: "billed", message: "download failed" } };
+  assert.equal(statusLabel(paid), "billed — no image · $0.04");
+  assert.equal(detailFields(paid).find((f) => f.id === "status").value, "billed — no image · $0.04");
+  const unknown = { status: "error", cost_usd: null, outputs: [], error: { code: "billed", message: "x" } };
+  assert.equal(statusLabel(unknown), "billed — no image · cost unknown");
+  assert.equal(statusLabel({ status: "error", cost_usd: 0.04, error: "plain failure" }), "error");
+});
+
 test("Edit from here passes the studio state and makes the version the canvas", () => {
   const state = {
     engine: { kind: "cloud", params: { outpaint: { top: 2 }, seed: 3 } },

@@ -131,6 +131,9 @@
   background: #2a1c1b;
 }
 
+.ld-status[hidden],
+.ld-status:empty { display: none; }
+
 .ld-spin {
   width: 12px;
   height: 12px;

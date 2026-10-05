@@ -141,11 +141,13 @@ class XaiTests(unittest.TestCase):
         def garbage(r, timeout=None):
             return io.BytesIO(b"this is not an image")
 
-        for fn, text in ((refused, "refused"), (not_found, "HTTP 404"), (garbage, "cannot read")):
+        for fn, text, billed in ((refused, "refused", True), (not_found, "HTTP 404", True),
+                                 (garbage, "cannot read", False)):
             with self.subTest(fn=fn.__name__):
                 with self.assertRaises(ProviderError) as cm:
                     self._url_run(fn)
                 self.assertIn(text, str(cm.exception))
+                self.assertEqual(cm.exception.billed, billed)
 
     def test_cost_from_ticks(self):
         _, res = self.run_req(_req())
