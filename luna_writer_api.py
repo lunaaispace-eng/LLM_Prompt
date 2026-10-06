@@ -86,9 +86,12 @@ def gguf_kwargs(*, model: str, request: str, context: str, media: list[dict], wi
 
 def write_gguf(*, model: str, request: str, context: str, images: list[tuple[str, object]], width: int,
                height: int, split_output: bool, thinking: bool, overrides: dict | None = None,
-               system_prompt: str = "None", preset_text: str = "", lock_wait: float = 2.0) -> tuple[str, str, str]:
+               system_prompt: str = "None", preset_text: str = "", lock_wait: float = 2.0,
+               guard=None) -> tuple[str, str, str]:
     """One local GGUF write — (positive, negative, log). ``images`` are (label, PIL image) pairs, sent
-    each after its label. Raises ``WriterBusy`` when a graph run holds the model past ``lock_wait``."""
+    each after its label. Raises ``WriterBusy`` when a graph run holds the model past ``lock_wait``.
+    ``guard``: an optional context manager factory the caller wants around the generation itself, inside
+    the model lock (the Director's GPU hook)."""
     node = _node()
     media: list[dict] = []
     for label, img in images:
@@ -100,7 +103,10 @@ def write_gguf(*, model: str, request: str, context: str, images: list[tuple[str
     if not lock.acquire(timeout=max(0.0, float(lock_wait))):
         raise WriterBusy("GGUF busy: a graph run holds the model")
     try:
-        return node._RUNNER.generate(**kwargs)
+        if guard is None:
+            return node._RUNNER.generate(**kwargs)
+        with guard():
+            return node._RUNNER.generate(**kwargs)
     finally:
         lock.release()
 

@@ -133,6 +133,17 @@ class WriterApiTest(unittest.TestCase):
                                     split_output=True, thinking=False)
         self.assertFalse(self.node._RUNNER_LOCK.locked())
 
+    def test_guard_runs_inside_the_lock(self):
+        seen = []
+
+        @contextlib.contextmanager
+        def guard():
+            seen.append(("enter", self.node._RUNNER_LOCK.locked()))
+            yield
+            seen.append(("exit", self.node._RUNNER_LOCK.locked()))
+        self._gguf(guard=guard)
+        self.assertEqual(seen, [("enter", True), ("exit", True)])
+
     def test_register_first_wins(self):
         saved = sys.modules.pop("luna_writer_api", None)
         try:
