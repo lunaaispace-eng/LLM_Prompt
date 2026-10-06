@@ -1,5 +1,6 @@
-"""Luna imaging core: provider logic with no ComfyUI / torch / numpy dependency.
+"""The part of the Luna imaging core this pack's GPT Image node uses: model capabilities, size rules and cost
+tables (standard library only).
 
-Dependencies: the Python standard library and Pillow >= 10.3 (masks.py uses
-ImageMath.lambda_eval, added in Pillow 10.3).
+The full core moved to ComfyUI-LunaStudio on 2026-10-06; its tests keep `capabilities.py`, `cost.py` and
+`sizes.py` identical to the copies here.
 """

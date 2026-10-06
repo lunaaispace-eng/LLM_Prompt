@@ -132,11 +132,6 @@ class CostTests(unittest.TestCase):
 
 
 class NodeSourceTests(unittest.TestCase):
-    def test_core_docstring_states_pillow_dependency(self):
-        import luna_imaging  # F10
-        self.assertIn("Pillow >= 10.3", luna_imaging.__doc__)
-        self.assertIn("ImageMath.lambda_eval", luna_imaging.__doc__)
-
     def test_openai_node_uses_core(self):
         path = os.path.join(ROOT, "openai_image_node.py")
         with open(path, encoding="utf-8") as f:

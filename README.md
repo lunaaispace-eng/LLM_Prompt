@@ -41,8 +41,6 @@ support. See [Google's video input documentation](https://ai.google.dev/gemini-a
 | `Gemini Image (API Key)` | Google Gemini image generation and editing (Nano Banana / Nano Banana Pro / Nano Banana 2) using your own `GEMINI_API_KEY`. Live model list, up to 4K, reference-image editing, multimodal text + thought-image outputs. |
 | `Gemini Omni Video (API Key)` | Google Gemini Omni text/image-to-video and video edit over the Interactions API, with your own `GEMINI_API_KEY`. |
 | `GPT Image (API Key)` | OpenAI GPT Image generation and editing (gpt-image-2.5 flare / sunburst, gpt-image-2, 1.x) with your own `OPENAI_API_KEY`: free sizes up to 3840x2160, multi-image edit, MASK inpainting, transparent background. |
-| `Luna Image Studio (API Key)` | One image node for OpenAI, Gemini and Grok on your own keys: generate, edit, compose, inpaint (MASK and/or bbox region, on every provider) and outpaint. Outside pixels always stay the original's; cost in `info`. |
-| `Luna Director (Studio)` | Opens the Director's Edit and Generate workspace, with prompt writing, cloud image runs and project history. |
 | `Grok Image (API Key)` | Direct xAI Grok Imagine text-to-image using your own `XAI_API_KEY`. |
 | `Grok Image Edit (API Key)` | Direct xAI Grok Imagine image edit. |
 | `Grok Video (API Key)` | Direct xAI Grok Imagine text/image-to-video. |
@@ -312,142 +310,11 @@ on a text-heavy infographic it gave no measurable gain in text accuracy over a d
 sometimes added unrequested detail, for extra mainline tokens and ~10 s — so it is a prompt
 expander, not a quality switch. Mask edits always go direct.
 
-## Luna Image Studio (API Key)
+## Luna Image Studio and Luna Director
 
-One image node for every provider, on your own keys: OpenAI GPT Image (`OPENAI_API_KEY`),
-Gemini / Nano Banana (`GEMINI_API_KEY`) and Grok Imagine (`XAI_API_KEY`). The provider follows
-the `model`; keys are read from env / `.env` only. The provider logic lives in `luna_imaging/`,
-which has no ComfyUI or torch dependency.
-
-| `operation` | Needs | What happens |
-| --- | --- | --- |
-| `generate` | no image | Text-to-image. |
-| `edit` (default) | 1+ image | Whole-image edit; the other images are references. |
-| `compose` | 1+ image | Combine the connected images into one. It sends the same request as `edit` (several images in, one result) — the name is for your workflow, the logic is the same. |
-| `inpaint` | image + `mask` and/or `bboxes` | Change only the region of the first image. |
-| `outpaint` | image + an `outpaint_*` margin | Extend the first image by left / top / right / bottom pixels. |
-
-**Regions.** `mask_mode auto` uses the provider's native mask where it has one (OpenAI) and
-otherwise crops the region (plus `crop_padding` of context), edits the crop and composites it
-back. Either way the result is composited onto the original, so pixels outside the region always
-stay the original's. `feather` blends inward only. A `MASK` of any resolution is fitted to the
-first image; `invert_mask` flips the `MASK` only. The `mask` output is the region actually used
-(1 = edited), or the alpha when `background` is `transparent` and the result has one.
-`mask` and `bboxes` apply to `inpaint` only; with any other operation they are ignored with a
-note in `info`.
-
-**`background transparent`** applies to `generate` / `edit` / `compose` only (OpenAI, except
-`gpt-image-2`). Region edits are composited onto the original, so `inpaint` / `outpaint` send
-`auto` and say so in `info`.
-
-**`width` / `height`** (optional, from a size node). For `generate` / `edit` / `compose` the
-output is resized to exactly width x height; OpenAI sizes the request from them, Gemini and Grok
-send their nearest aspect ratio when `aspect_ratio` is `auto`. `inpaint` / `outpaint` ignore
-them: the request takes the size of the image sent, and the output keeps the original's size
-(plus the margins for `outpaint`).
-
-**Outpaint** sends the whole padded canvas — the original plus grey margins. OpenAI gets a mask
-of the new area; Gemini and Grok are asked to extend the image into the grey borders. Only the
-new area is taken from the result; the original's pixels stay exact.
-
-**`bboxes`** is JSON on the first image: `[[x, y, w, h], ...]`. Values are pixels, or fractions
-of the image when every value is ≤ 1 (`[[0, 0, 0.5, 0.5]]` = the top-left quarter). Boxes are
-unioned with the `MASK`.
-
-**Cost.** `info` ends with `cost : $x.xxxx` — OpenAI from the response's token usage, Gemini per
-image by size, Grok from the cost xAI reports — or `cost : n/a` when it is not known. `seed`
-only re-runs the node; it is not sent.
-
-## Luna Director
-
-Luna Director is an image workspace inside ComfyUI. Add the launcher node
-`Luna Director (Studio)` and click **Open Studio**. The studio has **Edit** and
-**Generate** tabs. Its cloud engine uses OpenAI GPT Image, Gemini and Grok Imagine
-on the server's own API keys.
-
-### Edit
-
-Upload, drop or paste images into Assets, or use **From graph** after the graph
-has produced an image. Select an asset for the canvas. **As reference** adds it
-to the reference list; reorder references to change their image numbers. Resize
-controls can make copies before sending them.
-
-Reference limits follow the selected model and operation. The counter shows how
-many will be sent. References past the limit stay in the list but are not sent.
-
-| Model family | Extra references for edit / inpaint / outpaint | Images for compose |
-| --- | --- | --- |
-| OpenAI GPT Image | 15 | 16 |
-| Gemini 3.x / Nano Banana | 13 | 14 |
-| Gemini 2.5 Flash Image | 2 | 3 |
-| Grok Imagine Image / 2.0 | 4 | 5 |
-| Grok Imagine Image Quality / Pro | 2 | 3 |
-
-For edit operations, the canvas image occupies the first image slot. Generate
-without references is text-to-image; with references it uses compose.
-
-| Key | Canvas tool |
-| --- | --- |
-| `B` | Brush: paint the region to change. |
-| `R` | Box: mark a rectangular region. |
-| `E` | Eraser: remove marks. |
-| `I` | Invert the mask. |
-| `O` | Outpaint: extend the canvas edges. |
-
-Type a request in Writer and choose a route: Local GGUF, Gemini, Grok (xAI),
-OpenAI, Custom, Claude (Max), Codex (ChatGPT), or Grok (SuperGrok). Subscription
-routes need the vendor CLI installed and logged in. The default preset follows
-the target image model; you can override it. Choose whether to send the canvas,
-mask and references. **Write prompt** produces editable positive and negative
-text; **Use as edit prompt** copies it into the engine prompt.
-
-**Negative on** enables negative text. Cloud image APIs receive it as an appended
-`Avoid: ...` line. **Thinking** controls the writer's reasoning where supported.
-For subscription CLIs, off selects their lowest effort (`low`); Grok cannot turn
-reasoning off.
-
-Choose the engine model, operation and its supported size / quality settings,
-then **Run**. Region edits preserve the original pixels outside the marked area.
-The queue shows job state and cost, with up to three cloud jobs running in
-parallel. Cancelled jobs already sent to a provider can still be billed; their
-returned images and costs are kept in history.
-
-History keeps results, prompts, settings, timings and costs. Compare entries
-side by side. **Edit from here** loads a result as the next edit's source and
-keeps its parent link. **Use in graph** records the selected result on the bound
-launcher node; it requires opening the studio from a node.
-
-### Generate
-
-Type an idea or edit the prompt directly. Select up to four image models to
-compare, with one to eight images per model. **Same** reuses one prompt across
-the batch; **Varied** uses a prompt for each variant, shared across models.
-The writer can produce editable Subject, Style, Composition, Lighting and Camera
-sections; reassemble them when ready. **Exact text** appends the requested text
-in quotes to the image prompt.
-
-**Draft** uses each model's lowest quality / resolution settings. Choose a draft
-and click **Final** to render it again with that image as the first reference,
-at the model's offered final quality or resolution. The new history entry links
-to the draft. **Refine** sends feedback, the result image and its previous prompt
-to the writer, then runs the revised prompt on that result's model.
-
-### Files and cost
-
-| Location, relative to ComfyUI | Contents |
-| --- | --- |
-| `input/luna_director/<project>/` | Imported assets and resized copies. |
-| `output/luna_director/<project>/` | Result PNGs and `history.jsonl`. |
-
-Keys stay in the server's environment or `.env`; they are not stored in Director
-history or workflow JSON. Estimates use the OpenAI and Gemini price tables.
-xAI shows cost after the run. A batch estimate sums known costs and lists models
-with unknown estimates separately. The day total is the server's total across
-projects, including billed cancelled runs. A call billed after a failure is
-marked **billed — no image**.
-
-The manual check is `tools/smoke_director.py`. `--dry` runs it without a server
-or provider calls. Live mode needs a running ComfyUI and spends API money.
+`Luna Image Studio (API Key)` and the `Luna Director` studio moved to their own pack,
+ComfyUI-LunaStudio, on 2026-10-06. When both packs are installed, the Director uses this
+pack's prompt writer (local GGUF, API and subscription CLIs) through `luna_writer_api.py`.
 
 ## Gemini Omni Video (API Key)
 
