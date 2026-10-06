@@ -112,6 +112,13 @@ try:
 except Exception as e:  # pragma: no cover
     print(f"[LLM_Prompt] Luna Director routes not loaded: {e}")
 
+# Writer interface for other packs (ComfyUI-LunaStudio): reachable as sys.modules["luna_writer_api"].
+try:
+    from . import luna_writer_api as _writer_api
+    _writer_api.register()
+except Exception as e:  # pragma: no cover
+    print(f"[LLM_Prompt] writer interface not registered: {e}")
+
 __all__ = ["NODE_CLASS_MAPPINGS", "NODE_DISPLAY_NAME_MAPPINGS"]
 
 WEB_DIRECTORY = "./web"
