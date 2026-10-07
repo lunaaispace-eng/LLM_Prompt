@@ -1,6 +1,6 @@
 """LLM Prompt (API): characterization of `execute` and the extracted `write_prompt_api` core.
 
-Director plan, task A1. Every send function is replaced by a recorder and the key resolver
+Every send function is replaced by a recorder and the key resolver
 returns "k", so no test reaches a network, a CLI or a real key on this machine.
 """
 import base64

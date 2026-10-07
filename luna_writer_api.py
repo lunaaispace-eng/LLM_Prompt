@@ -1,4 +1,4 @@
-"""Stable writer interface for other packs (ComfyUI-LunaStudio's Director).
+"""Stable writer interface for other packs (e.g. ComfyUI-LunaStudio).
 
 Other packs cannot import this pack by name: ComfyUI loads every pack under its full path. So this module
 registers itself as ``sys.modules["luna_writer_api"]`` when the pack loads (``__init__.py``), and a caller looks
@@ -91,7 +91,7 @@ def write_gguf(*, model: str, request: str, context: str, images: list[tuple[str
     """One local GGUF write — (positive, negative, log). ``images`` are (label, PIL image) pairs, sent
     each after its label. Raises ``WriterBusy`` when a graph run holds the model past ``lock_wait``.
     ``guard``: an optional context manager factory the caller wants around the generation itself, inside
-    the model lock (the Director's GPU hook)."""
+    the model lock (a caller's GPU hook)."""
     node = _node()
     media: list[dict] = []
     for label, img in images:

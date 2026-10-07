@@ -48,6 +48,8 @@ support. See [Google's video input documentation](https://ai.google.dev/gemini-a
 | `Grok Video Frames (API Key)` | Direct xAI Grok Imagine video from a first frame, last frame and/or keyframes. |
 | `Grok Video Edit (API Key)` | Direct xAI Grok Imagine video edit. |
 | `Grok Video Extend (API Key)` | Direct xAI Grok Imagine video extension. |
+| `Load Image For Caption` | Dataset captioning: loads the next uncaptioned image from a folder, one per run. |
+| `Save Caption` | Writes the caption next to its image as `<filename>.<ext>`. |
 
 ## Highlights
 
@@ -141,18 +143,25 @@ image_min_tokens
 image_max_tokens
 video_fps
 verbose_logging
+vision_mp
+validate
 ```
+
+`vision_mp` downscales input images to at most that many megapixels before encoding (0 = full
+size). `validate = h3` checks MiniMax H3 prompt format and reports on `log`.
 
 Optional inputs:
 
 | Input | Purpose |
 | --- | --- |
 | `style` | Style text from another node. |
+| `context` | Upstream analysis from another node, added as its own block ahead of the prompt. |
 | `width` / `height` | Adds a canvas-format hint to the prompt context. |
 | `image` | Vision input. |
 | `reference_image` | Style/reference image input. |
 | `video` | Frame batch input. |
 | `audio` | Audio input for compatible Gemma-style models. |
+| `frames` | The clip's real frame count, used by `validate = h3`. |
 
 Outputs:
 
@@ -206,10 +215,20 @@ server_url
 model_filter
 gemini_thinking_budget
 gemini_thinking_level
+reasoning_effort
 enable_caching
+disable_thinking
 timeout_seconds
 stop_sequences
+vision_mp
+validate
+video_input_mode
+video_sample_frames
+gemini_video_fps
 ```
+
+Optional inputs: `style`, `context`, `width` / `height`, `image`, `video`, `frames` (same
+meaning as on the local node).
 
 `gemini_thinking_level` is for Gemini 3 Pro style models and overrides `gemini_thinking_budget` when set to `low`, `medium`, or `high`.
 
@@ -309,12 +328,6 @@ prompt and calls the image model as a tool; the rewrite is shown in `info`. In a
 on a text-heavy infographic it gave no measurable gain in text accuracy over a direct call and
 sometimes added unrequested detail, for extra mainline tokens and ~10 s — so it is a prompt
 expander, not a quality switch. Mask edits always go direct.
-
-## Luna Image Studio and Luna Director
-
-`Luna Image Studio (API Key)` and the `Luna Director` studio moved to their own pack,
-ComfyUI-LunaStudio, on 2026-10-06. When both packs are installed, the Director uses this
-pack's prompt writer (local GGUF, API and subscription CLIs) through `luna_writer_api.py`.
 
 ## Gemini Omni Video (API Key)
 
@@ -438,6 +451,14 @@ style_transfer_prompt.md
 tags.md
 z_image.md
 ```
+
+## Dataset Captioning
+
+`Load Image For Caption` reads a folder (`directory`, `extensions`, `sort`) and outputs the next
+image with its `filename`, `directory` and the `remaining` count; `skip_existing` skips images
+that already have a caption file. Wire the image into `LLM Prompt` or `LLM Prompt (API)` with a
+caption preset, then into `Save Caption` with the same `filename` and `directory`. Each run
+captions one image; queue it as many times as `remaining` shows.
 
 ## Positive / Negative Split
 

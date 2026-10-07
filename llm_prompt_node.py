@@ -812,7 +812,7 @@ def _pil_to_content(pil, max_mp: float = 0.0) -> dict:
     """A PIL image -> an OpenAI-compatible image_url dict (JPEG quality 95).
 
     Converts to RGB first: JPEG has no alpha, and an RGBA PIL (browser PNGs
-    reaching the Director) would otherwise raise OSError on save.
+    reaching luna_writer_api) would otherwise raise OSError on save.
     """
     pil = _downscale_pil_to_mp(pil.convert("RGB"), max_mp)
     buf = BytesIO()
@@ -1848,7 +1848,7 @@ class _LLMRunner:
         # ---- Build the multimodal content list (image / reference / video / audio)
         # Each item is an OpenAI-style content dict, ordered and labelled here so
         # _invoke just prepends the user-prompt text and sends it.
-        # media_override (the Director writer) is a ready content list that
+        # media_override (luna_writer_api) is a ready content list that
         # replaces this whole assembly; the node never passes it.
         media_content: list[dict] = []
 
@@ -1962,9 +1962,9 @@ class _LLMRunner:
 # Single cached runner shared across executions (V3 nodes are stateless).
 _RUNNER = _LLMRunner()
 
-# One GGUF run at a time: the node and the Director writer (which calls
+# One GGUF run at a time: the node and luna_writer_api (which calls
 # _RUNNER.generate in-process from an executor thread) both hold this lock,
-# so a graph run and a Director write never load or invoke the runner at once.
+# so a graph run and a writer-interface call never load or invoke the runner at once.
 _RUNNER_LOCK = threading.Lock()
 
 

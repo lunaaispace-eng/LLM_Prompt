@@ -1,4 +1,4 @@
-"""The one import helper for tests that need a node module (Director plan, Global Constraints).
+"""The one import helper for tests that need a node module.
 
 The pack is loaded as a stub package `llm_prompt_pack` whose `__path__` is this checkout's
 root, so the pack's heavy `__init__.py` never runs and a worktree never imports another

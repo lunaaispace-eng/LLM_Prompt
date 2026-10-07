@@ -1430,7 +1430,7 @@ def _send_grok_cli(model: str, messages: list[dict], timeout: float, reasoning_e
 
 
 # ---------------------------------------------------------------------------
-# The writer core (shared by the node and the Director)
+# The writer core (shared by the node and luna_writer_api)
 # ---------------------------------------------------------------------------
 
 def _video_route(provider: str, model_name: str, video, video_input_mode: str) -> tuple[dict, bool]:
@@ -1488,7 +1488,7 @@ def write_prompt_api(
     """The LLM Prompt (API) writer: build the messages, call the provider, clean and split.
 
     Returns (positive, negative, log). The node's execute() is this call plus its tensor
-    work (image / sampled-frame encoding and the image-dims canvas fallback); the Director
+    work (image / sampled-frame encoding and the image-dims canvas fallback); luna_writer_api
     calls it in-process. Every default equals the node's widget default
     (tests/test_writer_api_core.py pins this).
 

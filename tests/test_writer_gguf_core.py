@@ -1,7 +1,7 @@
 """LLM Prompt (GGUF): characterization of `_LLMRunner.generate` media assembly, plus the
-Director hooks `_pil_to_content`, `media_override` and `_RUNNER_LOCK`.
+writer-interface hooks `_pil_to_content`, `media_override` and `_RUNNER_LOCK`.
 
-Director plan, task A2. `_load_model` and `_invoke` are replaced by recorders, so no test
+`_load_model` and `_invoke` are replaced by recorders, so no test
 loads a model, imports a chat handler or touches the GPU (`keep_model_loaded=True` keeps
 `clear()` and its CUDA calls out of every run).
 """
@@ -137,7 +137,7 @@ class GGUFWriterCoreTest(unittest.TestCase):
         self.assertNotIn("unknown_extra", seen)
         self.assertNotIn("media_override", seen)
 
-    # ---- Director hooks -------------------------------------------------------------
+    # ---- Writer hooks ---------------------------------------------------------------
 
     def test_media_override_used(self):
         from PIL import Image
