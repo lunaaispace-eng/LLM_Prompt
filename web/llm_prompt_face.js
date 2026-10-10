@@ -21,6 +21,7 @@
 //     every node object and drops plain fields.
 
 import { app } from "/scripts/app.js";
+import { closePanel, isPanelOpenFor, openPanel, recentlyClosed, refreshPanel } from "./llm_prompt_panel.mjs";
 
 const NODE = "LLMPrompt";
 const FACE = "llm_face";
@@ -30,10 +31,10 @@ const KEEP = new Set(["model_name", "system_prompt", "user_prompt", "seed", "con
 
 // Mirrors QUALITY_LEVELS in llm_prompt_node.py. Times: Qwen3.6 27B, Krea preset.
 const LEVELS = [
-    { key: "fast",    name: "Fast",    time: "~10 s", desc: "no thinking · MTP" },
-    { key: "normal",  name: "Normal",  time: "~25 s", desc: "thinks up to 1k tokens · MTP" },
-    { key: "quality", name: "Quality", time: "~35 s", desc: "thinks up to 2k tokens · MTP" },
-    { key: "ultra",   name: "Ultra",   time: "~50 s", desc: "unlimited thinking · MTP" },
+    { key: "fast",    name: "Fast",    time: "~10 s", desc: "no thinking · MTP", thinking: false, budget: -1, mtp: 3 },
+    { key: "normal",  name: "Normal",  time: "~25 s", desc: "thinks up to 1k tokens · MTP", thinking: true, budget: 1024, mtp: 3 },
+    { key: "quality", name: "Quality", time: "~35 s", desc: "thinks up to 2k tokens · MTP", thinking: true, budget: 2048, mtp: 3 },
+    { key: "ultra",   name: "Ultra",   time: "~50 s", desc: "unlimited thinking · MTP", thinking: true, budget: -1, mtp: 3 },
 ];
 
 // Luna house palette (luna_theme.mjs).
@@ -148,14 +149,54 @@ function levelOf(node) {
     return String(widget(node, "quality")?.value ?? "fast");
 }
 
-function setLevel(node, key) {
-    const w = widget(node, "quality");
-    if (!w || w.value === key) return;
-    w.value = key;
-    w.callback?.(key, app.canvas, node);
-    renderFace(node);
+function setValue(node, name, v) {
+    const w = widget(node, name);
+    if (!w || w.value === v) return;
+    w.value = v;
+    w.callback?.(v, app.canvas, node);
     node.setDirtyCanvas?.(true, true);
     notifyGraphChanged();
+}
+
+function setLevel(node, key) {
+    if (key !== "custom") {
+        node.properties = node.properties || {};
+        node.properties.llmLastLevel = key;
+    }
+    setValue(node, "quality", key);
+    renderFace(node);
+    refreshPanel(node);
+}
+
+// Editing a level-owned setting in the panel: first copy the level's values
+// into those widgets, so switching to custom changes nothing by itself.
+function toCustom(node) {
+    const lv = LEVELS.find((l) => l.key === levelOf(node));
+    if (lv) {
+        node.properties = node.properties || {};
+        node.properties.llmLastLevel = lv.key;   // what "reset" returns to
+        setValue(node, "disable_thinking", !lv.thinking);
+        setValue(node, "reasoning_budget", lv.budget);
+        setValue(node, "mtp_draft_tokens", lv.mtp);
+    }
+    setLevel(node, "custom");
+}
+
+const PANEL_API = {
+    C, widget, setValue, setLevel, toCustom, levelOf: (n) => levelOf(n), renderFace: (n) => renderFace(n),
+    levelValue(n, name) {
+        const lv = LEVELS.find((l) => l.key === levelOf(n));
+        if (!lv) return undefined;
+        return { disable_thinking: !lv.thinking, reasoning_budget: lv.budget, mtp_draft_tokens: lv.mtp }[name];
+    },
+    showOnNode: (n) => toggleSettings(n),
+    onOpen: (n) => n.setDirtyCanvas?.(true, false),
+    onClose: (n) => n.setDirtyCanvas?.(true, false),
+};
+
+function openSettings(node) {
+    if (recentlyClosed(node)) return;   // this click was the panel's outside-close
+    openPanel(node, PANEL_API);
 }
 
 function lastRunText(s) {
@@ -189,7 +230,7 @@ function buildFace(node) {
     inner.innerHTML = `
 <div class="llmf-row"><span>Prompt quality</span><span class="sp"></span>
 <button class="llmf-btn" data-act="help" title="Help">i</button>
-<button class="llmf-btn" data-act="gear" title="Settings">⚙</button></div>
+<button class="llmf-btn" data-act="gear" data-llm-gear="1" title="Settings">⚙</button></div>
 <div class="llmf-cards">${LEVELS.map((l) =>
         `<div class="llmf-card" data-key="${l.key}"><b>${l.name}</b><span>${l.time}</span></div>`).join("")}</div>
 <div class="llmf-sum"></div>
@@ -204,7 +245,7 @@ function buildFace(node) {
         e.stopPropagation();
         const r = btn.getBoundingClientRect();
         if (btn.dataset.act === "help") openHelp(r.left, r.bottom + 6);
-        else toggleSettings(node);
+        else openSettings(node);
     });
 
     const w = node.addDOMWidget(FACE, FACE, root, { serialize: false, hideOnZoom: false, getMinHeight: () => MIN_H });
@@ -240,7 +281,8 @@ function openHelp(x, y) {
 <b>Fast</b> writes straight away (~10 s). <b>Normal</b>, <b>Quality</b> and <b>Ultra</b> let the model think
 first, up to 1k, 2k or unlimited tokens. All of them use MTP when the model has MTP heads (same text, about
 twice as fast). Times are for a 27B model with the Krea preset.<br><br>
-<b>⚙</b> shows every setting. Changing thinking or MTP there needs the level <b>custom</b>.`;
+<b>⚙</b> opens every setting. Changing thinking or MTP there switches the level to <b>custom</b>;
+<b>reset</b> in the panel goes back.`;
     document.body.appendChild(_pop);
     const r = _pop.getBoundingClientRect();
     _pop.style.left = `${Math.max(8, Math.min(x, innerWidth - r.width - 8))}px`;
@@ -281,7 +323,7 @@ function drawIcons(node, ctx) {
     if (isVue() || node.flags?.collapsed) return;
     for (const ic of ICONS) {
         const [cx, cy] = iconCentre(node, ic.inset);
-        const on = node.__llmfHover === ic.act || (ic.act === "gear" && node.properties?.llmShowSettings);
+        const on = node.__llmfHover === ic.act || (ic.act === "gear" && (isPanelOpenFor(node) || node.properties?.llmShowSettings));
         ctx.save();
         ctx.strokeStyle = ctx.fillStyle = on ? C.accent : C.muted;
         ctx.lineWidth = 1.4;
@@ -393,7 +435,7 @@ app.registerExtension({
         P.onMouseDown = function (e, pos) {
             const act = hitIcon(this, pos);
             if (act === "help") { openHelp(e.clientX, e.clientY + 12); return true; }
-            if (act === "gear") { toggleSettings(this); return true; }
+            if (act === "gear") { openSettings(this); return true; }
             return onDown?.apply(this, arguments);
         };
 
@@ -408,6 +450,12 @@ app.registerExtension({
         P.onMouseLeave = function () {
             if (this.__llmfHover) { this.__llmfHover = null; this.setDirtyCanvas(true, false); }
             return onLeave?.apply(this, arguments);
+        };
+
+        const onRemoved = P.onRemoved;
+        P.onRemoved = function () {
+            if (isPanelOpenFor(this)) closePanel();
+            return onRemoved?.apply(this, arguments);
         };
 
         const onDbl = P.onDblClick;

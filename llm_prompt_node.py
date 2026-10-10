@@ -2325,7 +2325,7 @@ class LLMPromptNode(io.ComfyNode):
                 io.Float.Input("frequency_penalty", default=0.0, min=-2.0, max=2.0, step=0.1, advanced=True,
                                tooltip="Penalizes frequent tokens. Ref: 0.0 default, 0.1-0.5 to reduce repetition. "
                                        "Only when auto_settings is OFF."),
-                io.Int.Input("reasoning_budget", default=-1, min=-1, max=32000, step=64, advanced=True,
+                io.Int.Input("reasoning_budget", default=-1, min=-1, max=32000, step=1, advanced=True,
                              tooltip="Cap on thinking tokens when thinking is ON (like LM Studio's budget). "
                                      "-1 = unlimited, 0 = no thinking, N = stop thinking after N tokens and "
                                      "write the answer. Ref: 1024-2048. Qwen 3.5+/Gemma 4 only."),
