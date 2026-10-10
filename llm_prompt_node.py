@@ -692,13 +692,15 @@ def _resolve_model_settings(name_lower: str) -> dict | None:
         }
 
     # Qwen 3.0 / 3.5 / 3.6 (dense, text):
-    #   Unsloth non-thinking recommendation — temp 0.7, top_p 0.8, top_k 20,
-    #   min_p 0, presence_penalty 1.5. Add a mild repeat_penalty (1.05) as a
-    #   loop guard since presence_penalty is not always honored by the build.
+    #   Official non-thinking values (Qwen3.6 model card, Unsloth) — temp 0.7,
+    #   top_p 0.8, top_k 20, min_p 0, presence_penalty 1.5, repetition_penalty
+    #   1.0. The extra repeat_penalty 1.05 this used to add, stacked on presence
+    #   1.5 over llama.cpp's 64-token penalty window, tipped long Krea prompts into
+    #   punctuation-less word salad; with 1.0 the same seed is clean (2026-10-10).
     if "qwen" in n:
         return {
             "temperature": 0.7, "top_p": 0.8, "top_k": 20,
-            "min_p": 0.0, "presence_penalty": 1.5, "repetition_penalty": 1.05,
+            "min_p": 0.0, "presence_penalty": 1.5, "repetition_penalty": 1.0,
         }
 
     return None
