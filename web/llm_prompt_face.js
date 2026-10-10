@@ -24,13 +24,16 @@
 
 import { app } from "/scripts/app.js";
 // Versioned: browsers kept an old copy of this module after Ctrl+F5 (2026-10-10). Bump on every change.
-import { closePanel, isPanelOpenFor, openPanel, recentlyClosed, refreshPanel } from "./llm_prompt_panel.mjs?v=5";
+import { closePanel, isPanelOpenFor, openPanel, recentlyClosed, refreshPanel } from "./llm_prompt_panel.mjs?v=6";
 
 const NODE = "LLMPrompt";
 const FACE = "llm_face";
 const MIN_H = 214;
 // Widgets that stay on the face. Everything else is a setting (gear).
-const KEEP = new Set(["model_name", "system_prompt", "user_prompt", "seed", "control_after_generate"]);
+// custom_system_prompt stays too (Peter, 2026-10-10: "still no custom system
+// prompt text input in the node"); visible, its socket is labelled again.
+const KEEP = new Set(["model_name", "system_prompt", "custom_system_prompt", "user_prompt", "seed",
+    "control_after_generate"]);
 
 // Mirrors QUALITY_LEVELS in llm_prompt_node.py. Times: Qwen3.6 27B, Krea preset.
 const LEVELS = [
@@ -481,6 +484,21 @@ function openEditor(node) {
     ta.focus();
 }
 
+// A saved size from before the face (every setting visible, ~1,200 px) or from
+// "show all settings" leaves the node far taller than its content, and the idea
+// box stretches to fill it (Peter, 2026-10-10: "after every restart the LLM node
+// is so extended"). On load, a node more than 35% taller than it needs shrinks
+// to fit; a node made a little taller on purpose keeps its size. Classic only:
+// Nodes 2.0 keeps sizes in its own layout store.
+function shrinkIfOversized(node) {
+    if (isVue() || node.properties?.llmShowSettings || node.flags?.collapsed) return;
+    const need = node.computeSize()[1];
+    if (need > 0 && node.size[1] > need * 1.35) {
+        node.setSize([node.size[0], need]);
+        node.setDirtyCanvas?.(true, true);
+    }
+}
+
 function toggleSettings(node) {
     node.properties = node.properties || {};
     node.properties.llmShowSettings = !node.properties.llmShowSettings;
@@ -590,6 +608,11 @@ app.registerExtension({
                 const cb = qw.callback;
                 qw.callback = (...a) => { const rr = cb?.apply(qw, a); renderFace(this); return rr; };
             }
+            // Hide the settings NOW, before any size is computed. Done only in a
+            // timer, a load first sized the node for every widget visible
+            // (1,264 px) and overwrote the saved size on every restart
+            // (Peter, 2026-10-10: "after every restart the LLM node is so extended").
+            applyVisibility(this);
             // A fresh node shrinks to its face; a loaded one keeps its saved size
             // (onConfigure clears the flag before this timer fires).
             this.__llmfFresh = true;
@@ -604,7 +627,11 @@ app.registerExtension({
             this.__llmfFresh = false;
             renderFace(this);
             setTimeout(() => refreshModel(this), 160);
-            setTimeout(() => { applyVisibility(this); renderFace(this); }, 150);
+            setTimeout(() => {
+                applyVisibility(this);
+                renderFace(this);
+                shrinkIfOversized(this);
+            }, 150);
             return r;
         };
 

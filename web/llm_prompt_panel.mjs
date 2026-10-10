@@ -39,7 +39,6 @@ const SECTIONS = [
         ["split_output", "Split positive / negative", "toggle"],
         ["max_tokens", "Max answer length", "number"],
         ["validate", "Check output", "combo-chips"],
-        ["custom_system_prompt", "Own instructions (replace the preset)", "text"],
     ] },
     { title: "Vision", icon: "◉", folded: true, rows: [
         ["load_mmproj", "Load vision projector", "combo-chips"],
