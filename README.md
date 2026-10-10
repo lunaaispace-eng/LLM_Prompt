@@ -114,12 +114,12 @@ The local node runs GGUF models through `llama-cpp-python`.
 
 ### The node face
 
-The node shows only what you change for every prompt: the model, the preset, your idea and the seed. Below
-them:
+The node shows only what you change for every prompt: the model, the preset, your own instructions
+(`custom_system_prompt`, replaces the preset when filled), your idea and the seed. Below them:
 
 - **Model card** - the model's quant, whether it has MTP heads and a vision projector, its size, and whether it
   is loaded (with the context size). The preset's family (Krea, Ideogram, MiniMax H3...) and a chip for every
-  connected input.
+  connected input. A red chip warns when a setting that is hidden on the node is fed by a wire.
 - **Prompt quality** - four buttons. Each sets thinking, the thinking budget and MTP for you:
 
   | Level | Thinking | MTP | Time (Qwen3.6 27B Q4, Krea preset, RTX 4090) |
@@ -135,14 +135,20 @@ them:
 - **✎ idea** - a large editor for your idea (Ctrl+Enter saves, Esc cancels).
 
 **⚙ Settings** (the gear in the title bar; in Nodes 2.0 on the face) opens a panel with every other setting:
-sampling, thinking, speed and memory, output, vision, debug. It shows what the run will really use. Changing
-thinking, the budget or MTP there switches the level to `custom` (your own values); `reset` goes back to the
-level. **ⓘ** explains the levels.
+sampling, thinking, speed and memory, output, vision, debug. The panel is attached to the node's right edge:
+it pans, zooms and moves with the node, and stays open while you work on the canvas; the gear, ✕, `Done` or Esc
+close it. It shows what the run will really use. Changing thinking, the budget or MTP there switches the level
+to `custom` (your own values); `reset` goes back to the level. A setting fed by a wire is marked
+`set by a wire`. **ⓘ** explains the levels.
 
-Workflows saved with an older version of the node load with their values in the right settings
-(`web/llm_prompt_compat.js`); a saved node gets the `fast` level.
+Hidden settings keep their input sockets for existing wires, but a new wire cannot be dropped on them; open
+`Show all settings on the node` in the panel to wire one.
 
-All settings (in the ⚙ panel):
+Workflows saved with an older version of the node load with their values in the right settings, also when
+they were re-saved while the values were shifted (`web/llm_prompt_compat.js`); such a node runs as `custom`,
+exactly as it was saved. A node saved taller than its content (from the old layout) shrinks to fit on load.
+
+All settings (the ones not on the face are in the ⚙ panel):
 
 | Widget | Purpose |
 | --- | --- |
