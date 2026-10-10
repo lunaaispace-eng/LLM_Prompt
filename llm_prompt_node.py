@@ -1474,6 +1474,12 @@ class _LLMRunner:
             "pool_size": 4194304,
             "top_k": 0,
             "flash_attn": True,
+            # Hybrid models (Qwen 3.5/3.6): JamePeng 0.3.49 saves a state
+            # checkpoint after the prompt and after every run. On the host that
+            # is a ~2 s VRAM-to-RAM copy per call, which halved the node's speed
+            # (20-24 vs 47 tok/s); on the device it costs nothing measurable.
+            # Kept rather than disabled: MTP rollback uses the checkpoints.
+            "checkpoint_on_device": True,
             # chat_template_kwargs does NOT belong here â€” no effect on Llama.__init__.
             # Passed at inference time via create_chat_completion instead.
         }
