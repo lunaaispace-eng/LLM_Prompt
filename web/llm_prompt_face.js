@@ -76,6 +76,7 @@ function injectCSS() {
 .llmf-bg.a{background:${C.accent}22;color:${C.accent}}
 .llmf-bg.g{background:#7bb47b22;color:#9fd09f}
 .llmf-bg.off{opacity:.45}
+.llmf-bg.warn{background:#c0564a33;color:#f0a49a}
 .llmf-dot{width:7px;height:7px;border-radius:4px;background:${C.border};display:inline-block}
 .llmf-dot.on{background:#7bb47b}
 .llmf-last{font-size:11px;color:${C.muted};background:${C.bg};border:1px solid ${C.border};border-radius:6px;padding:4px 7px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
@@ -286,7 +287,18 @@ function renderModel(node, root) {
         const slot = node.inputs?.find((i) => i.name === inp);
         if (slot && slot.link != null) m2 += b(`${label} ✓`);
     }
-    if (!m2.includes("✓")) m2 += `<span>no inputs connected</span>`;
+    // Settings are hidden on the face but their sockets still take wires. A wire
+    // on a hidden one is easy to make by accident and changes the result a lot:
+    // say so (2026-10-10: an idea wired into custom_system_prompt replaced the
+    // Krea preset and the output became a 95-token rewording of the idea).
+    for (const inp of node.inputs || []) {
+        if (inp.link == null || !inp.widget) continue;
+        const w = widget(node, inp.name);
+        if (!w?.__llmfHidden) continue;
+        const why = inp.name === "custom_system_prompt" ? "replaces the preset!" : "set by a wire";
+        m2 += `<span class="llmf-bg warn" title="${inp.name} is wired; it is hidden on the node (⚙ shows it)">⚠ ${inp.name} ${why}</span>`;
+    }
+    if (!m2.includes("✓") && !m2.includes("⚠")) m2 += `<span>no inputs connected</span>`;
     root.querySelector(".llmf-m1").innerHTML = m1;
     root.querySelector(".llmf-m2").innerHTML = m2;
 }
