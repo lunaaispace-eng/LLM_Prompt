@@ -25,7 +25,7 @@ import { closePanel, isPanelOpenFor, openPanel, recentlyClosed, refreshPanel } f
 
 const NODE = "LLMPrompt";
 const FACE = "llm_face";
-const MIN_H = 156;
+const MIN_H = 214;
 // Widgets that stay on the face. Everything else is a setting (gear).
 const KEEP = new Set(["model_name", "system_prompt", "user_prompt", "seed", "control_after_generate"]);
 
@@ -69,6 +69,13 @@ function injectCSS() {
 .llmf-card.on b{color:${C.accent}}
 .llmf-sum{font-size:11px;color:${C.muted};min-height:14px}
 .llmf-sum.custom{color:${C.accent}}
+.llmf-model{display:flex;align-items:center;gap:4px;flex-wrap:wrap;font-size:11px;color:${C.muted}}
+.llmf-bg{font-size:10px;padding:1px 6px;border-radius:4px;background:${C.border};color:#c9ccd4}
+.llmf-bg.a{background:${C.accent}22;color:${C.accent}}
+.llmf-bg.g{background:#7bb47b22;color:#9fd09f}
+.llmf-bg.off{opacity:.45}
+.llmf-dot{width:7px;height:7px;border-radius:4px;background:${C.border};display:inline-block}
+.llmf-dot.on{background:#7bb47b}
 .llmf-last{font-size:11px;color:${C.muted};background:${C.bg};border:1px solid ${C.border};border-radius:6px;padding:4px 7px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
 .llmf-pop{position:fixed;z-index:1400;max-width:340px;background:${C.panel};border:1px solid ${C.accent}66;border-radius:8px;padding:10px 12px;font:12px/1.5 Inter,system-ui,sans-serif;color:${C.text};box-shadow:0 8px 24px #0008}
 .llmf-pop b{color:${C.accent}}
@@ -208,9 +215,63 @@ function lastRunText(s) {
     return `Last run: ${parts.join(" · ")}`;
 }
 
+// Preset family, from the dropdown label (the YAML title).
+const FAMILIES = [
+    [/krea/i, "Krea"], [/ideogram/i, "Ideogram"], [/minimax|h3/i, "MiniMax H3"], [/chroma/i, "Chroma"],
+    [/z[-_ ]?image/i, "Z-Image"], [/sdxl|pony|illustrious|juggernaut/i, "SDXL"], [/flux/i, "Flux"],
+];
+const familyOf = (title) => (FAMILIES.find(([re]) => re.test(title || "")) || [])[1] || "";
+
+// Model facts come from /llm_prompt/model_info, cached per model name. The
+// loaded / context part changes after a run, so a run refetches.
+const _info = new Map();
+async function fetchInfo(name, force = false) {
+    if (!name) return null;
+    if (!force && _info.has(name)) return _info.get(name);
+    try {
+        const r = await fetch(`/llm_prompt/model_info?name=${encodeURIComponent(name)}`);
+        const j = await r.json();
+        _info.set(name, j);
+        return j;
+    } catch (_) { return null; }
+}
+function refreshModel(node, force = false) {
+    const name = widget(node, "model_name")?.value;
+    fetchInfo(name, force).then(() => renderFace(node));
+}
+
+const INPUT_CHIPS = [["style", "style"], ["context", "context"], ["width", "size"], ["image", "image"],
+    ["reference_image", "reference"], ["video", "video"], ["audio", "audio"]];
+
+function renderModel(node, root) {
+    const info = _info.get(widget(node, "model_name")?.value);
+    const fam = familyOf(widget(node, "system_prompt")?.value);
+    const b = (t, cls = "") => `<span class="llmf-bg ${cls}">${t}</span>`;
+    let m1 = "";
+    if (info?.found) {
+        if (info.quant) m1 += b(info.quant);
+        m1 += info.mtp ? b("MTP", "g") : b("no MTP", "off");
+        if (info.vision) m1 += b("vision");
+        m1 += `<span style="margin-left:4px">${info.size_gb} GB</span>`;
+        m1 += `<span class="sp" style="flex:1"></span><span class="llmf-dot ${info.loaded ? "on" : ""}"></span>`;
+        m1 += info.loaded ? `<span>loaded · ${Math.round(info.n_ctx / 1024)}k</span>` : "<span>not loaded</span>";
+    } else {
+        m1 = "<span>model info…</span>";
+    }
+    let m2 = fam ? b(fam, "a") : "";
+    for (const [inp, label] of INPUT_CHIPS) {
+        const slot = node.inputs?.find((i) => i.name === inp);
+        if (slot && slot.link != null) m2 += b(`${label} ✓`);
+    }
+    if (!m2.includes("✓")) m2 += `<span>no inputs connected</span>`;
+    root.querySelector(".llmf-m1").innerHTML = m1;
+    root.querySelector(".llmf-m2").innerHTML = m2;
+}
+
 function renderFace(node) {
     const root = node.__llmfRoot;
     if (!root) return;
+    renderModel(node, root);
     const key = levelOf(node);
     root.querySelectorAll(".llmf-card").forEach((c) => c.classList.toggle("on", c.dataset.key === key));
     const lv = LEVELS.find((l) => l.key === key);
@@ -228,6 +289,8 @@ function buildFace(node) {
     const inner = document.createElement("div");
     inner.className = "llmf-in";
     inner.innerHTML = `
+<div class="llmf-model llmf-m1"></div>
+<div class="llmf-model llmf-m2"></div>
 <div class="llmf-row"><span>Prompt quality</span><span class="sp"></span>
 <button class="llmf-btn" data-act="help" title="Help">i</button>
 <button class="llmf-btn" data-act="gear" data-llm-gear="1" title="Settings">⚙</button></div>
@@ -391,6 +454,12 @@ app.registerExtension({
             const r = onCreated?.apply(this, arguments);
             this.properties = this.properties || {};
             buildFace(this);
+            for (const name of ["model_name", "system_prompt"]) {
+                const mw = widget(this, name);
+                if (!mw) continue;
+                const cb = mw.callback;
+                mw.callback = (...a) => { const rr = cb?.apply(mw, a); refreshModel(this); return rr; };
+            }
             const qw = widget(this, "quality");
             if (qw) {
                 const cb = qw.callback;
@@ -399,6 +468,7 @@ app.registerExtension({
             // A fresh node shrinks to its face; a loaded one keeps its saved size
             // (onConfigure clears the flag before this timer fires).
             this.__llmfFresh = true;
+            setTimeout(() => refreshModel(this), 120);
             setTimeout(() => applyVisibility(this, { resize: !!this.__llmfFresh }), 100);
             return r;
         };
@@ -408,6 +478,7 @@ app.registerExtension({
             const r = onConfigure?.apply(this, arguments);
             this.__llmfFresh = false;
             renderFace(this);
+            setTimeout(() => refreshModel(this), 160);
             setTimeout(() => { applyVisibility(this); renderFace(this); }, 150);
             return r;
         };
@@ -420,6 +491,7 @@ app.registerExtension({
                 this.properties = this.properties || {};
                 this.properties.llmLastRun = s;
                 renderFace(this);
+                refreshModel(this, true);   // loaded / context changed
             }
             return r;
         };
@@ -450,6 +522,13 @@ app.registerExtension({
         P.onMouseLeave = function () {
             if (this.__llmfHover) { this.__llmfHover = null; this.setDirtyCanvas(true, false); }
             return onLeave?.apply(this, arguments);
+        };
+
+        const onConn = P.onConnectionsChange;
+        P.onConnectionsChange = function () {
+            const r = onConn?.apply(this, arguments);
+            renderFace(this);
+            return r;
         };
 
         const onRemoved = P.onRemoved;
