@@ -148,14 +148,15 @@ app.registerExtension({
             const nodes = window?.app?.graph?._nodes;
             if (!Array.isArray(nodes)) return;
             for (const n of nodes) {
-                if (n?.type === "LLMPrompt" || n?.type === "LLMPromptAPI") {
+                if (n?.type === "LLMPromptAPI") {
                     setTimeout(() => reapply(n), 50);
                 }
             }
         });
     },
     async beforeRegisterNodeDef(nodeType, nodeData) {
-        if (nodeData.name !== "LLMPrompt" && nodeData.name !== "LLMPromptAPI") return;
+        // LLMPrompt (GGUF) has its own face and gear: llm_prompt_face.js.
+        if (nodeData.name !== "LLMPromptAPI") return;
 
         const onCreated = nodeType.prototype.onNodeCreated;
         nodeType.prototype.onNodeCreated = function () {
