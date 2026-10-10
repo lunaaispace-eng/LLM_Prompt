@@ -2408,8 +2408,13 @@ class LLMPromptNode(io.ComfyNode):
         with _RUNNER_LOCK:
             positive, negative, log = _RUNNER.generate(**call_kwargs)
             stats = dict(getattr(_RUNNER, "last_stats", {}) or {})
-        # The node face reads this in onExecuted (the last-run line).
-        return io.NodeOutput(positive, negative, log, ui={"llm_stats": [stats]} if stats else None)
+            reasoning = getattr(_RUNNER, "last_reasoning", "") or ""
+        # The node face reads these in onExecuted: the last-run line and its
+        # "view thinking" link (the same reasoning the `log` output carries).
+        ui = {"llm_stats": [stats]} if stats else {}
+        if stats and reasoning:
+            ui["llm_reasoning"] = [reasoning]
+        return io.NodeOutput(positive, negative, log, ui=ui or None)
 
 
 # ---------------------------------------------------------------------------

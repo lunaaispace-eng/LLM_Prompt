@@ -95,6 +95,12 @@ class SchemaAndStatsTests(unittest.TestCase):
         self.assertEqual(out.args, ("p", "n", "l"))
         self.assertEqual(out.ui, {"llm_stats": [stats]})
 
+    def test_execute_sends_reasoning_when_there_is_some(self):
+        stats = {"seconds": 1.5}
+        with mock.patch.object(self.node._RUNNER, "generate", return_value=("p", "n", "l")),                 mock.patch.object(self.node._RUNNER, "last_stats", stats, create=True),                 mock.patch.object(self.node._RUNNER, "last_reasoning", "I think", create=True):
+            out = self.node.LLMPromptNode.execute(model_name=QWEN)
+        self.assertEqual(out.ui["llm_reasoning"], ["I think"])
+
 
 if __name__ == "__main__":
     unittest.main()

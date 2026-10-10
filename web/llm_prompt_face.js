@@ -77,6 +77,20 @@ function injectCSS() {
 .llmf-dot{width:7px;height:7px;border-radius:4px;background:${C.border};display:inline-block}
 .llmf-dot.on{background:#7bb47b}
 .llmf-last{font-size:11px;color:${C.muted};background:${C.bg};border:1px solid ${C.border};border-radius:6px;padding:4px 7px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.llmf-last{display:flex;gap:8px;align-items:center}
+.llmf-last .t{flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis}
+.llmf-link{color:${C.accent};cursor:pointer;flex:none}
+.llmf-link:hover{text-decoration:underline}
+.llmf-btn.all{display:inline-block;width:auto;padding:0 6px;font-size:11px}
+.llmf-pop.think{max-width:620px;max-height:60vh;overflow:auto;white-space:pre-wrap;font:12px/1.5 ui-monospace,Consolas,monospace}
+.llmf-ov{position:fixed;inset:0;z-index:1500;background:#000a;display:flex;align-items:center;justify-content:center}
+.llmf-ed{width:min(900px,80vw);height:min(640px,75vh);display:flex;flex-direction:column;gap:8px;background:${C.panel};border:1px solid ${C.accent}66;border-radius:10px;padding:12px;font:12px Inter,system-ui,sans-serif;color:${C.text}}
+.llmf-ed textarea{flex:1;resize:none;background:${C.bg};border:1px solid ${C.border};border-radius:6px;color:${C.text};font:14px/1.6 Inter,system-ui,sans-serif;padding:10px}
+.llmf-ed textarea:focus{outline:none;border-color:${C.accent}}
+.llmf-ed .bar{display:flex;gap:8px;align-items:center;color:${C.muted}}
+.llmf-ed .bar .sp{flex:1}
+.llmf-ed button{background:${C.bg};border:1px solid ${C.border};border-radius:6px;color:${C.text};padding:4px 12px;cursor:pointer}
+.llmf-ed button.ok{border-color:${C.accent};color:${C.accent}}
 .llmf-pop{position:fixed;z-index:1400;max-width:340px;background:${C.panel};border:1px solid ${C.accent}66;border-radius:8px;padding:10px 12px;font:12px/1.5 Inter,system-ui,sans-serif;color:${C.text};box-shadow:0 8px 24px #0008}
 .llmf-pop b{color:${C.accent}}
 `;
@@ -217,7 +231,7 @@ function lastRunText(s) {
 
 // Preset family, from the dropdown label (the YAML title).
 const FAMILIES = [
-    [/krea/i, "Krea"], [/ideogram/i, "Ideogram"], [/minimax|h3/i, "MiniMax H3"], [/chroma/i, "Chroma"],
+    [/krea/i, "Krea"], [/ideogram/i, "Ideogram"], [/minimax|\bh3\b/i, "MiniMax H3"], [/chroma/i, "Chroma"],
     [/z[-_ ]?image/i, "Z-Image"], [/sdxl|pony|illustrious|juggernaut/i, "SDXL"], [/flux/i, "Flux"],
 ];
 const familyOf = (title) => (FAMILIES.find(([re]) => re.test(title || "")) || [])[1] || "";
@@ -278,7 +292,8 @@ function renderFace(node) {
     const sum = root.querySelector(".llmf-sum");
     sum.classList.toggle("custom", !lv);
     sum.textContent = lv ? lv.desc : "Custom: your own thinking and MTP settings (⚙)";
-    root.querySelector(".llmf-last").textContent = lastRunText(node.properties?.llmLastRun);
+    root.querySelector(".llmf-last .t").textContent = lastRunText(node.properties?.llmLastRun);
+    root.querySelector(".llmf-link").style.display = node.__llmfReasoning ? "" : "none";
     root.classList.toggle("vue", isVue());
 }
 
@@ -292,19 +307,27 @@ function buildFace(node) {
 <div class="llmf-model llmf-m1"></div>
 <div class="llmf-model llmf-m2"></div>
 <div class="llmf-row"><span>Prompt quality</span><span class="sp"></span>
+<button class="llmf-btn all" data-act="edit" title="Edit your idea in a large editor">✎ idea</button>
 <button class="llmf-btn" data-act="help" title="Help">i</button>
 <button class="llmf-btn" data-act="gear" data-llm-gear="1" title="Settings">⚙</button></div>
 <div class="llmf-cards">${LEVELS.map((l) =>
         `<div class="llmf-card" data-key="${l.key}"><b>${l.name}</b><span>${l.time}</span></div>`).join("")}</div>
 <div class="llmf-sum"></div>
-<div class="llmf-last"></div>`;
+<div class="llmf-last"><span class="t"></span><span class="llmf-link" data-act="think">view thinking</span></div>`;
     root.appendChild(inner);
     inner.addEventListener("pointerdown", (e) => e.stopPropagation());
     inner.addEventListener("click", (e) => {
         const card = e.target.closest(".llmf-card");
         if (card) { e.stopPropagation(); setLevel(node, card.dataset.key); return; }
+        if (e.target.closest(".llmf-link")) {
+            e.stopPropagation();
+            const r = e.target.getBoundingClientRect();
+            openThinking(node, r.left, r.bottom + 6);
+            return;
+        }
         const btn = e.target.closest(".llmf-btn");
         if (!btn) return;
+        if (btn.dataset.act === "edit") { e.stopPropagation(); openEditor(node); return; }
         e.stopPropagation();
         const r = btn.getBoundingClientRect();
         if (btn.dataset.act === "help") openHelp(r.left, r.bottom + 6);
@@ -335,25 +358,83 @@ function closeHelp() {
 function onOutside(e) { if (_pop && !_pop.contains(e.target)) closeHelp(); }
 function onEsc(e) { if (e.key === "Escape") { e.stopPropagation(); closeHelp(); } }
 
-function openHelp(x, y) {
+function openPop(x, y, cls, fill) {
     closeHelp();
     injectCSS();
     _pop = document.createElement("div");
-    _pop.className = "llmf-pop";
-    _pop.innerHTML = `<b>LLM Prompt (GGUF)</b><br>Turns your idea into a finished prompt with a local model.<br><br>
-<b>Fast</b> writes straight away (~10 s). <b>Normal</b>, <b>Quality</b> and <b>Ultra</b> let the model think
-first, up to 1k, 2k or unlimited tokens. All of them use MTP when the model has MTP heads (same text, about
-twice as fast). Times are for a 27B model with the Krea preset.<br><br>
-<b>⚙</b> opens every setting. Changing thinking or MTP there switches the level to <b>custom</b>;
-<b>reset</b> in the panel goes back.`;
+    _pop.className = `llmf-pop ${cls}`;
+    fill(_pop);
     document.body.appendChild(_pop);
     const r = _pop.getBoundingClientRect();
     _pop.style.left = `${Math.max(8, Math.min(x, innerWidth - r.width - 8))}px`;
     _pop.style.top = `${Math.max(8, Math.min(y, innerHeight - r.height - 8))}px`;
+    _pop.addEventListener("wheel", (e) => e.stopPropagation(), { passive: true });
     setTimeout(() => {
         document.addEventListener("pointerdown", onOutside, true);
         document.addEventListener("keydown", onEsc, true);
     }, 0);
+}
+
+// The reasoning arrives with the run (ui llm_reasoning). Kept on the node
+// object only: it can be long, and the `log` output already carries it.
+function openThinking(node, x, y) {
+    const text = node.__llmfReasoning || "";
+    openPop(x, y, "think", (el) => { el.textContent = text; });
+}
+
+function openHelp(x, y) {
+    openPop(x, y, "", (el) => { el.innerHTML = HELP_HTML; });
+}
+
+const HELP_HTML = `<b>LLM Prompt (GGUF)</b><br>Turns your idea into a finished prompt with a local model.<br><br>
+<b>Fast</b> writes straight away (~10 s). <b>Normal</b>, <b>Quality</b> and <b>Ultra</b> let the model think
+first, up to 1k, 2k or unlimited tokens. All of them use MTP when the model has MTP heads (same text, about
+twice as fast). Times are for a 27B model with the Krea preset.<br><br>
+<b>⚙</b> opens every setting. Changing thinking or MTP there switches the level to <b>custom</b>;
+<b>reset</b> in the panel goes back. <b>✎ idea</b> opens a large editor for your idea
+(Ctrl+Enter saves, Esc cancels).`;
+
+// Full-screen editor for the idea (user_prompt). While it is open, ComfyUI's
+// own Ctrl+Z must not undo the graph: its undo handler sits on window keydown
+// capture from startup, so stopping the event later does not help. The
+// sanctioned switch is ComfyApp.maskeditor_is_opended (Pixaroma
+// shared/graph_undo_guard.mjs); it is handed back only if it is still ours.
+function openEditor(node) {
+    const w = widget(node, "user_prompt");
+    if (!w) return;
+    injectCSS();
+    const ov = document.createElement("div");
+    ov.className = "llmf-ov";
+    ov.innerHTML = `<div class="llmf-ed"><div class="bar"><b style="color:${C.accent}">Your idea</b><span class="sp"></span>
+<span>Ctrl+Enter saves · Esc cancels</span></div><textarea spellcheck="true"></textarea>
+<div class="bar"><span class="cnt"></span><span class="sp"></span><button data-act="cancel">Cancel</button>
+<button class="ok" data-act="save">Save</button></div></div>`;
+    const ta = ov.querySelector("textarea");
+    const cnt = ov.querySelector(".cnt");
+    ta.value = w.value ?? "";
+    const count = () => { cnt.textContent = `${ta.value.trim() ? ta.value.trim().split(/\s+/).length : 0} words`; };
+    count();
+    const C0 = app.constructor;
+    const prevHook = C0?.maskeditor_is_opended;
+    const hook = () => true;
+    if (C0) C0.maskeditor_is_opended = hook;
+    const close = (save) => {
+        if (save) { setValue(node, "user_prompt", ta.value); renderFace(node); }
+        if (C0 && C0.maskeditor_is_opended === hook) C0.maskeditor_is_opended = prevHook;
+        ov.remove();
+    };
+    ta.addEventListener("input", count);
+    ov.addEventListener("keydown", (e) => {
+        e.stopPropagation();
+        if (e.key === "Escape") close(false);
+        else if (e.key === "Enter" && (e.ctrlKey || e.metaKey)) { e.preventDefault(); close(true); }
+    });
+    ov.addEventListener("pointerdown", (e) => { e.stopPropagation(); if (e.target === ov) close(false); });
+    ov.addEventListener("wheel", (e) => e.stopPropagation(), { passive: true });
+    ov.querySelector('[data-act="save"]').addEventListener("click", () => close(true));
+    ov.querySelector('[data-act="cancel"]').addEventListener("click", () => close(false));
+    document.body.appendChild(ov);
+    ta.focus();
 }
 
 function toggleSettings(node) {
@@ -490,6 +571,7 @@ app.registerExtension({
             if (s) {
                 this.properties = this.properties || {};
                 this.properties.llmLastRun = s;
+                this.__llmfReasoning = out?.llm_reasoning?.[0] || "";
                 renderFace(this);
                 refreshModel(this, true);   // loaded / context changed
             }
