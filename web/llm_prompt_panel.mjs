@@ -4,11 +4,9 @@
 // API and the Python side see exactly what they saw before the face existed.
 // Skeleton after Pixaroma's AI Prompt settings panel (MIT, (c) 2026 pixaroma,
 // js/ai_prompt/settings.mjs + js/shared/node_panel.mjs). The bugs it avoids:
-//   - the ✕ sits inside the drag handle, so the drag ignores it;
-//   - outside-close listens on pointerdown (LiteGraph preventDefaults canvas
-//     pointerdown, so a mousedown listener never fires there) and exempts the
-//     gear, or the gear's own click reopens the panel it just closed;
-//   - the listeners are added in setTimeout(0), or the opening click closes it;
+//   - it sits against the node's right edge and pans / zooms with it (not draggable);
+//   - it does not close on an outside click: it is attached to the node and
+//     stays open while the canvas is used (closes via gear, ✕, Done, Escape);
 //   - the focused field is blurred before the panel is removed: Chrome fires
 //     no change event on a removed element, so a typed value was lost;
 //   - keydown stops at the panel: ComfyUI binds single letters (b = bypass).
@@ -97,9 +95,8 @@ const CSS = (C) => `
 `;
 
 let _panel = null;   // { el, node, cleanup }
-// The classic title-bar gear is canvas-drawn: its pointerdown reaches the
-// outside-close first, so the gear's own click would reopen the panel at once.
-// The face asks recentlyClosed() and treats that click as the close.
+// Guards against a double toggle: a click that just closed the panel (✕, the
+// gear) must not reopen it in the same gesture. The face asks recentlyClosed().
 let _lastClose = { node: null, t: 0 };
 export function recentlyClosed(node) { return _lastClose.node === node && Date.now() - _lastClose.t < 400; }
 
@@ -233,22 +230,24 @@ export function openPanel(node, api) {
     const stopFollow = follow(el, node, anchor);
     const stopDrag = () => {};
 
-    const onOutside = (e) => {
-        if (el.contains(e.target) || e.target.closest?.("[data-llm-gear]")) return;
+    // No close on an outside click (Peter, 2026-10-10: "if i click anywhere on
+    // the canvas it is closing"): the panel is part of the node now and stays
+    // open while the canvas is panned or other nodes are used. It closes with
+    // the gear, ✕, Done, Escape, or when the node goes away.
+    const onEsc = (e) => {
+        if (e.key !== "Escape") return;
+        const t = e.target;
+        if (t && !el.contains(t) && (t.isContentEditable || /^(INPUT|TEXTAREA|SELECT)$/.test(t.tagName))) return;
+        e.stopPropagation();
         closePanel();
     };
-    const onEsc = (e) => { if (e.key === "Escape") { e.stopPropagation(); closePanel(); } };
-    const t = setTimeout(() => {
-        document.addEventListener("pointerdown", onOutside, true);
-        document.addEventListener("keydown", onEsc, true);
-    }, 0);
+    const t = setTimeout(() => document.addEventListener("keydown", onEsc, true), 0);
     _panel = {
         el, node, api, refresh: refreshAll,
         cleanup() {
             clearTimeout(t);
             stopFollow();
             stopDrag();
-            document.removeEventListener("pointerdown", onOutside, true);
             document.removeEventListener("keydown", onEsc, true);
         },
     };
