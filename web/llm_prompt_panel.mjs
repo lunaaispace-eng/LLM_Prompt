@@ -62,7 +62,7 @@ const AUTO_OWNED = new Set(["temperature", "top_p", "top_k", "min_p", "repetitio
 
 const CSS = (C) => `
 .llmp{position:fixed;z-index:1300;width:460px;max-height:780px;transform-origin:0 0;display:flex;flex-direction:column;background:${C.panel};border:1px solid ${C.accent}66;border-radius:8px;box-shadow:0 10px 30px #000a;font:13.5px Inter,system-ui,sans-serif;color:${C.text}}
-.llmp-h{display:flex;align-items:center;gap:8px;padding:10px 12px;border-bottom:1px solid ${C.border};cursor:move;user-select:none}
+.llmp-h{display:flex;align-items:center;gap:8px;padding:10px 12px;border-bottom:1px solid ${C.border};user-select:none}
 .llmp-h .t{font-weight:600;font-size:15px;flex:1}
 .llmp-lv{font-size:11.5px;padding:1px 7px;border-radius:4px;background:${C.accent}22;color:${C.accent}}
 .llmp-x,.llmp-reset{cursor:pointer;color:${C.muted};background:none;border:0;font-size:13.5px;padding:0 2px}
@@ -227,9 +227,11 @@ export function openPanel(node, api) {
     // canvas units next to the node and redrawn every frame at the canvas zoom,
     // so it pans and zooms with the node. LiteGraph emits nothing on a
     // pan / zoom, hence the frame loop (Pixaroma node_panel.mjs followNode).
-    const anchor = anchorFor(node);
+    // Not draggable (Peter: "i can move it anyware on the canvas" read as a
+    // separate window): it always sits against the node's right edge.
+    const anchor = { dx: node.size[0] + 10, dy: 0 };
     const stopFollow = follow(el, node, anchor);
-    const stopDrag = makeDraggable(el, el.querySelector(".llmp-h"), anchor);
+    const stopDrag = () => {};
 
     const onOutside = (e) => {
         if (el.contains(e.target) || e.target.closest?.("[data-llm-gear]")) return;
@@ -369,13 +371,6 @@ function nodeScreenRect(node) {
 
 const canvasScale = () => (window.app?.canvas ?? globalThis.comfyAPI?.app?.app?.canvas)?.ds?.scale || 1;
 
-// Where the panel sits relative to the node, in canvas units (so it scales with
-// the zoom). Remembered per node for this page session; a drag changes it.
-const _anchors = new Map();
-function anchorFor(node) {
-    if (!_anchors.has(node.id)) _anchors.set(node.id, { dx: node.size[0] + 14, dy: 0 });
-    return _anchors.get(node.id);
-}
 
 function follow(el, node, anchor) {
     let raf = 0, last = "";
@@ -384,6 +379,7 @@ function follow(el, node, anchor) {
         if (!(node.graph ?? null)) { closePanel(); return; }   // node deleted
         const r = nodeScreenRect(node);
         const sc = canvasScale();
+        anchor.dx = r.width / sc + 10;
         const left = r.left + anchor.dx * sc, top = r.top + anchor.dy * sc;
         const key = `${left.toFixed(1)}|${top.toFixed(1)}|${sc}`;
         if (key === last) return;
@@ -396,34 +392,3 @@ function follow(el, node, anchor) {
     return () => cancelAnimationFrame(raf);
 }
 
-function makeDraggable(el, handle, anchor) {
-    let sx = 0, sy = 0, ox = 0, oy = 0, pid = null;
-    const move = (e) => {
-        if (pid === null) return;
-        if (!(e.buttons & 1)) { up(); return; }   // missed release
-        const sc = canvasScale();
-        anchor.dx = ox + (e.clientX - sx) / sc;   // stays attached: only the offset to the node moves
-        anchor.dy = oy + (e.clientY - sy) / sc;
-    };
-    const up = () => {
-        if (pid === null) return;
-        try { handle.releasePointerCapture(pid); } catch (_) { /* gone */ }
-        pid = null;
-        window.removeEventListener("pointermove", move, true);
-        window.removeEventListener("pointerup", up, true);
-        window.removeEventListener("pointercancel", up, true);
-    };
-    const down = (e) => {
-        if (e.button !== 0 || e.target.closest("button")) return;   // ✕ and reset stay clickable
-        e.preventDefault();
-        pid = e.pointerId;
-        sx = e.clientX; sy = e.clientY;
-        ox = anchor.dx; oy = anchor.dy;
-        try { handle.setPointerCapture(pid); } catch (_) { /* fine */ }
-        window.addEventListener("pointermove", move, true);
-        window.addEventListener("pointerup", up, true);
-        window.addEventListener("pointercancel", up, true);
-    };
-    handle.addEventListener("pointerdown", down);
-    return () => { up(); handle.removeEventListener("pointerdown", down); };
-}
