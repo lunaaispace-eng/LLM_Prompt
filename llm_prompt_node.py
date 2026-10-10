@@ -646,13 +646,14 @@ def _resolve_model_paths(model_name: str) -> tuple[Path, Path | None]:
     return model_path, mmproj_path
 
 
-def _resolve_model_settings(name_lower: str) -> dict | None:
+def _resolve_model_settings(name_lower: str, thinking: bool = False) -> dict | None:
     """Return the correct sampling settings for a known model family, or None.
 
     Source of truth: the official LM Studio model.yaml recommendations
     (hub/models/.../model.yaml -> config.operation.fields). Values target
-    NON-thinking prompt generation (thinking is disabled separately, since it
-    is never useful for prompt writing and wastes tokens).
+    NON-thinking prompt generation; thinking=True returns the family's
+    thinking-mode values where they differ (Qwen dense), for the quality levels
+    that turn thinking on.
 
     This is applied SERVER-SIDE in generate() so the right values reach the
     model regardless of the frontend JS preset's timing (which only fires on
@@ -698,12 +699,33 @@ def _resolve_model_settings(name_lower: str) -> dict | None:
     #   1.5 over llama.cpp's 64-token penalty window, tipped long Krea prompts into
     #   punctuation-less word salad; with 1.0 the same seed is clean (2026-10-10).
     if "qwen" in n:
+        if thinking:
+            # Official thinking-mode values (Qwen3.5/3.6 model cards, Unsloth).
+            return {
+                "temperature": 1.0, "top_p": 0.95, "top_k": 20,
+                "min_p": 0.0, "presence_penalty": 1.5, "repetition_penalty": 1.0,
+            }
         return {
             "temperature": 0.7, "top_p": 0.8, "top_k": 20,
             "min_p": 0.0, "presence_penalty": 1.5, "repetition_penalty": 1.0,
         }
 
     return None
+
+
+# Quality levels for the node's `quality` input. Each sets thinking, the
+# reasoning budget and MTP; "custom" leaves those widgets as they are. MTP is
+# skipped by _load_model on a GGUF without MTP heads or with a projector loaded,
+# so 3 is safe everywhere. Times measured on Qwen3.6 27B heretic-v2 with the
+# Krea General V1 preset (SPEC › 6, 2026-10-10): fast ~10 s, normal ~24 s,
+# ultra ~50 s; quality not measured.
+QUALITY_LEVELS = {
+    "fast":    {"thinking": False, "reasoning_budget": -1,   "mtp_draft_tokens": 3},
+    "normal":  {"thinking": True,  "reasoning_budget": 1024, "mtp_draft_tokens": 3},
+    "quality": {"thinking": True,  "reasoning_budget": 2048, "mtp_draft_tokens": 3},
+    "ultra":   {"thinking": True,  "reasoning_budget": -1,   "mtp_draft_tokens": 3},
+}
+QUALITY_OPTIONS = list(QUALITY_LEVELS) + ["custom"]
 
 
 def _looks_like_reasoning(text: str) -> bool:
@@ -1733,6 +1755,16 @@ class _LLMRunner:
         prompt_tokens = usage.get("prompt_tokens")
         completion_tokens = usage.get("completion_tokens")
         finish_reason = (result.get("choices") or [{}])[0].get("finish_reason", "unknown")
+        # For the node face's last-run line (sent as `ui` data by execute()).
+        self.last_stats = {
+            "seconds": round(elapsed, 2),
+            "prompt_tokens": prompt_tokens if isinstance(prompt_tokens, int) else 0,
+            "completion_tokens": completion_tokens if isinstance(completion_tokens, int) else 0,
+            "tok_s": round(completion_tokens / elapsed, 1) if isinstance(completion_tokens, int) else 0.0,
+            "finish": str(finish_reason),
+            "thinking": not disable_thinking,
+            "mtp": int((self.current_signature or {}).get("mtp_draft", 0)),
+        }
         if isinstance(completion_tokens, int) and completion_tokens > 0:
             tok_s = completion_tokens / elapsed
             self._vprint(
@@ -1922,6 +1954,7 @@ class _LLMRunner:
         verbose_logging: bool = False,
         vision_mp: float = 0.0,
         validate: str = "off",
+        quality: str = "custom",
         style: str = "",
         context: str = "",
         width: int = 0,
@@ -1935,28 +1968,45 @@ class _LLMRunner:
     ):
         # Gate the chatty status prints for this run (warnings/errors still show).
         self._verbose = bool(verbose_logging)
+        self.last_stats = {}
+        # ---- Quality level ---------------------------------------------------
+        # A level sets thinking, the reasoning budget and MTP over the widgets;
+        # "custom" (and the luna_writer_api default) keeps the widget values.
+        level = QUALITY_LEVELS.get((quality or "custom").lower())
+        if level is not None:
+            disable_thinking = not level["thinking"]
+            reasoning_budget = level["reasoning_budget"]
+            mtp_draft_tokens = level["mtp_draft_tokens"]
+            self._vprint(
+                f"[LLM_Prompt] quality={quality} -> thinking={'on' if level['thinking'] else 'off'}, "
+                f"reasoning_budget={reasoning_budget}, mtp_draft_tokens={mtp_draft_tokens}"
+            )
         # ---- Server-side model-specific settings ----------------------------
         # The frontend JS preset only fires on a manual dropdown click, so on
         # workflow load / node creation / refresh the sliders keep stale or wrong
         # values (e.g. Gemma running at temp 0.6 / min_p 0.05 instead of 1.0 / 0).
         # When auto_settings is ON we resolve the OFFICIAL settings for the model
         # family here and override the widgets — guaranteed correct every run.
-        # We also force thinking OFF (never useful for prompt generation).
+        # On "custom" it also forces thinking OFF (the node's behaviour before the
+        # quality levels); a level decides thinking itself and gets the family's
+        # thinking-mode sampling when thinking is on.
         # presence_penalty arrives from the widget; auto_settings may override it.
         if auto_settings:
-            resolved = _resolve_model_settings((model_name or "").lower())
+            thinking_on = level is not None and not disable_thinking
+            resolved = _resolve_model_settings((model_name or "").lower(), thinking=thinking_on)
             if resolved:
+                if level is None:
+                    disable_thinking = True
                 temperature = resolved["temperature"]
                 top_p = resolved["top_p"]
                 top_k = resolved["top_k"]
                 min_p = resolved["min_p"]
                 repetition_penalty = resolved["repetition_penalty"]
                 presence_penalty = resolved["presence_penalty"]
-                disable_thinking = True
                 self._vprint(
                     f"[LLM_Prompt] auto_settings ON -> temp={temperature}, top_p={top_p}, "
                     f"top_k={top_k}, min_p={min_p}, presence_penalty={presence_penalty}, "
-                    f"rep={repetition_penalty}, thinking=OFF"
+                    f"rep={repetition_penalty}, thinking={'OFF' if disable_thinking else 'ON'}"
                 )
             else:
                 self._vprint(
@@ -2160,6 +2210,9 @@ class _LLMRunner:
             if reasoning:
                 block = f"--- reasoning ({len(reasoning.split())} words) ---\n{reasoning}"
                 log = f"{log}\n\n{block}" if log else block
+            if self.last_stats:
+                self.last_stats["reasoning_words"] = len(reasoning.split())
+                self.last_stats["quality"] = (quality or "custom").lower()
 
             return (positive, negative, log)
 
@@ -2316,6 +2369,13 @@ class LLMPromptNode(io.ComfyNode):
                                tooltip="Downscale input images to at most this many megapixels before encoding. 0 = off (send at full size). ~1.0 is plenty for reference reading and saves context and time."),
                 io.Combo.Input("validate", options=["off", "h3"], default="off", advanced=True,
                                tooltip="Check the output's format and report findings on the `log` output. 'h3' checks MiniMax H3 prompts: section names and order, no mixing of the 3-field and 6-section formats, shot numbering, cut timestamps, labels, dialogue tags. Only the S.SS in an alignment line is repaired, and only when `frames` is wired."),
+                # Last widget on purpose: saved workflows store widget values by
+                # position, so a new widget at the end shifts nothing.
+                io.Combo.Input("quality", options=QUALITY_OPTIONS, default="fast",
+                               tooltip="Prompt quality. fast = no thinking (~10 s). normal = thinks up to 1024 "
+                                       "tokens (~25 s). quality = up to 2048. ultra = unlimited thinking (~50 s). "
+                                       "All use MTP when the model has it. custom = use the thinking, "
+                                       "reasoning_budget and mtp_draft_tokens settings as set."),
 
                 # ===== Optional connections (input sockets) =====
                 io.String.Input("style", optional=True, force_input=True,
@@ -2347,7 +2407,9 @@ class LLMPromptNode(io.ComfyNode):
         call_kwargs = _filter_kwargs_for_callable(_LLMRunner.generate, kwargs)
         with _RUNNER_LOCK:
             positive, negative, log = _RUNNER.generate(**call_kwargs)
-        return io.NodeOutput(positive, negative, log)
+            stats = dict(getattr(_RUNNER, "last_stats", {}) or {})
+        # The node face reads this in onExecuted (the last-run line).
+        return io.NodeOutput(positive, negative, log, ui={"llm_stats": [stats]} if stats else None)
 
 
 # ---------------------------------------------------------------------------
@@ -2355,6 +2417,51 @@ class LLMPromptNode(io.ComfyNode):
 # classic NODE_CLASS_MAPPINGS path (they carry a V1-compat shim), so the
 # package's existing __init__ aggregation with the API/Grok nodes is unchanged.
 # ---------------------------------------------------------------------------
+
+_QUANT_RE = re.compile(r"(?i)(?<![A-Za-z0-9])(IQ\d_[A-Z]+|Q\d_K_[A-Z]+|Q\d_K|Q\d_\d|Q\d|BF16|F16|F32)(?![A-Za-z0-9])")
+
+
+def _model_info(display_name: str) -> dict:
+    """Facts about one model-list entry, for the node face's model card."""
+    entry = _refresh_model_list().get(display_name)
+    if not entry:
+        return {"found": False}
+    path = Path(entry["full_path"])
+    quant = _QUANT_RE.findall(path.stem)
+    arch = _read_gguf_arch(path) or ""
+    try:
+        size_gb = round(path.stat().st_size / 1024**3, 1)
+    except OSError:
+        size_gb = 0.0
+    sig = _RUNNER.current_signature or {}
+    loaded = _RUNNER.llm is not None and sig.get("model_path") == str(path)
+    return {
+        "found": True,
+        "quant": quant[-1].upper() if quant else "",
+        "arch": arch,
+        "mtp": _gguf_mtp_layers(path, arch) > 0,
+        "vision": bool(entry.get("mmproj_path")),
+        "size_gb": size_gb,
+        "loaded": loaded,
+        "n_ctx": int(sig.get("n_ctx", 0)) if loaded else 0,
+        "mtp_active": int(sig.get("mtp_draft", 0)) if loaded else 0,
+    }
+
+
+try:
+    from server import PromptServer
+    from aiohttp import web as _aiohttp_web
+
+    @PromptServer.instance.routes.get("/llm_prompt/model_info")
+    async def _llm_prompt_model_info_route(request):
+        try:
+            info = _model_info(request.query.get("name", ""))
+        except Exception as exc:  # never 500 the frontend
+            info = {"found": False, "error": str(exc)}
+        return _aiohttp_web.json_response(info)
+except Exception:
+    pass  # outside ComfyUI (tests): no server
+
 
 NODE_CLASS_MAPPINGS = {
     "LLMPrompt": LLMPromptNode,
