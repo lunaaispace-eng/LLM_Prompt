@@ -2370,8 +2370,10 @@ class LLMPromptNode(io.ComfyNode):
                 io.Combo.Input("validate", options=["off", "h3"], default="off", advanced=True,
                                tooltip="Check the output's format and report findings on the `log` output. 'h3' checks MiniMax H3 prompts: section names and order, no mixing of the 3-field and 6-section formats, shot numbering, cut timestamps, labels, dialogue tags. Only the S.SS in an alignment line is repaired, and only when `frames` is wired."),
                 # Last widget on purpose: saved workflows store widget values by
-                # position, so a new widget at the end shifts nothing.
-                io.Combo.Input("quality", options=QUALITY_OPTIONS, default="fast",
+                # position, so a new widget at the end shifts nothing. Optional, so an
+                # API-format prompt saved before it still validates (generate()
+                # treats a missing quality as "custom" = the old behaviour).
+                io.Combo.Input("quality", options=QUALITY_OPTIONS, default="fast", optional=True,
                                tooltip="Prompt quality. fast = no thinking (~10 s). normal = thinks up to 1024 "
                                        "tokens (~25 s). quality = up to 2048. ultra = unlimited thinking (~50 s). "
                                        "All use MTP when the model has it. custom = use the thinking, "

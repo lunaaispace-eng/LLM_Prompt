@@ -83,6 +83,19 @@ function defaultOf(node, name) {
     return undefined;
 }
 
+// A workflow saved before the quality levels has no quality value; the widget
+// would keep its default "fast" and override the saved thinking / budget / MTP.
+// "custom" runs it exactly as it was saved.
+function markCustomIfNoQuality(node, info) {
+    const w = node.widgets?.find((x) => x.name === "quality");
+    if (!w) return;
+    const named = info?.widgets_values_named;
+    if (named && typeof named === "object") { if (!("quality" in named)) w.value = "custom"; return; }
+    const serial = node.widgets.filter((x) => x.serialize !== false && x.options?.serialize !== false);
+    const idx = serial.indexOf(w);
+    if (!Array.isArray(info?.widgets_values) || info.widgets_values.length <= idx) w.value = "custom";
+}
+
 export function remapOldValues(node, values) {
     const layout = layoutFor(values);
     if (!layout || !Array.isArray(node.widgets)) return false;
@@ -115,7 +128,10 @@ app.registerExtension({
         // Synchronous, inside configure: the change tracker takes its baseline
         // after the load, so an untouched old workflow is not flagged modified.
         nodeType.prototype.onConfigure = function (info) {
-            try { remapOldValues(this, info?.widgets_values); } catch (e) { console.error("[LLM_Prompt] compat", e); }
+            try {
+                remapOldValues(this, info?.widgets_values);
+                markCustomIfNoQuality(this, info);
+            } catch (e) { console.error("[LLM_Prompt] compat", e); }
             return onConfigure?.apply(this, arguments);
         };
     },

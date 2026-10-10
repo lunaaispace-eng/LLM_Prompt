@@ -75,10 +75,15 @@ class SchemaAndStatsTests(unittest.TestCase):
 
     def test_quality_is_last_widget_default_fast(self):
         inputs = self.node.LLMPromptNode.define_schema().inputs
-        widgets = [i for i in inputs if not getattr(i, "optional", False)]
-        self.assertEqual(widgets[-1].id, "quality")
-        self.assertEqual(widgets[-1].default, "fast")
-        self.assertEqual(widgets[-1].options, ["fast", "normal", "quality", "ultra", "custom"])
+        ids = [i.id for i in inputs]
+        q = inputs[ids.index("quality")]
+        self.assertEqual(q.default, "fast")
+        self.assertTrue(q.optional)  # API-format prompts saved before it still validate
+        self.assertEqual(q.options, ["fast", "normal", "quality", "ultra", "custom"])
+        # Everything after it is a socket, so no saved widget value shifts.
+        for i in inputs[ids.index("quality") + 1:]:
+            self.assertTrue(getattr(i, "force_input", False) or type(i).__name__ != "Input"
+                            or i.id in ("image", "reference_image", "video", "audio"), i.id)
 
     def test_quant_from_filename(self):
         f = lambda s: self.node._QUANT_RE.findall(s)[-1].upper()  # noqa: E731

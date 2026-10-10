@@ -17,8 +17,10 @@
 //     which fires before a click), or the change is not saved or undoable;
 //   - title-bar icons are canvas-drawn and exist only in the classic renderer
 //     (Nodes 2.0 never calls onDrawForeground), so Nodes 2.0 gets DOM buttons;
-//   - the last run lives in node.properties: a workflow tab switch rebuilds
-//     every node object and drops plain fields.
+//   - the last run lives in a module Map keyed by workflow + node id, not in
+//     node.properties: a tab switch rebuilds every node object (plain fields
+//     are lost), and the change tracker compares properties, so writing them
+//     on every run marked the workflow modified and added an undo step.
 
 import { app } from "/scripts/app.js";
 import { closePanel, isPanelOpenFor, openPanel, recentlyClosed, refreshPanel } from "./llm_prompt_panel.mjs";
@@ -220,6 +222,13 @@ function openSettings(node) {
     openPanel(node, PANEL_API);
 }
 
+const _lastRuns = new Map();   // "workflow path|node id" -> { stats, reasoning }
+function runKey(node) {
+    const wf = app?.extensionManager?.workflow?.activeWorkflow?.path ?? "";
+    return `${wf}|${node.id}`;
+}
+const lastRunOf = (node) => _lastRuns.get(runKey(node));
+
 function lastRunText(s) {
     if (!s) return "No run yet";
     const parts = [`${Number(s.seconds || 0).toFixed(1)} s`, `${s.completion_tokens || 0} tok`, `${s.tok_s || 0} tok/s`];
@@ -292,8 +301,9 @@ function renderFace(node) {
     const sum = root.querySelector(".llmf-sum");
     sum.classList.toggle("custom", !lv);
     sum.textContent = lv ? lv.desc : "Custom: your own thinking and MTP settings (⚙)";
-    root.querySelector(".llmf-last .t").textContent = lastRunText(node.properties?.llmLastRun);
-    root.querySelector(".llmf-link").style.display = node.__llmfReasoning ? "" : "none";
+    const last = lastRunOf(node);
+    root.querySelector(".llmf-last .t").textContent = lastRunText(last?.stats);
+    root.querySelector(".llmf-link").style.display = last?.reasoning ? "" : "none";
     root.classList.toggle("vue", isVue());
 }
 
@@ -375,10 +385,10 @@ function openPop(x, y, cls, fill) {
     }, 0);
 }
 
-// The reasoning arrives with the run (ui llm_reasoning). Kept on the node
-// object only: it can be long, and the `log` output already carries it.
+// The reasoning arrives with the run (ui llm_reasoning). Kept in memory only:
+// it can be long, and the `log` output already carries it.
 function openThinking(node, x, y) {
-    const text = node.__llmfReasoning || "";
+    const text = lastRunOf(node)?.reasoning || "";
     openPop(x, y, "think", (el) => { el.textContent = text; });
 }
 
@@ -569,9 +579,7 @@ app.registerExtension({
             const r = onExecuted?.apply(this, arguments);
             const s = out?.llm_stats?.[0];
             if (s) {
-                this.properties = this.properties || {};
-                this.properties.llmLastRun = s;
-                this.__llmfReasoning = out?.llm_reasoning?.[0] || "";
+                _lastRuns.set(runKey(this), { stats: s, reasoning: out?.llm_reasoning?.[0] || "" });
                 renderFace(this);
                 refreshModel(this, true);   // loaded / context changed
             }
@@ -586,8 +594,11 @@ app.registerExtension({
         };
 
         const onDown = P.onMouseDown;
-        P.onMouseDown = function (e, pos) {
+        P.onMouseDown = function (e, pos, canvas) {
             const act = hitIcon(this, pos);
+            // LiteGraph arms the title rename on double click before asking the
+            // node, and ignores onDblClick's answer: disarm it on the icons.
+            if (act && canvas?.pointer) delete canvas.pointer.onDoubleClick;
             if (act === "help") { openHelp(e.clientX, e.clientY + 12); return true; }
             if (act === "gear") { openSettings(this); return true; }
             return onDown?.apply(this, arguments);
@@ -621,7 +632,7 @@ app.registerExtension({
 
         const onDbl = P.onDblClick;
         P.onDblClick = function (e, pos) {
-            if (hitIcon(this, pos)) return true; // no title rename editor
+            if (hitIcon(this, pos)) return true;
             return onDbl?.apply(this, arguments);
         };
     },
