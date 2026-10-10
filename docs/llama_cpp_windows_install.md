@@ -57,7 +57,7 @@ The wheel must match:
 | Python ABI | Python 3.12 | `cp312-cp312` |
 | Operating system | Windows 64-bit | `win_amd64` |
 | CUDA build family | CUDA 12.8 / 13.0, etc. | `cu128`, `cu130`, etc. |
-| llama-cpp-python version | `0.3.40` | `llama_cpp_python-0.3.40...whl` |
+| llama-cpp-python version | `0.3.49` (0.3.48+ for MTP) | `llama_cpp_python-0.3.49...whl` |
 
 Use the CUDA version reported by PyTorch inside ComfyUI as the main CUDA selector. The CUDA version shown by `nvidia-smi` is the driver runtime capability; it does not always equal the PyTorch wheel CUDA build.
 
@@ -167,18 +167,18 @@ Example for:
 - Python 3.12
 - Torch CUDA 13.0
 - Windows 64-bit
-- llama-cpp-python 0.3.40
+- llama-cpp-python 0.3.49
 
 The matching wheel is:
 
 ```text
-llama_cpp_python-0.3.40+cu130-cp312-cp312-win_amd64.whl
+llama_cpp_python-0.3.49+cu130-cp312-cp312-win_amd64.whl
 ```
 
 Example URL:
 
 ```text
-https://github.com/JamePeng/llama-cpp-python/releases/download/v0.3.40-cu130-win-20260608/llama_cpp_python-0.3.40+cu130-cp312-cp312-win_amd64.whl
+https://github.com/JamePeng/llama-cpp-python/releases/download/v0.3.49-cu130-win-20260831/llama_cpp_python-0.3.49+cu130-cp312-cp312-win_amd64.whl
 ```
 
 Do not install a `cp311` wheel into Python 3.12. Do not install a `cu128` wheel just because another user used it. Match your own ComfyUI Python and Torch CUDA.
@@ -189,7 +189,7 @@ Close ComfyUI first.
 
 ```powershell
 $py = 'E:\ComfyUI-Easy-Install\python_embeded\python.exe'
-$wheel = 'https://github.com/JamePeng/llama-cpp-python/releases/download/v0.3.40-cu130-win-20260608/llama_cpp_python-0.3.40+cu130-cp312-cp312-win_amd64.whl'
+$wheel = 'https://github.com/JamePeng/llama-cpp-python/releases/download/v0.3.49-cu130-win-20260831/llama_cpp_python-0.3.49+cu130-cp312-cp312-win_amd64.whl'
 
 & $py -m pip uninstall -y llama-cpp-python
 & $py -m pip install --no-cache-dir --force-reinstall --no-deps $wheel

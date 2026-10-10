@@ -82,7 +82,7 @@ Restart ComfyUI after installing or updating Python files. Hard-refresh the brow
 
 | Package | Needed for | Notes |
 | --- | --- | --- |
-| `llama-cpp-python` | `LLM Prompt` local GGUF node | Recommended: JamePeng's fork/build with Gemma4, Qwen35, and Qwen3VL handlers. |
+| `llama-cpp-python` | `LLM Prompt` local GGUF node | Recommended: JamePeng's fork/build with Gemma4, Qwen35, and Qwen3VL handlers; 0.3.48+ for MTP. |
 | `torch`, `numpy`, `Pillow` | Tensor/image handling | Usually already present in ComfyUI. |
 | `soundfile`, `torchaudio` | Audio input | Optional; used only when audio is connected. |
 | `PyYAML` | Prompt preset frontmatter | Optional; without it, filenames become preset labels. |
@@ -136,9 +136,11 @@ min_p
 repetition_penalty
 presence_penalty
 frequency_penalty
+reasoning_budget
 preserve_thinking
 device
 n_gpu_layers
+mtp_draft_tokens
 image_min_tokens
 image_max_tokens
 video_fps
@@ -149,6 +151,19 @@ validate
 
 `vision_mp` downscales input images to at most that many megapixels before encoding (0 = full
 size). `validate = h3` checks MiniMax H3 prompt format and reports on `log`.
+
+`mtp_draft_tokens` turns on MTP (multi-token prediction): the model's own MTP heads guess 2-3 tokens
+ahead and the model verifies them, so quality is unchanged and writing is about 2x faster (Qwen3.6 27B
+Q4_K_M on an RTX 4090: 21.5 -> 42-45 tok/s). 0 = off, 2-3 recommended. It needs llama-cpp-python 0.3.48+,
+a GGUF that still carries its MTP heads (an `...-MTP-GGUF` build; most quants and fine-tunes strip them),
+and a text-only run - it is skipped while a vision projector is loaded. The console says when it is skipped
+and why.
+
+`reasoning_budget` caps the thinking when thinking is on, like LM Studio's budget: -1 = unlimited, 0 = no
+thinking, N = after N reasoning tokens the model is told to stop and writes the prompt. Qwen 3.5+ and Gemma 4
+only. Measured with `Krea2_Architect_General_V1` on Qwen3.6 27B + MTP 3: unlimited thinking ran ~4,500 tokens
+(56 s); 2048 gave a near-identical prompt in 32 s, 1024 a slightly shorter one in 21 s, 512 a complete but less
+detailed one in 15 s.
 
 Optional inputs:
 

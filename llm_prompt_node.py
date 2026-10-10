@@ -36,6 +36,14 @@ except Exception as _e:  # noqa: BLE001 — any import/DLL failure must stay non
     Llama = None
     _LLAMA_IMPORT_ERROR = _e
 
+# MTP speculative decoding (JamePeng 0.3.48+). Older wheels lack it; the node then
+# simply runs without MTP.
+try:
+    from llama_cpp.llama_speculative import SpecConfig, SpeculativeType
+except Exception:  # noqa: BLE001
+    SpecConfig = None
+    SpeculativeType = None
+
 import folder_paths
 from comfy_api.latest import io
 
@@ -305,6 +313,94 @@ def _get_llm_folders() -> list[Path]:
 _LAST_SCAN_SIGNATURE: tuple | None = None
 
 
+# Architecture is read from the GGUF header rather than guessed from the file
+# name. Repackaged quants often carry no family name at all — e.g. the Qwen3.8
+# heretic ships as "RVN-Q5_K_M-multilingual.gguf", which used to miss every
+# adapter and fall through to the generic Qwen-VL chain. The name heuristics are
+# kept as a fallback for headers we cannot read.
+_GGUF_ARCH_CACHE: dict[str, str] = {}
+
+# GGUF scalar value types -> struct format char / byte width. 8 (string) and
+# 9 (array) are handled separately.
+_GGUF_FMT = {0: "B", 1: "b", 2: "H", 3: "h", 4: "I", 5: "i",
+             6: "f", 7: "?", 10: "Q", 11: "q", 12: "d"}
+_GGUF_SIZE = {0: 1, 1: 1, 2: 2, 3: 2, 4: 4, 5: 4,
+              6: 4, 7: 1, 10: 8, 11: 8, 12: 8}
+
+
+def _read_gguf_value(model_path, wanted_key: str):
+    """Return one metadata value from a GGUF header, or None if absent.
+
+    Reads only the metadata block (array values are skipped, not read) and stops
+    at the wanted key, so this costs little regardless of the model's size.
+    Raises on an unreadable header.
+    """
+    with open(model_path, "rb") as f:
+        if f.read(4) != b"GGUF":
+            raise ValueError("missing GGUF magic")
+        f.read(4)                                    # version
+        f.read(8)                                    # tensor count
+        n_kv = struct.unpack("<Q", f.read(8))[0]
+
+        def _read_str() -> str:
+            n = struct.unpack("<Q", f.read(8))[0]
+            return f.read(n).decode("utf-8", "replace")
+
+        for _ in range(n_kv):
+            key = _read_str()
+            vtype = struct.unpack("<I", f.read(4))[0]
+            if vtype == 8:
+                value = _read_str()
+            elif vtype == 9:
+                elem_type = struct.unpack("<I", f.read(4))[0]
+                length = struct.unpack("<Q", f.read(8))[0]
+                if elem_type == 8:
+                    # Skip each string by its own length prefix.
+                    for _ in range(length):
+                        f.seek(struct.unpack("<Q", f.read(8))[0], 1)
+                else:
+                    f.seek(_GGUF_SIZE[elem_type] * length, 1)
+                value = None
+            else:
+                value = struct.unpack(
+                    "<" + _GGUF_FMT[vtype], f.read(_GGUF_SIZE[vtype])
+                )[0]
+            if key == wanted_key:
+                return value
+    return None
+
+
+def _read_gguf_arch(model_path) -> str:
+    """Return general.architecture from a GGUF header, lowercased, or "".
+
+    Reads only the metadata block and stops at the architecture key, so this
+    costs a few KB regardless of how large the model file is.
+    """
+    cache_key = str(model_path)
+    if cache_key in _GGUF_ARCH_CACHE:
+        return _GGUF_ARCH_CACHE[cache_key]
+
+    arch = ""
+    try:
+        value = _read_gguf_value(model_path, "general.architecture")
+        if value is not None:
+            arch = str(value).strip().lower()
+    except Exception as e:
+        logger.warning("[LLM_Prompt] Could not read architecture from %s: %s",
+                       model_path, e)
+
+    _GGUF_ARCH_CACHE[cache_key] = arch
+    return arch
+
+
+def _is_mtp_drafter(gguf_file: Path) -> bool:
+    """True for a stand-alone MTP drafter GGUF (not a model you can chat with)."""
+    name_lower = gguf_file.name.lower()
+    if name_lower.startswith("mtp-") or "mtp-only" in name_lower:
+        return True
+    return _read_gguf_arch(gguf_file).endswith("-assistant")
+
+
 def _scan_llm_folder() -> dict[str, dict]:
     """Scan all registered LLM folders recursively and return a dict of display_name -> model info.
 
@@ -342,6 +438,10 @@ def _scan_llm_folder() -> dict[str, dict]:
 
         # Skip mmproj files â€” they are companions, not models
         if "mmproj" in name_lower:
+            continue
+        # Skip MTP drafters (Gemma 4 "mtp-*.gguf", arch gemma4-assistant) — they
+        # are companions too. Qwen "...-mtp.gguf" files are full models and stay.
+        if _is_mtp_drafter(gguf_file):
             continue
 
         # Path relative to the LLM root. Skip anything inside hidden / .cache
@@ -700,6 +800,14 @@ def _strip_think_blocks(text: str) -> str:
     """
     cleaned = str(text or "")
 
+    # Split off a closed reasoning block FIRST. The template pre-fills the opening
+    # tag into the prompt, so a thinking reply is "[reasoning]</think>[answer]".
+    # The meta-commentary filters below run to end-of-text; on the reasoning
+    # ("1. **Analyze User Input:** ...") they used to delete the answer as well.
+    for _close in (r"</think\s*>", r"<channel\|?>"):
+        if re.search(_close, cleaned, flags=re.IGNORECASE):
+            cleaned = re.split(_close, cleaned, flags=re.IGNORECASE)[-1]
+
     # Strip explicit reasoning headers at the start (some models emit them raw, no tags)
     cleaned = re.sub(r"(?is)^\s*thinking process\s*:\s*", "", cleaned)
     cleaned = re.sub(r"(?is)^\s*reasoning\s*:\s*", "", cleaned)
@@ -967,72 +1075,83 @@ def _build_vision_handler(name: str, mmproj_path, disable_thinking: bool,
         return None
 
 
-# Architecture is read from the GGUF header rather than guessed from the file
-# name. Repackaged quants often carry no family name at all — e.g. the Qwen3.8
-# heretic ships as "RVN-Q5_K_M-multilingual.gguf", which used to miss every
-# adapter and fall through to the generic Qwen-VL chain. The name heuristics are
-# kept as a fallback for headers we cannot read.
-_GGUF_ARCH_CACHE: dict[str, str] = {}
-
-# GGUF scalar value types -> struct format char / byte width. 8 (string) and
-# 9 (array) are handled separately.
-_GGUF_FMT = {0: "B", 1: "b", 2: "H", 3: "h", 4: "I", 5: "i",
-             6: "f", 7: "?", 10: "Q", 11: "q", 12: "d"}
-_GGUF_SIZE = {0: 1, 1: 1, 2: 2, 3: 2, 4: 4, 5: 4,
-              6: 4, 7: 1, 10: 8, 11: 8, 12: 8}
+# MTP heads are only present when the GGUF still carries its NextN layers —
+# most requantized and fine-tuned uploads strip them. "<arch>.nextn_predict_layers"
+# > 0 is the marker llama.cpp itself loads them by.
+_GGUF_MTP_CACHE: dict[str, int] = {}
 
 
-def _read_gguf_arch(model_path) -> str:
-    """Return general.architecture from a GGUF header, lowercased, or "".
+def _reasoning_tags(arch: str):
+    """(start, end) thinking tags for a model family, or None when unknown.
 
-    Reads only the metadata block and stops at the architecture key, so this
-    costs a few KB regardless of how large the model file is.
+    Qwen 3.5 / 3.6 / 3.8 report arch "qwen35"/"qwen35moe" and think in
+    <think>...</think>; Gemma 4 thinks in <|channel>thought ... <channel|>.
     """
-    cache_key = str(model_path)
-    if cache_key in _GGUF_ARCH_CACHE:
-        return _GGUF_ARCH_CACHE[cache_key]
+    if arch in Qwen35Adapter.ARCHES:
+        return "<think>", "</think>"
+    if arch.startswith("gemma4"):
+        return "<|channel>thought", "<channel|>"
+    return None
 
-    arch = ""
+
+def _gemma4_thinking_handler(llm):
+    """Chat handler for Gemma 4 text-only runs with thinking ON, or None.
+
+    Gemma 4's GGUF template thinks only when rendered with enable_thinking=true:
+    otherwise it puts an empty thought block after `<|turn>model`, which switches
+    thinking off. The wheel's create_chat_completion has no way to pass template
+    variables, so render the same template through our own formatter with the
+    flag bound in. Built the way the wheel builds its default template handler.
+    """
     try:
-        with open(model_path, "rb") as f:
-            if f.read(4) != b"GGUF":
-                raise ValueError("missing GGUF magic")
-            f.read(4)                                    # version
-            f.read(8)                                    # tensor count
-            n_kv = struct.unpack("<Q", f.read(8))[0]
+        from llama_cpp import llama_chat_format
+        template = llm.metadata.get("tokenizer.chat_template")
+        if not template:
+            return None
 
-            def _read_str() -> str:
-                n = struct.unpack("<Q", f.read(8))[0]
-                return f.read(n).decode("utf-8", "replace")
+        def _text(token_id):
+            return llm._model.token_get_text(token_id) if token_id != -1 else ""
 
-            for _ in range(n_kv):
-                key = _read_str()
-                vtype = struct.unpack("<I", f.read(4))[0]
-                if vtype == 8:
-                    value = _read_str()
-                elif vtype == 9:
-                    elem_type = struct.unpack("<I", f.read(4))[0]
-                    length = struct.unpack("<Q", f.read(8))[0]
-                    if elem_type == 8:
-                        # Skip each string by its own length prefix.
-                        for _ in range(length):
-                            f.seek(struct.unpack("<Q", f.read(8))[0], 1)
-                    else:
-                        f.seek(_GGUF_SIZE[elem_type] * length, 1)
-                    value = None
-                else:
-                    value = struct.unpack(
-                        "<" + _GGUF_FMT[vtype], f.read(_GGUF_SIZE[vtype])
-                    )[0]
-                if key == "general.architecture":
-                    arch = str(value).strip().lower()
-                    break
-    except Exception as e:
-        logger.warning("[LLM_Prompt] Could not read architecture from %s: %s",
-                       model_path, e)
+        formatter = llama_chat_format.Jinja2ChatFormatter(
+            template=template,
+            eos_token=_text(llm.token_eos()),
+            bos_token=_text(llm.token_bos()),
+            stop_token_ids=[t for t in (llm.token_eos(), llm.token_eot()) if t != -1],
+        )
 
-    _GGUF_ARCH_CACHE[cache_key] = arch
-    return arch
+        def thinking_formatter(**kwargs):
+            kwargs["enable_thinking"] = True
+            return formatter(**kwargs)
+
+        return llama_chat_format.chat_formatter_to_chat_completion_handler(thinking_formatter)
+    except Exception as e:  # noqa: BLE001 - fall back to the default handler
+        logger.warning("[LLM_Prompt] Gemma 4 thinking template could not be built: %s", e)
+        return None
+
+
+# Forced in front of the closing tag when the reasoning budget runs out, so the
+# model moves on to the answer instead of stopping mid-thought.
+_REASONING_BUDGET_MESSAGE = (
+    "\n\nConsidering the limited time, I will now write the final prompt "
+    "based on my thinking so far.\n"
+)
+
+
+def _gguf_mtp_layers(model_path, arch: str) -> int:
+    """Return the number of MTP (NextN) layers in a GGUF, 0 if none or unknown."""
+    cache_key = str(model_path)
+    if cache_key in _GGUF_MTP_CACHE:
+        return _GGUF_MTP_CACHE[cache_key]
+    layers = 0
+    if arch:
+        try:
+            value = _read_gguf_value(model_path, f"{arch}.nextn_predict_layers")
+            layers = int(value or 0)
+        except Exception as e:
+            logger.warning("[LLM_Prompt] Could not read MTP layers from %s: %s",
+                           model_path, e)
+    _GGUF_MTP_CACHE[cache_key] = layers
+    return layers
 
 
 class ModelAdapter:
@@ -1198,7 +1317,8 @@ class _LLMRunner:
     def _load_model(self, model_name: str, device: str, n_ctx: int = 32768, n_gpu_layers: int = -1,
                     disable_thinking: bool = True, want_vision: bool = True,
                     preserve_thinking: bool = False, image_min_tokens: int = 1024,
-                    image_max_tokens: int = 4096, load_mmproj: str = "auto"):
+                    image_max_tokens: int = 4096, load_mmproj: str = "auto",
+                    mtp_draft_tokens: int = 0):
         # Resolve paths directly from the scanned folder list â€” no JSON catalog needed
         model_path, mmproj_path = _resolve_model_paths(model_name)
 
@@ -1252,6 +1372,25 @@ class _LLMRunner:
 
         use_qwen_no_think = disable_thinking and not has_mmproj and is_qwen_35_36
 
+        # MTP speculative decoding: the model's own NextN heads draft tokens that
+        # the full model then verifies, so the output is unchanged — only faster.
+        # Text-only in llama.cpp, so any loaded projector turns it off.
+        # Gemma 4's separate mtp-*.gguf drafters are not used: in JamePeng 0.3.49
+        # a drafter makes prompt reading ~50x slower and crashes with
+        # swa_full=False (SPEC › 6, 2026-10-10).
+        mtp_draft = 0
+        mtp_note = ""
+        if mtp_draft_tokens > 0:
+            if SpecConfig is None:
+                mtp_note = "MTP skipped: this llama-cpp-python wheel has no MTP (needs 0.3.48+)."
+            elif has_mmproj:
+                mtp_note = "MTP skipped: a vision projector is loaded (MTP is text-only)."
+            elif _gguf_mtp_layers(model_path, model_arch) <= 0:
+                mtp_note = "MTP skipped: this GGUF has no MTP heads (use an MTP build of the model)."
+            else:
+                mtp_draft = int(mtp_draft_tokens)
+                mtp_note = f"MTP on: {mtp_draft} draft tokens."
+
         signature = {
             "model_path": str(model_path),
             "mmproj_path": str(mmproj_path) if has_mmproj else "",
@@ -1268,6 +1407,7 @@ class _LLMRunner:
             "preserve_thinking": bool(preserve_thinking),
             "image_min_tokens": int(image_min_tokens),
             "image_max_tokens": int(image_max_tokens),
+            "mtp_draft": mtp_draft,
         }
         if self.llm is not None and self.current_signature == signature:
             return
@@ -1276,6 +1416,9 @@ class _LLMRunner:
         if torch.cuda.is_available():
             torch.cuda.synchronize()
             time.sleep(0.1)
+
+        if mtp_note:
+            print(f"[LLM_Prompt] {mtp_note}")
 
         # Load vision handler â€” handler selection order matches JamePeng 0.3.39 API
         # Load the vision handler via the family adapter. The adapter supplies an
@@ -1332,6 +1475,14 @@ class _LLMRunner:
             # chat_template_kwargs does NOT belong here â€” no effect on Llama.__init__.
             # Passed at inference time via create_chat_completion instead.
         }
+        if mtp_draft:
+            # Uses the target GGUF's own NextN heads (no draft_model_path).
+            # draft_p_min 0.0 follows the JamePeng / llama.cpp MTP examples.
+            llm_kwargs["speculative"] = SpecConfig(
+                spec_type=SpeculativeType.DRAFT_MTP,
+                draft_n_max=mtp_draft,
+                draft_p_min=0.0,
+            )
         if has_mmproj and self.chat_handler is not None:
             # image_min/max_tokens belong on the chat handler, not here.
             llm_kwargs["chat_handler"] = self.chat_handler
@@ -1346,7 +1497,12 @@ class _LLMRunner:
             # Gemma 3/4: embedded template works, but "gemma3" format is still needed
             # because older GGUF builds may not embed it.
             m_name_lower = model_path.name.lower()
-            if "gemma" in m_name_lower:
+            if model_arch.startswith("gemma4") and not disable_thinking:
+                # Thinking ON: the fixed "gemma3" format has no thinking switch,
+                # so Gemma 4 never thought on text-only runs. The embedded GGUF
+                # template does (it is what LM Studio uses).
+                self._vprint("[LLM_Prompt] Gemma 4 + thinking: using the embedded GGUF template.")
+            elif "gemma" in m_name_lower:
                 # Try "gemma3" first (newer llama-cpp-python). If unavailable, DO
                 # NOT fall back to the legacy "gemma" handler — it is the Gemma 1/2
                 # template and is incompatible with Gemma 4's <|channel> / channel
@@ -1411,6 +1567,13 @@ class _LLMRunner:
             print("[LLM_Prompt] Warning: Llama() doesn't accept chat_handler. Images will be ignored.")
 
         self.llm = Llama(**llm_kwargs_filtered)
+        if model_arch.startswith("gemma4") and not disable_thinking and not has_mmproj:
+            handler = _gemma4_thinking_handler(self.llm)
+            if handler is not None:
+                # On the Llama only: self.chat_handler stays None, which is what
+                # marks this as a text-only load elsewhere.
+                self.llm.chat_handler = handler
+                self._vprint("[LLM_Prompt] Gemma 4 + thinking: embedded template with enable_thinking=true.")
         self.current_signature = signature
         self.loaded_model_name_lower = model_path.name.lower()
         self.loaded_model_arch = model_arch
@@ -1435,6 +1598,7 @@ class _LLMRunner:
         disable_thinking: bool = True,
         presence_penalty: float = 0.0,
         frequency_penalty: float = 0.0,
+        reasoning_budget: int = -1,
     ) -> str:
         """Run inference.
 
@@ -1499,6 +1663,32 @@ class _LLMRunner:
         )
         if disable_thinking and is_thinking_family:
             completion_kwargs["chat_template_kwargs"] = {"enable_thinking": False}
+
+        # Reasoning budget (llama.cpp --reasoning-budget): once the reasoning block
+        # reaches N tokens the sampler forces the message + closing tag, and the
+        # model writes the answer. Only for families whose thinking tags are known;
+        # on a model that does not think, a forced closing tag would cut the answer.
+        if not disable_thinking and int(reasoning_budget) >= 0:
+            tags = _reasoning_tags(arch)
+            if tags is None:
+                self._vprint(f"[LLM_Prompt] reasoning_budget ignored: no known thinking tags for arch '{arch}'.")
+            else:
+                start_tag, end_tag = tags
+                completion_kwargs.update(
+                    reasoning_budget=int(reasoning_budget),
+                    reasoning_start=start_tag,
+                    reasoning_end=end_tag,
+                    reasoning_budget_message=_REASONING_BUDGET_MESSAGE,
+                    # True also covers a template that does NOT pre-fill the tag:
+                    # counting then starts one tag early. False on a pre-filled
+                    # template would never see the tag and silently do nothing.
+                    reasoning_start_in_prompt=True,
+                )
+                # JamePeng 0.3.49: with min_p exactly 0.0 the forced message and
+                # closing tag come out as garbage ("''''/'") and the model keeps
+                # thinking. Any min_p > 0 works; 1e-6 changes nothing in practice.
+                if completion_kwargs["min_p"] <= 0.0:
+                    completion_kwargs["min_p"] = 1e-6
 
         completion_kwargs = _filter_kwargs_for_callable(
             self.llm.create_chat_completion, completion_kwargs
@@ -1706,6 +1896,8 @@ class _LLMRunner:
         image_min_tokens: int = 1024,
         image_max_tokens: int = 4096,
         load_mmproj: str = "auto",
+        mtp_draft_tokens: int = 0,
+        reasoning_budget: int = -1,
         video_fps: float = 1.0,
         verbose_logging: bool = False,
         vision_mp: float = 0.0,
@@ -1895,7 +2087,7 @@ class _LLMRunner:
                 disable_thinking=disable_thinking, want_vision=want_vision,
                 preserve_thinking=preserve_thinking,
                 image_min_tokens=image_min_tokens, image_max_tokens=image_max_tokens,
-                load_mmproj=load_mmproj,
+                load_mmproj=load_mmproj, mtp_draft_tokens=mtp_draft_tokens,
             )
 
             if media_content and self.chat_handler is None:
@@ -1918,6 +2110,7 @@ class _LLMRunner:
                 disable_thinking=disable_thinking,
                 presence_penalty=presence_penalty,
                 frequency_penalty=frequency_penalty,
+                reasoning_budget=reasoning_budget,
             )
 
             # Positive/negative parsing is now fully handled by the hardened
@@ -2057,6 +2250,10 @@ class LLMPromptNode(io.ComfyNode):
                 io.Float.Input("frequency_penalty", default=0.0, min=-2.0, max=2.0, step=0.1, advanced=True,
                                tooltip="Penalizes frequent tokens. Ref: 0.0 default, 0.1-0.5 to reduce repetition. "
                                        "Only when auto_settings is OFF."),
+                io.Int.Input("reasoning_budget", default=-1, min=-1, max=32000, step=64, advanced=True,
+                             tooltip="Cap on thinking tokens when thinking is ON (like LM Studio's budget). "
+                                     "-1 = unlimited, 0 = no thinking, N = stop thinking after N tokens and "
+                                     "write the answer. Ref: 1024-2048. Qwen 3.5+/Gemma 4 only."),
                 io.Boolean.Input("preserve_thinking", default=False, advanced=True,
                                  tooltip="Qwen 3.5/3.6 only: keep <think> traces for all prior turns. "
                                          "Leave OFF for single-shot prompts."),
@@ -2066,6 +2263,11 @@ class LLMPromptNode(io.ComfyNode):
                 io.Int.Input("n_gpu_layers", default=-1, min=-1, max=200, step=1, advanced=True,
                              tooltip="Model layers on GPU. Ref: -1 = all (best). Lower (20-40) only if a big model "
                                      "runs out of VRAM. CPU forces 0."),
+                io.Int.Input("mtp_draft_tokens", default=0, min=0, max=8, step=1, advanced=True,
+                             tooltip="MTP speed-up: the model's own MTP heads guess this many tokens ahead and "
+                                     "the model checks them - same quality, faster. Ref: 0 = off, 2-3 = best. "
+                                     "Needs an MTP build of the model (e.g. '...-MTP-GGUF') and text-only runs; "
+                                     "skipped otherwise (the console says why). ~2x on Qwen3.6 27B, RTX 4090."),
                 # --- Vision / video ---
                 io.Combo.Input("load_mmproj", options=["auto", "always", "never"],
                                default="auto", advanced=True,

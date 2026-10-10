@@ -215,18 +215,23 @@ def _strip_pos_marker(s: str) -> str:
 
 
 def _try_json_pos_neg(text: str):
-    """Parse {"positive": ..., "negative": ...} (optionally code-fenced). None if not JSON."""
+    """Parse {"positive"|"prompt": ..., "negative": ...} (optionally code-fenced). None if not JSON.
+
+    "prompt" is the key the Krea presets' JSON contract names for the paragraph.
+    """
     import json
     s = re.sub(r'^```(?:json)?|```$', '', (text or "").strip(), flags=re.IGNORECASE).strip()
-    if not (s.startswith("{") and "positive" in s.lower()):
+    if not (s.startswith("{") and ("positive" in s.lower() or '"prompt"' in s.lower())):
         return None
     try:
         obj = json.loads(s)
     except Exception:
         return None
     if isinstance(obj, dict):
-        pos = obj.get("positive") or obj.get("Positive") or ""
-        neg = obj.get("negative") or obj.get("Negative") or ""
+        pos = (obj.get("positive") or obj.get("Positive") or obj.get("prompt") or obj.get("Prompt")
+               or "")
+        neg = (obj.get("negative") or obj.get("Negative") or obj.get("negative_prompt")
+               or "")
         if isinstance(pos, str) and pos.strip():
             return pos.strip(), (neg.strip() if isinstance(neg, str) else "")
     return None
