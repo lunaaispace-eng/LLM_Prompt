@@ -112,7 +112,37 @@ The node scans recursively. Files with `mmproj` in the name are treated as proje
 
 The local node runs GGUF models through `llama-cpp-python`.
 
-Basic widgets:
+### The node face
+
+The node shows only what you change for every prompt: the model, the preset, your idea and the seed. Below
+them:
+
+- **Model card** - the model's quant, whether it has MTP heads and a vision projector, its size, and whether it
+  is loaded (with the context size). The preset's family (Krea, Ideogram, MiniMax H3...) and a chip for every
+  connected input.
+- **Prompt quality** - four buttons. Each sets thinking, the thinking budget and MTP for you:
+
+  | Level | Thinking | MTP | Time (Qwen3.6 27B Q4, Krea preset, RTX 4090) |
+  | --- | --- | --- | --- |
+  | Fast (default) | off | 3 | ~10 s |
+  | Normal | up to 1024 tokens | 3 | ~25 s |
+  | Quality | up to 2048 tokens | 3 | ~35 s (estimate) |
+  | Ultra | unlimited | 3 | ~50 s |
+
+  MTP does not change the text, only the speed; a model without MTP heads skips it. With thinking on and
+  `auto_settings` on, the family's official thinking-mode sampling is used.
+- **Last run** - time, tokens, tokens per second, how long it thought, and a `view thinking` link.
+- **✎ idea** - a large editor for your idea (Ctrl+Enter saves, Esc cancels).
+
+**⚙ Settings** (the gear in the title bar; in Nodes 2.0 on the face) opens a panel with every other setting:
+sampling, thinking, speed and memory, output, vision, debug. It shows what the run will really use. Changing
+thinking, the budget or MTP there switches the level to `custom` (your own values); `reset` goes back to the
+level. **ⓘ** explains the levels.
+
+Workflows saved with an older version of the node load with their values in the right settings
+(`web/llm_prompt_compat.js`); a saved node gets the `fast` level.
+
+All settings (in the ⚙ panel):
 
 | Widget | Purpose |
 | --- | --- |
@@ -497,7 +527,8 @@ All markers and labels are stripped from the final outputs. If no split is found
 
 ## Advanced UI
 
-`web/llm_prompt_advanced.js` adds an `Advanced` toggle for `LLMPrompt` and `LLMPromptAPI`.
+The GGUF node (`LLMPrompt`) has its own face and ⚙ panel (see LLM Prompt above).
+`web/llm_prompt_advanced.js` adds an `Advanced` toggle for `LLMPromptAPI`.
 
 The current extension owns the fold behavior in both classic canvas and modern Vue/DOM node modes. It hides advanced widgets through both legacy widget hiding and Vue-compatible `options.hidden`, then nudges the frontend to re-render.
 
@@ -507,7 +538,10 @@ The button is appended at the end of `node.widgets` to avoid corrupting saved wi
 
 | File | Purpose |
 | --- | --- |
-| `web/llm_prompt_advanced.js` | Advanced widget folding for local/API nodes. |
+| `web/llm_prompt_face.js` | GGUF node face: model card, quality buttons, last run, ⓘ / ⚙, idea editor. |
+| `web/llm_prompt_panel.mjs` | The GGUF node's ⚙ settings panel. |
+| `web/llm_prompt_compat.js` | Loads workflows saved with older GGUF node layouts with their values in the right settings. |
+| `web/llm_prompt_advanced.js` | Advanced widget folding for the API node. |
 | `web/llm_prompt_presets.js` | Model-family sampler autofill and callback self-healing. |
 | `web/llm_prompt_api.js` | API provider/model dropdown refresh and Gemini-only widget visibility. |
 
@@ -550,6 +584,7 @@ Special thanks to:
 - [Duffy Nodes](https://github.com/elmarkrueger/Duffy_Nodes) for the architecture reference around multimodal handlers, thinking controls, V3 schema patterns, reference image handling, and audio input design.
 - [JamePeng llama-cpp-python](https://github.com/JamePeng/llama-cpp-python) for the Gemma/Qwen handler support this node relies on.
 - Unsloth for Qwen sampling recommendations.
+- [ComfyUI-Pixaroma](https://github.com/pixaroma/ComfyUI-Pixaroma) (MIT) for the techniques behind the GGUF node's face and ⚙ settings panel (DOM face in both renderers, floating panel, undo guard).
 - Google for Gemma/Gemini model defaults and APIs.
 
 ## License
