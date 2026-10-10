@@ -61,36 +61,38 @@ const LEVEL_OWNED = new Set(["disable_thinking", "reasoning_budget", "mtp_draft_
 const AUTO_OWNED = new Set(["temperature", "top_p", "top_k", "min_p", "repetition_penalty", "presence_penalty"]);
 
 const CSS = (C) => `
-.llmp{position:fixed;z-index:1300;width:380px;max-height:82vh;display:flex;flex-direction:column;background:${C.panel};border:1px solid ${C.accent}66;border-radius:8px;box-shadow:0 10px 30px #000a;font:12px Inter,system-ui,sans-serif;color:${C.text}}
-.llmp-h{display:flex;align-items:center;gap:8px;padding:8px 10px;border-bottom:1px solid ${C.border};cursor:move;user-select:none}
-.llmp-h .t{font-weight:600;font-size:13px;flex:1}
-.llmp-lv{font-size:10px;padding:1px 7px;border-radius:4px;background:${C.accent}22;color:${C.accent}}
-.llmp-x,.llmp-reset{cursor:pointer;color:${C.muted};background:none;border:0;font-size:12px;padding:0 2px}
+.llmp{position:fixed;z-index:1300;width:460px;max-height:780px;transform-origin:0 0;display:flex;flex-direction:column;background:${C.panel};border:1px solid ${C.accent}66;border-radius:8px;box-shadow:0 10px 30px #000a;font:13.5px Inter,system-ui,sans-serif;color:${C.text}}
+.llmp-h{display:flex;align-items:center;gap:8px;padding:10px 12px;border-bottom:1px solid ${C.border};cursor:move;user-select:none}
+.llmp-h .t{font-weight:600;font-size:15px;flex:1}
+.llmp-lv{font-size:11.5px;padding:1px 7px;border-radius:4px;background:${C.accent}22;color:${C.accent}}
+.llmp-x,.llmp-reset{cursor:pointer;color:${C.muted};background:none;border:0;font-size:13.5px;padding:0 2px}
 .llmp-x:hover,.llmp-reset:hover{color:${C.accent}}
-.llmp-b{overflow:auto;padding:2px 10px 10px}
+.llmp-b{overflow:auto;padding:2px 14px 12px}
 .llmp-s{margin-top:8px}
-.llmp-sh{display:flex;align-items:center;gap:6px;color:${C.accent};font-size:11px;margin:6px 0 4px;cursor:pointer;user-select:none}
-.llmp-sh .n{margin-left:auto;color:${C.muted};font-size:10px}
+.llmp-sh{display:flex;align-items:center;gap:6px;color:${C.accent};font-size:13px;font-weight:600;margin:10px 0 5px;cursor:pointer;user-select:none}
+.llmp-sh .n{margin-left:auto;color:${C.muted};font-size:11.5px}
 .llmp-s.fold .llmp-r{display:none}
-.llmp-r{display:grid;grid-template-columns:132px minmax(0,1fr) 52px;align-items:center;gap:8px;margin:4px 0;min-height:22px}
-.llmp-r.wide{grid-template-columns:132px minmax(0,1fr)}
+.llmp-r{display:grid;grid-template-columns:158px minmax(0,1fr) 60px;align-items:center;gap:10px;margin:5px 0;min-height:26px}
+.llmp-r.wide{grid-template-columns:158px minmax(0,1fr)}
 .llmp-r.col{grid-template-columns:1fr}
 .llmp-r .l{color:${C.text}}
 .llmp-r.dim .l{color:${C.muted}}
 .llmp-r input[type=range]{width:100%;accent-color:${C.accent}}
-.llmp-nb{width:100%;box-sizing:border-box;background:${C.bg};border:1px solid ${C.border};border-radius:4px;color:${C.text};font-size:11px;text-align:center;padding:2px 0}
+.llmp-nb{width:100%;box-sizing:border-box;background:${C.bg};border:1px solid ${C.border};border-radius:4px;color:${C.text};font-size:12.5px;text-align:center;padding:3px 0}
 .llmp-nb:focus,.llmp-ta:focus{outline:none;border-color:${C.accent}}
 .llmp-ch{display:flex;gap:4px;flex-wrap:wrap}
-.llmp-ch span{font-size:11px;padding:2px 8px;border:1px solid ${C.border};border-radius:4px;color:${C.text};cursor:pointer}
+.llmp-ch span{font-size:12.5px;padding:3px 9px;border:1px solid ${C.border};border-radius:4px;color:${C.text};cursor:pointer}
 .llmp-ch span:hover{border-color:${C.muted}}
 .llmp-ch span.on{border-color:${C.accent};color:${C.accent};background:${C.accent}14}
-.llmp-tg{width:30px;height:16px;border-radius:8px;background:${C.border};position:relative;cursor:pointer;justify-self:start}
-.llmp-tg:after{content:"";position:absolute;left:2px;top:2px;width:12px;height:12px;border-radius:6px;background:${C.muted};transition:left .12s}
+.llmp-tg{width:34px;height:18px;border-radius:9px;background:${C.border};position:relative;cursor:pointer;justify-self:start}
+.llmp-tg:after{content:"";position:absolute;left:2px;top:2px;width:14px;height:14px;border-radius:7px;background:${C.muted};transition:left .12s}
 .llmp-tg.on{background:${C.accent}}
-.llmp-tg.on:after{left:16px;background:${C.bg}}
-.llmp-ta{width:100%;box-sizing:border-box;min-height:64px;resize:vertical;background:${C.bg};border:1px solid ${C.border};border-radius:4px;color:${C.text};font:11px/1.4 Inter,system-ui,sans-serif;padding:5px}
-.llmp-note{font-size:10px;color:${C.muted};margin:2px 0 0}
-.llmp-f{border-top:1px solid ${C.border};padding:6px 10px;display:flex;justify-content:space-between;color:${C.muted};font-size:11px}
+.llmp-tg.on:after{left:18px;background:${C.bg}}
+.llmp-ta{width:100%;box-sizing:border-box;min-height:80px;resize:vertical;background:${C.bg};border:1px solid ${C.border};border-radius:4px;color:${C.text};font:13px/1.45 Inter,system-ui,sans-serif;padding:6px 8px}
+.llmp-r.wired>:not(.l){opacity:.35;pointer-events:none}
+.llmp-wire{font-size:11.5px;color:#f0a49a;margin-left:6px}
+.llmp-note{font-size:12px;color:${C.muted};margin:2px 0 0}
+.llmp-f{border-top:1px solid ${C.border};padding:8px 14px;display:flex;justify-content:space-between;color:${C.muted};font-size:12.5px}
 .llmp-f span{cursor:pointer}.llmp-f span:hover{color:${C.accent}}
 `;
 
@@ -220,8 +222,14 @@ export function openPanel(node, api) {
 
     document.body.appendChild(el);
     refreshAll();
-    place(el, node);
-    const stopDrag = makeDraggable(el, el.querySelector(".llmp-h"));
+    // Attached to the node (Peter, 2026-10-10: "it is independent, it is not
+    // connected to the node and zoom in and out keeps it the same"): placed in
+    // canvas units next to the node and redrawn every frame at the canvas zoom,
+    // so it pans and zooms with the node. LiteGraph emits nothing on a
+    // pan / zoom, hence the frame loop (Pixaroma node_panel.mjs followNode).
+    const anchor = anchorFor(node);
+    const stopFollow = follow(el, node, anchor);
+    const stopDrag = makeDraggable(el, el.querySelector(".llmp-h"), anchor);
 
     const onOutside = (e) => {
         if (el.contains(e.target) || e.target.closest?.("[data-llm-gear]")) return;
@@ -236,6 +244,7 @@ export function openPanel(node, api) {
         el, node, api, refresh: refreshAll,
         cleanup() {
             clearTimeout(t);
+            stopFollow();
             stopDrag();
             document.removeEventListener("pointerdown", onOutside, true);
             document.removeEventListener("keydown", onEsc, true);
@@ -255,6 +264,17 @@ function buildRow(node, [name, label, kind, chips], val, set, refreshers, api) {
     l.title = w.tooltip || opt.tooltip || name;
     r.appendChild(l);
     const dimIfAuto = () => r.classList.toggle("dim", AUTO_OWNED.has(name) && !!val("auto_settings"));
+    // A setting fed by a wire takes the wire's value; the control would mislead.
+    const wireTag = document.createElement("span");
+    wireTag.className = "llmp-wire";
+    wireTag.textContent = "set by a wire";
+    l.appendChild(wireTag);
+    refreshers.push(() => {
+        const inp = node.inputs?.find((i) => i.name === name);
+        const wired = inp?.link != null;
+        r.classList.toggle("wired", wired);
+        wireTag.style.display = wired ? "" : "none";
+    });
 
     if (kind === "slider") {
         const step = opt.step2 ?? opt.round ?? opt.step ?? 1;
@@ -347,26 +367,43 @@ function nodeScreenRect(node) {
     };
 }
 
-function place(el, node) {
-    const r = nodeScreenRect(node);
-    const pw = el.offsetWidth, ph = el.offsetHeight, pad = 8, gap = 12;
-    let left = r.left + r.width + gap;
-    if (left + pw > innerWidth - pad) left = r.left - pw - gap;
-    left = Math.max(pad, Math.min(left, innerWidth - pw - pad));
-    const top = Math.max(pad, Math.min(r.top, innerHeight - ph - pad));
-    el.style.left = `${left}px`;
-    el.style.top = `${top}px`;
+const canvasScale = () => (window.app?.canvas ?? globalThis.comfyAPI?.app?.app?.canvas)?.ds?.scale || 1;
+
+// Where the panel sits relative to the node, in canvas units (so it scales with
+// the zoom). Remembered per node for this page session; a drag changes it.
+const _anchors = new Map();
+function anchorFor(node) {
+    if (!_anchors.has(node.id)) _anchors.set(node.id, { dx: node.size[0] + 14, dy: 0 });
+    return _anchors.get(node.id);
 }
 
-function makeDraggable(el, handle) {
+function follow(el, node, anchor) {
+    let raf = 0, last = "";
+    const tick = () => {
+        raf = requestAnimationFrame(tick);
+        if (!(node.graph ?? null)) { closePanel(); return; }   // node deleted
+        const r = nodeScreenRect(node);
+        const sc = canvasScale();
+        const left = r.left + anchor.dx * sc, top = r.top + anchor.dy * sc;
+        const key = `${left.toFixed(1)}|${top.toFixed(1)}|${sc}`;
+        if (key === last) return;
+        last = key;
+        el.style.left = `${left}px`;
+        el.style.top = `${top}px`;
+        el.style.transform = `scale(${sc})`;
+    };
+    tick();
+    return () => cancelAnimationFrame(raf);
+}
+
+function makeDraggable(el, handle, anchor) {
     let sx = 0, sy = 0, ox = 0, oy = 0, pid = null;
     const move = (e) => {
         if (pid === null) return;
         if (!(e.buttons & 1)) { up(); return; }   // missed release
-        const left = Math.max(0, Math.min(innerWidth - el.offsetWidth, ox + e.clientX - sx));
-        const top = Math.max(0, Math.min(innerHeight - 40, oy + e.clientY - sy));
-        el.style.left = `${left}px`;
-        el.style.top = `${top}px`;
+        const sc = canvasScale();
+        anchor.dx = ox + (e.clientX - sx) / sc;   // stays attached: only the offset to the node moves
+        anchor.dy = oy + (e.clientY - sy) / sc;
     };
     const up = () => {
         if (pid === null) return;
@@ -381,7 +418,7 @@ function makeDraggable(el, handle) {
         e.preventDefault();
         pid = e.pointerId;
         sx = e.clientX; sy = e.clientY;
-        ox = el.offsetLeft; oy = el.offsetTop;
+        ox = anchor.dx; oy = anchor.dy;
         try { handle.setPointerCapture(pid); } catch (_) { /* fine */ }
         window.addEventListener("pointermove", move, true);
         window.addEventListener("pointerup", up, true);
