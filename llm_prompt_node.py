@@ -1316,7 +1316,7 @@ class _LLMRunner:
     # Model loading (same as QwenVL-Mod GGUF)
     # ------------------------------------------------------------------
 
-    def _load_model(self, model_name: str, device: str, n_ctx: int = 32768, n_gpu_layers: int = -1,
+    def _load_model(self, model_name: str, device: str, n_ctx: int = 16384, n_gpu_layers: int = -1,
                     disable_thinking: bool = True, want_vision: bool = True,
                     preserve_thinking: bool = False, image_min_tokens: int = 1024,
                     image_max_tokens: int = 4096, load_mmproj: str = "auto",
@@ -1698,6 +1698,18 @@ class _LLMRunner:
                 if completion_kwargs["min_p"] <= 0.0:
                     completion_kwargs["min_p"] = 1e-6
 
+        # The reasoning block counts toward max_tokens, so with thinking ON the
+        # default 2048 ran out inside the reasoning (Krea V1 thinks ~3,300 tokens)
+        # and left no answer. max_tokens stays the answer's length; the reasoning
+        # gets its own room on top: the budget, or the rest of the context when
+        # the budget is unlimited (-1 = up to n_ctx in llama-cpp-python).
+        if not disable_thinking:
+            if int(reasoning_budget) >= 0:
+                completion_kwargs["max_tokens"] = int(max_tokens) + int(reasoning_budget) + 128
+            else:
+                completion_kwargs["max_tokens"] = -1
+        max_tokens = completion_kwargs["max_tokens"]
+
         completion_kwargs = _filter_kwargs_for_callable(
             self.llm.create_chat_completion, completion_kwargs
         )
@@ -1896,7 +1908,7 @@ class _LLMRunner:
         disable_thinking: bool,
         keep_model_loaded: bool,
         seed: int,
-        n_ctx: int = 32768,
+        n_ctx: int = 16384,
         n_gpu_layers: int = -1,
         presence_penalty: float = 0.0,
         frequency_penalty: float = 0.0,
@@ -2227,10 +2239,12 @@ class LLMPromptNode(io.ComfyNode):
                                        "higher = varied. Range 0.1-2.0. Only used when auto_settings is OFF."),
                 io.Int.Input("max_tokens", default=2048, min=64, max=32000,
                              tooltip="Max length of the result. Ref: ~512 short, 2048 a full prompt, "
-                                     "4096+ for multi-scene lists. Raise if output gets cut off."),
-                io.Int.Input("n_ctx", default=32768, min=2048, max=262144, step=256,
-                             tooltip="How much text the model reads at once (input + output). Ref: 8192 low-VRAM, "
-                                     "32768 default, 131072 Gemma-4, up to 262144 Qwen. Higher = more VRAM."),
+                                     "4096+ for multi-scene lists. Raise if output gets cut off. With thinking ON "
+                                     "the reasoning gets its own room on top (reasoning_budget, or the context)."),
+                io.Int.Input("n_ctx", default=16384, min=2048, max=262144, step=256,
+                             tooltip="How much text the model reads at once (input + reasoning + output). "
+                                     "Ref: 16384 default (any text run, Krea with thinking ~7k), 32768 with "
+                                     "several images or video. Higher = more VRAM (~1 GB per doubling on Qwen 27B)."),
                 io.Int.Input("seed", default=1, min=1, max=2**32 - 1,
                              tooltip="Change for a different result; same seed = same output. "
                                      "Set 'control after generate' to randomize for variety."),
