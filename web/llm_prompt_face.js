@@ -147,6 +147,26 @@ function showWidget(w) {
 // options, so an in-place flag change is not seen; re-assigning through an
 // empty array is (Pixaroma notify/index.js). Never in the classic renderer,
 // where the empty step would drop the widgets.
+// A hidden widget keeps its input socket, and the classic canvas draws that
+// socket where the widget used to be while a wire is dragged: the hidden
+// custom_system_prompt's socket sat right above the user_prompt box, looked like
+// its socket, and took Peter's idea (2026-10-10). So a hidden, unwired widget
+// socket is no valid target (not drawn while dragging) and onConnectInput
+// refuses it. A socket that already has a wire stays as it is, so it can be seen
+// (red chip on the face) and dragged off.
+function isHiddenFreeSocket(node, inp) {
+    if (!inp?.widget || inp.link != null) return false;
+    return !!widget(node, inp.widget.name ?? inp.name)?.__llmfHidden;
+}
+
+function guardHiddenSockets(node) {
+    for (const inp of node.inputs || []) {
+        if (!inp?.widget) continue;
+        if (isHiddenFreeSocket(node, inp)) inp.isValidTarget = () => false;
+        else if (Object.prototype.hasOwnProperty.call(inp, "isValidTarget")) delete inp.isValidTarget;
+    }
+}
+
 function notifyVue(node) {
     if (!isVue() || !node.widgets?.length) return;
     const snap = [...node.widgets];
@@ -161,6 +181,7 @@ function applyVisibility(node, { resize = false } = {}) {
         if (w.name === FACE || KEEP.has(w.name)) continue;
         (showAll ? showWidget : hideWidget)(w);
     }
+    guardHiddenSockets(node);
     if (resize) node.setSize([node.size[0], node.computeSize()[1]]);
     node.setDirtyCanvas?.(true, true);
     notifyVue(node);
@@ -264,7 +285,7 @@ function refreshModel(node, force = false) {
     fetchInfo(name, force).then(() => renderFace(node));
 }
 
-const INPUT_CHIPS = [["style", "style"], ["context", "context"], ["width", "size"], ["image", "image"],
+const INPUT_CHIPS = [["user_prompt", "idea"], ["style", "style"], ["context", "context"], ["width", "size"], ["image", "image"],
     ["reference_image", "reference"], ["video", "video"], ["audio", "audio"]];
 
 function renderModel(node, root) {
@@ -632,8 +653,15 @@ app.registerExtension({
         const onConn = P.onConnectionsChange;
         P.onConnectionsChange = function () {
             const r = onConn?.apply(this, arguments);
+            guardHiddenSockets(this);   // a wire dragged off a hidden socket: guard it again
             renderFace(this);
             return r;
+        };
+
+        const onConnectInput = P.onConnectInput;
+        P.onConnectInput = function (slot) {
+            if (isHiddenFreeSocket(this, this.inputs?.[slot])) return false;
+            return onConnectInput ? onConnectInput.apply(this, arguments) : true;
         };
 
         const onRemoved = P.onRemoved;
