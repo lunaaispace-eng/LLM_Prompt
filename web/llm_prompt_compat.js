@@ -83,6 +83,41 @@ function defaultOf(node, name) {
     return undefined;
 }
 
+// Does `value` fit widget `w`? Used to tell a correct saved list from one that
+// was already shifted and then re-saved.
+function fits(w, value) {
+    if (!w) return true;
+    const vals = w.options?.values;
+    if (w.type === "combo" || Array.isArray(vals)) return Array.isArray(vals) ? vals.includes(value) : true;
+    if (w.type === "toggle") return typeof value === "boolean" || value === 0 || value === 1;
+    if (w.type === "number" || w.type === "slider") return typeof value === "number";
+    return true;
+}
+
+function fitsLayout(node, layout, values) {
+    return layout.every((name, i) => fits(node.widgets.find((w) => w.name === name), values[i]));
+}
+
+// A workflow that was opened while its values were shifted and then saved
+// (a file, or the browser's restored tab) keeps the shifted list at the NEW
+// length, so its length no longer tells. Its first N values are still the old
+// N-value layout; if they do not fit the current widgets but fit an old
+// layout, that layout is re-applied (seen on Qwen2.1_seedvariance, 2026-10-10:
+// n_gpu_layers "auto", device -1, load_mmproj 4096).
+function repairShifted(node, values) {
+    if (!Array.isArray(values) || !Array.isArray(node.widgets)) return false;
+    const current = node.widgets.filter((w) => w.serialize !== false && w.options?.serialize !== false).map((w) => w.name);
+    if (values.length > current.length || fitsLayout(node, current.slice(0, values.length), values)) return false;
+    const candidates = [LAYOUTS[30], LAYOUT_29_AUG, LAYOUTS[28], LAYOUTS[27], LAYOUT_29_JUNE, LAYOUTS[20],
+        LAYOUTS[19], LAYOUTS[18], LAYOUTS[17], LAYOUT_17_EXTRA, LAYOUTS[15], LAYOUTS[13]];
+    for (const layout of candidates) {
+        if (layout.length >= values.length) continue;
+        const head = values.slice(0, layout.length);
+        if (fitsLayout(node, layout, head)) return remapOldValues(node, head, layout);
+    }
+    return false;
+}
+
 // A workflow saved before the quality levels has no quality value; the widget
 // would keep its default "fast" and override the saved thinking / budget / MTP.
 // "custom" runs it exactly as it was saved.
@@ -96,8 +131,8 @@ function markCustomIfNoQuality(node, info) {
     if (!Array.isArray(info?.widgets_values) || info.widgets_values.length <= idx) w.value = "custom";
 }
 
-export function remapOldValues(node, values) {
-    const layout = layoutFor(values);
+export function remapOldValues(node, values, forced = null) {
+    const layout = forced || layoutFor(values);
     if (!layout || !Array.isArray(node.widgets)) return false;
     const saved = new Map(layout.map((name, i) => [name, values[i]]));
     // Booleans saved as 0 / 1 by some old builds (Ideogram_Master.json).
@@ -115,7 +150,7 @@ export function remapOldValues(node, values) {
             if (d !== undefined) w.value = d;
         }
     }
-    console.info(`[LLM_Prompt] node ${node.id}: old ${values.length}-value layout re-applied by name.`);
+    console.info(`[LLM_Prompt] node ${node.id}: old ${layout.length}-value layout re-applied by name.`);
     return true;
 }
 
@@ -129,8 +164,11 @@ app.registerExtension({
         // after the load, so an untouched old workflow is not flagged modified.
         nodeType.prototype.onConfigure = function (info) {
             try {
-                remapOldValues(this, info?.widgets_values);
+                const repaired = remapOldValues(this, info?.widgets_values) || repairShifted(this, info?.widgets_values);
                 markCustomIfNoQuality(this, info);
+                // A repaired list ran with shifted values; its quality slot held a
+                // stray value too, so it runs as saved originally: custom.
+                if (repaired) { const q = this.widgets.find((w) => w.name === "quality"); if (q) q.value = "custom"; }
             } catch (e) { console.error("[LLM_Prompt] compat", e); }
             return onConfigure?.apply(this, arguments);
         };
