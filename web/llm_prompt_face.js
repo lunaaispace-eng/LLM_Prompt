@@ -299,7 +299,9 @@ function renderModel(node, root) {
     let m1 = "";
     if (info?.found) {
         if (info.quant) m1 += b(info.quant);
-        m1 += info.mtp ? b("MTP", "g") : b("no MTP", "off");
+        // Gemma 4: no own heads, but a matching drafter in the LLM folders gives
+        // MTP at a context of 8k or less (the node's default).
+        m1 += info.mtp ? b("MTP", "g") : info.mtp_drafter ? b("MTP drafter", "g") : b("no MTP", "off");
         if (info.vision) m1 += b("vision");
         m1 += `<span style="margin-left:4px">${info.size_gb} GB</span>`;
         m1 += `<span class="sp" style="flex:1"></span><span class="llmf-dot ${info.loaded ? "on" : ""}"></span>`;

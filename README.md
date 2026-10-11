@@ -82,7 +82,7 @@ Restart ComfyUI after installing or updating Python files. Hard-refresh the brow
 
 | Package | Needed for | Notes |
 | --- | --- | --- |
-| `llama-cpp-python` | `LLM Prompt` local GGUF node | Recommended: JamePeng's fork/build with Gemma4, Qwen35, and Qwen3VL handlers; 0.3.48+ for MTP. |
+| `llama-cpp-python` | `LLM Prompt` local GGUF node | Recommended: JamePeng's fork/build with Gemma4, Qwen35, and Qwen3VL handlers; 0.3.48+ for MTP, 0.4.x for Gemma 4 drafters (tested: 0.4.2). |
 | `torch`, `numpy`, `Pillow` | Tensor/image handling | Usually already present in ComfyUI. |
 | `soundfile`, `torchaudio` | Audio input | Optional; used only when audio is connected. |
 | `PyYAML` | Prompt preset frontmatter | Optional; without it, filenames become preset labels. |
@@ -160,7 +160,7 @@ All settings (the ones not on the face are in the ⚙ panel):
 | `split_output` | Splits model output into `positive` and `negative`. |
 | `auto_settings` | Applies recommended sampling and thinking controls for known model families. |
 | `disable_thinking` | Disables/strips reasoning where supported. |
-| `temperature`, `max_tokens`, `n_ctx`, `seed`, `keep_model_loaded` | Main generation/runtime controls. |
+| `temperature`, `max_tokens`, `n_ctx`, `seed`, `keep_model_loaded` | Main generation/runtime controls. `n_ctx` defaults to 8192: enough for any text run (Krea with thinking ~7k); use 16k-32k with images or video. |
 | `load_mmproj` | Whether to pair the model with its vision projector. `auto` (default) loads it only when image/video/audio is connected, which frees ~0.6-1.1 GB of VRAM and the reserved image-token budget on text-only runs. `always` keeps it loaded so bypassing an image node does not change the load signature and force a full model reload. `never` is text-only regardless. VL models always keep their projector. |
 
 Advanced widgets:
@@ -194,6 +194,14 @@ Q4_K_M on an RTX 4090: 21.5 -> 42-45 tok/s). 0 = off, 2-3 recommended. It needs 
 a GGUF that still carries its MTP heads (an `...-MTP-GGUF` build; most quants and fine-tunes strip them),
 and a text-only run - it is skipped while a vision projector is loaded. The console says when it is skipped
 and why.
+
+Gemma 4 has no MTP heads of its own; Google publishes separate drafters (`mtp-gemma-4-12b-it.gguf`,
+`mtp-gemma-4-26B-A4B-it.gguf`, `mtp-gemma-4-E4B-it.gguf`, architecture `gemma4-assistant`). Put them anywhere in
+your LLM folders (e.g. `LLM/_mtp_drafters/`): they are hidden from the model list and paired automatically with
+any Gemma 4 model of the same width, fine-tunes included. The drafter needs llama-cpp-python 0.4.x and a
+context of 8k or less (the default), because it turns on `swa_full`, whose VRAM grows with the context.
+Measured on Gemma4 26B-A4B Q4_K_P, RTX 4090: 157 -> 184 tok/s for +1.4 GB at 8k (+0.6 GB at 4k, +2.9 GB at
+16k, where the node leaves it off). The model card shows `MTP drafter` when one is found.
 
 `reasoning_budget` caps the thinking when thinking is on, like LM Studio's budget: -1 = unlimited, 0 = no
 thinking, N = after N reasoning tokens the model is told to stop and writes the prompt. Qwen 3.5+ and Gemma 4

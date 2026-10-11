@@ -1178,6 +1178,48 @@ def _gguf_mtp_layers(model_path, arch: str) -> int:
     return layers
 
 
+# Gemma 4 has no MTP heads of its own; Google ships separate "assistant"
+# drafters (mtp-gemma-4-*.gguf, arch gemma4-assistant). The pair must share the
+# embedding width: target <arch>.embedding_length == drafter
+# gemma4-assistant.embedding_length_out (12B 3840, 26B-A4B 2816, E4B 2560), which
+# also pairs fine-tunes (HauhauCS, Melody, SuperGemma) with Google's drafter.
+_DRAFTER_CACHE: dict[str, str | None] = {}
+
+# MEASURED 2026-10-11 (Gemma4 26B-A4B Q4_K_P, Krea preset, wheel 0.4.2): with the
+# drafter, swa_full must be on (off: 157 -> 86 tok/s); on costs VRAM that grows
+# with the context: 4k +0.6 GB (188 tok/s), 8k +1.4 GB (184), 16k +2.9 GB (180),
+# vs 157 tok/s without. Peter: drafter on at 8k or less.
+_DRAFTER_MAX_CTX = 8192
+
+
+def _find_mtp_drafter(model_path, arch: str) -> Path | None:
+    """Return the matching stand-alone MTP drafter GGUF for a Gemma 4 target, or None."""
+    if not arch.startswith("gemma4") or arch.endswith("-assistant"):
+        return None
+    key = str(model_path)
+    if key in _DRAFTER_CACHE:
+        found = _DRAFTER_CACHE[key]
+        return Path(found) if found else None
+    found = None
+    try:
+        width = int(_read_gguf_value(model_path, f"{arch}.embedding_length") or 0)
+        if width:
+            for folder in _get_llm_folders():
+                for f in sorted(Path(folder).rglob("*.gguf")):
+                    d_arch = _read_gguf_arch(f)
+                    if not d_arch.endswith("-assistant") or not d_arch.startswith(arch):
+                        continue
+                    if int(_read_gguf_value(f, f"{d_arch}.embedding_length_out") or 0) == width:
+                        found = str(f)
+                        break
+                if found:
+                    break
+    except Exception as e:
+        logger.warning("[LLM_Prompt] Drafter lookup failed for %s: %s", model_path, e)
+    _DRAFTER_CACHE[key] = found
+    return Path(found) if found else None
+
+
 class ModelAdapter:
     """Base adapter: generic Qwen-VL-style fallback chain, no audio."""
     family = "generic"
@@ -1338,7 +1380,7 @@ class _LLMRunner:
     # Model loading (same as QwenVL-Mod GGUF)
     # ------------------------------------------------------------------
 
-    def _load_model(self, model_name: str, device: str, n_ctx: int = 16384, n_gpu_layers: int = -1,
+    def _load_model(self, model_name: str, device: str, n_ctx: int = 8192, n_gpu_layers: int = -1,
                     disable_thinking: bool = True, want_vision: bool = True,
                     preserve_thinking: bool = False, image_min_tokens: int = 1024,
                     image_max_tokens: int = 4096, load_mmproj: str = "auto",
@@ -1399,21 +1441,31 @@ class _LLMRunner:
         # MTP speculative decoding: the model's own NextN heads draft tokens that
         # the full model then verifies, so the output is unchanged — only faster.
         # Text-only in llama.cpp, so any loaded projector turns it off.
-        # Gemma 4's separate mtp-*.gguf drafters are not used: in JamePeng 0.3.49
-        # a drafter makes prompt reading ~50x slower and crashes with
-        # swa_full=False (SPEC › 6, 2026-10-10).
+        # Gemma 4 has no heads of its own and uses a separate drafter GGUF
+        # (_find_mtp_drafter) with the wheel author's tested settings (2 draft
+        # tokens, backend sampling) and swa_full, only up to _DRAFTER_MAX_CTX.
+        # On 0.3.49 without draft_backend_sampling the drafter read prompts ~50x
+        # slower and crashed with swa_full=False (SPEC › 6, 2026-10-10 / -11).
         mtp_draft = 0
         mtp_note = ""
+        drafter = None
         if mtp_draft_tokens > 0:
             if SpecConfig is None:
                 mtp_note = "MTP skipped: this llama-cpp-python wheel has no MTP (needs 0.3.48+)."
             elif has_mmproj:
                 mtp_note = "MTP skipped: a vision projector is loaded (MTP is text-only)."
-            elif _gguf_mtp_layers(model_path, model_arch) <= 0:
-                mtp_note = "MTP skipped: this GGUF has no MTP heads (use an MTP build of the model)."
-            else:
+            elif _gguf_mtp_layers(model_path, model_arch) > 0:
                 mtp_draft = int(mtp_draft_tokens)
                 mtp_note = f"MTP on: {mtp_draft} draft tokens."
+            elif (found := _find_mtp_drafter(model_path, model_arch)) is None:
+                mtp_note = "MTP skipped: this GGUF has no MTP heads (use an MTP build of the model)."
+            elif n_ctx > _DRAFTER_MAX_CTX:
+                mtp_note = (f"MTP skipped: the drafter {found.name} needs a context of "
+                            f"{_DRAFTER_MAX_CTX} or less (it costs VRAM that grows with the context).")
+            else:
+                drafter = found
+                mtp_draft = 2
+                mtp_note = f"MTP on: drafter {drafter.name}, 2 draft tokens."
 
         signature = {
             "model_path": str(model_path),
@@ -1432,6 +1484,7 @@ class _LLMRunner:
             "image_min_tokens": int(image_min_tokens),
             "image_max_tokens": int(image_max_tokens),
             "mtp_draft": mtp_draft,
+            "mtp_drafter": str(drafter) if drafter else "",
         }
         if self.llm is not None and self.current_signature == signature:
             return
@@ -1505,7 +1558,19 @@ class _LLMRunner:
             # chat_template_kwargs does NOT belong here â€” no effect on Llama.__init__.
             # Passed at inference time via create_chat_completion instead.
         }
-        if mtp_draft:
+        if mtp_draft and drafter is not None:
+            # External drafter, settings from the wheel's README for
+            # gemma4 + gemma4-assistant; swa_full is required for its speed.
+            llm_kwargs["speculative"] = SpecConfig(
+                spec_type=SpeculativeType.DRAFT_MTP,
+                draft_model_path=str(drafter),
+                draft_n_max=mtp_draft,
+                draft_p_min=0.0,
+                draft_n_gpu_layers=0 if device_kind == "cpu" else "all",
+                draft_backend_sampling=True,
+            )
+            llm_kwargs["swa_full"] = True
+        elif mtp_draft:
             # Uses the target GGUF's own NextN heads (no draft_model_path).
             # draft_p_min 0.0 follows the JamePeng / llama.cpp MTP examples.
             llm_kwargs["speculative"] = SpecConfig(
@@ -1596,7 +1661,19 @@ class _LLMRunner:
         if has_mmproj and self.chat_handler and "chat_handler" not in llm_kwargs_filtered:
             print("[LLM_Prompt] Warning: Llama() doesn't accept chat_handler. Images will be ignored.")
 
-        self.llm = Llama(**llm_kwargs_filtered)
+        try:
+            self.llm = Llama(**llm_kwargs_filtered)
+        except Exception as e:
+            if drafter is None:
+                raise
+            # A drafter that does not fit this target must not cost the run:
+            # load without it.
+            print(f"[LLM_Prompt] MTP drafter {drafter.name} failed to load ({e}); loading without it.")
+            _DRAFTER_CACHE[str(model_path)] = None   # not again for this model this session
+            llm_kwargs_filtered.pop("speculative", None)
+            llm_kwargs_filtered["swa_full"] = False
+            signature["mtp_draft"], signature["mtp_drafter"] = 0, ""
+            self.llm = Llama(**llm_kwargs_filtered)
         if model_arch.startswith("gemma4") and not disable_thinking and not has_mmproj:
             handler = _gemma4_thinking_handler(self.llm)
             if handler is not None:
@@ -1940,7 +2017,7 @@ class _LLMRunner:
         disable_thinking: bool,
         keep_model_loaded: bool,
         seed: int,
-        n_ctx: int = 16384,
+        n_ctx: int = 8192,
         n_gpu_layers: int = -1,
         presence_penalty: float = 0.0,
         frequency_penalty: float = 0.0,
@@ -2294,10 +2371,10 @@ class LLMPromptNode(io.ComfyNode):
                              tooltip="Max length of the result. Ref: ~512 short, 2048 a full prompt, "
                                      "4096+ for multi-scene lists. Raise if output gets cut off. With thinking ON "
                                      "the reasoning gets its own room on top (reasoning_budget, or the context)."),
-                io.Int.Input("n_ctx", default=16384, min=2048, max=262144, step=256,
+                io.Int.Input("n_ctx", default=8192, min=2048, max=262144, step=256,
                              tooltip="How much text the model reads at once (input + reasoning + output). "
-                                     "Ref: 16384 default (any text run, Krea with thinking ~7k), 32768 with "
-                                     "several images or video. Higher = more VRAM (~1 GB per doubling on Qwen 27B)."),
+                                     "Ref: 8192 default (Krea with thinking ~7k; Gemma drafter MTP only at 8k or "
+                                     "less), 16384-32768 with images or video. Higher = more VRAM."),
                 io.Int.Input("seed", default=1, min=1, max=2**32 - 1,
                              tooltip="Change for a different result; same seed = same output. "
                                      "Set 'control after generate' to randomize for variety."),
@@ -2447,6 +2524,7 @@ def _model_info(display_name: str) -> dict:
         "quant": quant[-1].upper() if quant else "",
         "arch": arch,
         "mtp": _gguf_mtp_layers(path, arch) > 0,
+        "mtp_drafter": (lambda d: d.name if d else "")(_find_mtp_drafter(path, arch)),
         "vision": bool(entry.get("mmproj_path")),
         "size_gb": size_gb,
         "loaded": loaded,

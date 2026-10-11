@@ -89,6 +89,19 @@ class DrafterLookupTests(unittest.TestCase):
         self.assertTrue(self.node._is_mtp_drafter(self.d12))
         self.assertFalse(self.node._is_mtp_drafter(self.target))
 
+    def test_drafter_matched_by_embedding_width(self):
+        self.node._DRAFTER_CACHE.clear()
+        with mock.patch.object(self.node, "_get_llm_folders", return_value=[self.dir]):
+            self.assertEqual(self.node._find_mtp_drafter(self.target, "gemma4"), self.d12)
+
+    def test_no_drafter_for_other_arch_or_width(self):
+        self.node._DRAFTER_CACHE.clear()
+        other = self.dir / "models" / "gemma-e2b.gguf"
+        _gguf(other, [("general.architecture", "gemma4"), ("gemma4.embedding_length", 1536)])
+        with mock.patch.object(self.node, "_get_llm_folders", return_value=[self.dir]):
+            self.assertIsNone(self.node._find_mtp_drafter(other, "gemma4"))
+            self.assertIsNone(self.node._find_mtp_drafter(self.target, "qwen35"))
+
 
 class MtpGateTests(unittest.TestCase):
     """`_load_model` passes `speculative` only when every MTP condition holds."""
@@ -103,6 +116,12 @@ class MtpGateTests(unittest.TestCase):
         _gguf(self.mtp, [("general.architecture", "qwen35"), ("qwen35.nextn_predict_layers", 1)])
         self.plain = os.path.join(self.dir, "m-plain.gguf")
         _gguf(self.plain, [("general.architecture", "qwen35")])
+        self.gemma = os.path.join(self.dir, "gemma-26b.gguf")
+        _gguf(self.gemma, [("general.architecture", "gemma4"), ("gemma4.embedding_length", 2816)])
+        self.drafter = os.path.join(self.dir, "mtp-gemma-4-26B-A4B-it.gguf")
+        _gguf(self.drafter, [("general.architecture", "gemma4-assistant"),
+                             ("gemma4-assistant.embedding_length_out", 2816)])
+        self.node._DRAFTER_CACHE.clear()
         self.calls = []
 
         def fake_llama(**kw):
@@ -114,6 +133,7 @@ class MtpGateTests(unittest.TestCase):
             mock.patch.object(self.node, "Llama", mock.MagicMock(side_effect=fake_llama)),
             mock.patch.object(self.node, "_pick_device", return_value="cuda"),
             mock.patch.object(self.node, "_filter_kwargs_for_callable", side_effect=lambda f, kw: kw),
+            mock.patch.object(self.node, "_get_llm_folders", return_value=[__import__("pathlib").Path(self.dir)]),
         ]
         for p in self.patches:
             p.start()
@@ -122,13 +142,13 @@ class MtpGateTests(unittest.TestCase):
         for p in self.patches:
             p.stop()
 
-    def _load(self, path, mmproj=None, mtp=2, **kw):
+    def _load(self, path, mmproj=None, mtp=2, n_ctx=4096, **kw):
         from pathlib import Path
         runner = self.node._LLMRunner()
         with mock.patch.object(self.node, "_resolve_model_paths",
                                return_value=(Path(path), Path(mmproj) if mmproj else None)), \
              mock.patch.object(self.node.torch.cuda, "is_available", return_value=False):
-            runner._load_model("m", "auto", n_ctx=4096, want_vision=bool(mmproj),
+            runner._load_model("m", "auto", n_ctx=n_ctx, want_vision=bool(mmproj),
                                mtp_draft_tokens=mtp, **kw)
         return self.calls[-1], runner
 
@@ -154,6 +174,36 @@ class MtpGateTests(unittest.TestCase):
         with mock.patch.object(self.node, "_build_vision_handler", return_value=mock.MagicMock()):
             kw, _ = self._load(self.mtp, mmproj=mm)
         self.assertNotIn("speculative", kw)
+
+    def test_gemma_drafter_on_at_8k(self):
+        kw, runner = self._load(self.gemma, mtp=3, n_ctx=8192)
+        spec = kw["speculative"]
+        self.assertEqual(os.path.normcase(spec.draft_model_path), os.path.normcase(self.drafter))
+        self.assertEqual(spec.draft_n_max, 2)
+        self.assertTrue(spec.draft_backend_sampling)
+        self.assertTrue(kw["swa_full"])
+        self.assertEqual(runner.current_signature["mtp_draft"], 2)
+
+    def test_gemma_drafter_off_above_8k(self):
+        kw, _ = self._load(self.gemma, mtp=3, n_ctx=16384)
+        self.assertNotIn("speculative", kw)
+        self.assertFalse(kw["swa_full"])
+
+    def test_gemma_drafter_load_failure_falls_back(self):
+        calls = {"n": 0}
+        orig = self.node.Llama.side_effect
+
+        def flaky(**kw):
+            calls["n"] += 1
+            if "speculative" in kw:
+                raise RuntimeError("bad drafter")
+            return orig(**kw)
+
+        self.node.Llama.side_effect = flaky
+        kw, runner = self._load(self.gemma, mtp=3, n_ctx=8192)
+        self.assertNotIn("speculative", kw)
+        self.assertFalse(kw["swa_full"])
+        self.assertEqual(runner.current_signature["mtp_draft"], 0)
 
     def test_skipped_on_old_wheel(self):
         with mock.patch.object(self.node, "SpecConfig", None):
