@@ -117,7 +117,8 @@ The local node runs GGUF models through `llama-cpp-python`.
 The node shows only what you change for every prompt: the model, the preset, your own instructions
 (`custom_system_prompt`, replaces the preset when filled), your idea and the seed. Below them:
 
-- **Model card** - the model's quant, whether it has MTP heads and a vision projector, its size, and whether it
+- **Model card** - the model's quant, whether it has MTP (its own heads, or `MTP drafter` for a Gemma 4 with a
+  matching drafter) and a vision projector, its size, and whether it
   is loaded (with the context size). The preset's family (Krea, Ideogram, MiniMax H3...) and a chip for every
   connected input. A red chip warns when a setting that is hidden on the node is fed by a wire.
 - **Prompt quality** - four buttons. Each sets thinking, the thinking budget and MTP for you:
@@ -129,7 +130,8 @@ The node shows only what you change for every prompt: the model, the preset, you
   | Quality | up to 2048 tokens | 3 | ~35 s (estimate) |
   | Ultra | unlimited | 3 | ~50 s |
 
-  MTP does not change the text, only the speed; a model without MTP heads skips it. With thinking on and
+  MTP does not change the text, only the speed; a model without MTP heads skips it, except Gemma 4, which uses
+  its drafter (2 draft tokens) at a context of 8k or less - see `mtp_draft_tokens` below. With thinking on and
   `auto_settings` on, the family's official thinking-mode sampling is used.
 - **Last run** - time, tokens, tokens per second, how long it thought, and a `view thinking` link.
 - **✎ idea** - a large editor for your idea (Ctrl+Enter saves, Esc cancels).
