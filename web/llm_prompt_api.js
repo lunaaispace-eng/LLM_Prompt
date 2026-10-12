@@ -26,16 +26,14 @@ const PROVIDERS = {
         // Kept in step with the Python fallback_models list.
         fallback: [
             // Gemini 3 series (current) — all verified callable 2026-08-31;
-            // 3.8-flash added 2026-10-04.
+            // 3.8-flash added 2026-10-04. 3.7-flash, 3.5-flash and
+            // 3.1-flash-lite-preview removed 2026-10-12 (served by newer models).
             "gemini-3.8-flash",
-            "gemini-3.7-flash",
             "gemini-3.6-flash",
             "gemini-3.1-pro-preview",
-            "gemini-3.5-flash",
             "gemini-3.5-flash-lite",
             "gemini-3-flash-preview",
             "gemini-3.1-flash-lite",
-            "gemini-3.1-flash-lite-preview",
             // Rolling aliases — never go stale.
             "gemini-pro-latest",
             "gemini-flash-latest",

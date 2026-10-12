@@ -67,16 +67,15 @@ PROVIDERS = {
         # is set, the live query returns the user's full account-accessible list.
         "fallback_models": [
             # Gemini 3 series (current). 3.8-flash added 2026-10-04 from a
-            # live ListModels pass.
+            # live ListModels pass. Removed 2026-10-12 (served by newer models
+            # when asked): 3.7-flash -> 3.8-flash, 3.5-flash -> 3.6-flash,
+            # 3.1-flash-lite-preview -> 3.1-flash-lite.
             "gemini-3.8-flash",
-            "gemini-3.7-flash",
             "gemini-3.6-flash",
             "gemini-3.1-pro-preview",
-            "gemini-3.5-flash",
             "gemini-3.5-flash-lite",
             "gemini-3-flash-preview",
             "gemini-3.1-flash-lite",
-            "gemini-3.1-flash-lite-preview",
             # Rolling aliases — never go stale.
             "gemini-pro-latest",
             "gemini-flash-latest",
@@ -432,6 +431,123 @@ def _apply_model_pattern(provider: str, models: list[str]) -> list[str]:
     return keep
 
 
+# ---------------------------------------------------------------------------
+# Gemini model check (Peter, 2026-10-12: "check the curent models and have the
+# node refresh them"). ListModels keeps advertising retired models: on
+# 2026-10-12 the three gemini-2.5 models 404'd and gemini-3.7-flash /
+# 3.5-flash / 3.1-flash-lite-preview were silently served by newer models.
+# One tiny call per model tells them apart; the result is cached in a
+# git-ignored file and dead or rerouted models leave the dropdown. A real run
+# that comes back from another model marks it rerouted for free.
+# ---------------------------------------------------------------------------
+
+_MODEL_CHECK_FILE = Path(__file__).resolve().parent / ".api_models_check.json"
+_MODEL_CHECK_MAX_AGE = 7 * 24 * 3600
+_model_check_lock = threading.Lock()
+
+
+def _check_load() -> dict:
+    try:
+        data = json.loads(_MODEL_CHECK_FILE.read_text(encoding="utf-8"))
+        return data if isinstance(data, dict) else {}
+    except Exception:
+        return {}
+
+
+def _check_record(model: str, status: str, served: str = "", note: str = "") -> None:
+    with _model_check_lock:
+        data = _check_load()
+        data[model] = {"status": status, "served": served, "note": note[:200], "at": time.time()}
+        try:
+            _MODEL_CHECK_FILE.write_text(json.dumps(data, indent=1, sort_keys=True), encoding="utf-8")
+        except Exception as e:
+            print(f"[LLM_Prompt_API] could not write the model check file: {e}")
+
+
+def _note_served_model(model: str, served: str) -> None:
+    """A run answered by another model: the asked one is retired and rerouted."""
+    if not served or not model or model.endswith("-latest"):
+        return
+    if served.lower() != model.lower() and not served.lower().startswith(model.lower() + "-"):
+        print(f"[LLM_Prompt_API] {model} is now served by {served}; hiding it from the list.")
+        _check_record(model, "routed", served=served)
+
+
+def _probe_gemini_model(api_key: str, model: str) -> tuple[str, str, str] | None:
+    """(status, served, note) from one tiny text call; None when the result says nothing."""
+    body = json.dumps({"contents": [{"parts": [{"text": "Say OK"}]}],
+                       "generationConfig": {"maxOutputTokens": 16, "responseModalities": ["TEXT"]}}).encode()
+    req = urllib.request.Request(
+        f"{PROVIDERS['Gemini']['base_url']}/models/{model}:generateContent", data=body,
+        headers={"Content-Type": "application/json", "x-goog-api-key": api_key})
+    try:
+        with urllib.request.urlopen(req, timeout=60) as r:
+            served = json.load(r).get("modelVersion") or model
+    except urllib.error.HTTPError as e:
+        try:
+            msg = json.load(e).get("error", {}).get("message", "")
+        except Exception:
+            msg = ""
+        if e.code == 404:
+            return "dead", "", msg
+        return None  # 429 / 5xx / 400: says nothing about the model itself
+    except Exception:
+        return None
+    if model.endswith("-latest") or served.lower() == model.lower():
+        return "ok", served, ""
+    return "routed", served, ""
+
+
+def _check_gemini_models(models: list[str], force: bool = False) -> int:
+    """Probe the models without a fresh check (all of them when force). Returns calls made."""
+    api_key = _resolve_api_key("Gemini")
+    if not api_key:
+        return 0
+    # One check at a time: a node load fires two list requests back to back.
+    if not _check_running.acquire(blocking=force):
+        return 0
+    try:
+        return _check_gemini_models_locked(api_key, models, force)
+    finally:
+        _check_running.release()
+
+
+_check_running = threading.Lock()
+
+
+def _check_gemini_models_locked(api_key: str, models: list[str], force: bool) -> int:
+    known = _check_load()
+    now = time.time()
+    todo = [m for m in models if force or now - float((known.get(m) or {}).get("at") or 0) > _MODEL_CHECK_MAX_AGE]
+    if not todo:
+        return 0
+    from concurrent.futures import ThreadPoolExecutor
+    with ThreadPoolExecutor(max_workers=6) as pool:
+        results = list(pool.map(lambda m: (m, _probe_gemini_model(api_key, m)), todo))
+    summary = []
+    for m, res in results:
+        if res:
+            _check_record(m, *res)
+            if res[0] != "ok":
+                summary.append(f"{m} {res[0]}" + (f" -> {res[1]}" if res[1] else ""))
+    print(f"[LLM_Prompt_API] Gemini model check: {len(todo)} model(s) probed"
+          + (f"; hidden: {', '.join(summary)}" if summary else "; all answer"))
+    return len(todo)
+
+
+def _gemini_sort_key(model: str):
+    """Newest Gemini first, then the -latest aliases, then Gemma."""
+    m = model.lower()
+    nums = re.findall(r"\d+(?:\.\d+)?", m.split("-", 2)[1] if m.count("-") else m)
+    version = -float(nums[0]) if nums else 0.0
+    group = 2 if m.startswith("gemma") else (1 if m.endswith("-latest") else 0)
+    return (group, version, "pro" not in m, "lite" in m, m)
+
+
+def _gemini_hidden_models() -> dict[str, dict]:
+    return {m: v for m, v in _check_load().items() if (v or {}).get("status") in ("dead", "routed")}
+
+
 def _get_models_for_provider(
     provider: str,
     custom_url: str = "",
@@ -474,6 +590,15 @@ def _get_models_for_provider(
     # Per-provider whitelist (OpenAI keeps only the GPT-5.6 family).
     filtered = _apply_model_pattern(provider, filtered)
 
+    if cfg.get("native_protocol") == "gemini":
+        # Image models answer generateContent too (gemini-nano-banana-2.1 got
+        # through on 2026-10-12); they belong to the Gemini Image node.
+        filtered = [m for m in filtered if "banana" not in m and "-image" not in m]
+        # Models the check found dead or rerouted stay out of the list.
+        hidden = _gemini_hidden_models()
+        filtered = [m for m in filtered if m not in hidden] or filtered
+        filtered.sort(key=_gemini_sort_key)
+
     # Sort: keep stable order from the API, just dedupe
     seen = set()
     deduped = []
@@ -505,13 +630,36 @@ try:
     async def _llm_prompt_api_models_route(request):
         provider = request.query.get("provider", "")
         server_url = request.query.get("server_url", "")
+        # refresh=1 (the ↻ on the node face): drop the cached list and, for
+        # Gemini, re-check every listed model (~20 tiny calls, < $0.01).
+        refresh = request.query.get("refresh") == "1"
         try:
-            models = _get_models_for_provider(provider, server_url)
+            import asyncio
+            loop = asyncio.get_running_loop()
+            cfg = PROVIDERS.get(provider) or {}
+            base = server_url.strip() if provider == "Custom" else cfg.get("base_url", "")
+            if refresh:
+                _MODEL_LIST_CACHE_TS.pop((provider, base), None)
+            if cfg.get("native_protocol") == "gemini":
+                # The check needs the unfiltered list, so it is fetched raw here.
+                raw = await loop.run_in_executor(None, lambda: _fetch_models_from_server(
+                    cfg["base_url"], _resolve_api_key("Gemini"), "gemini"))
+                raw = [m for m in raw if "banana" not in m and "-image" not in m
+                       and not _NON_CHAT_PATTERNS.search(m)]
+                if refresh:
+                    await loop.run_in_executor(None, _check_gemini_models, raw, True)
+                else:
+                    # New or stale models only, in the background: the list
+                    # answers now, the next refresh sees the result.
+                    threading.Thread(target=_check_gemini_models, args=(raw,), daemon=True).start()
+                _MODEL_LIST_CACHE_TS.pop((provider, base), None)
+            models = await loop.run_in_executor(None, _get_models_for_provider, provider, server_url)
         except Exception as exc:  # never 500 the frontend — degrade to fallback
             return _aiohttp_web.json_response(
                 {"provider": provider, "models": [], "error": str(exc)}
             )
-        return _aiohttp_web.json_response({"provider": provider, "models": models})
+        hidden = _gemini_hidden_models() if provider == "Gemini" else {}
+        return _aiohttp_web.json_response({"provider": provider, "models": models, "hidden": hidden})
 except Exception as _route_exc:  # pragma: no cover — server unavailable at import
     print(f"[LLM_Prompt_API] model-list route not registered: {_route_exc}")
 
@@ -1124,8 +1272,9 @@ def _send_gemini_native(
         finish = str(response.candidates[0].finish_reason or "").replace("FinishReason.", "").lower()
     except Exception:
         pass
-    _note_run(seconds=round(elapsed, 2), served=getattr(response, "model_version", None) or model,
-              finish=finish, reasoning=thoughts.strip())
+    served = getattr(response, "model_version", None) or model
+    _note_run(seconds=round(elapsed, 2), served=served, finish=finish, reasoning=thoughts.strip())
+    _note_served_model(model, served)
 
     # Log usage like Luna Core does
     try:

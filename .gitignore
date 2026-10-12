@@ -27,3 +27,4 @@ AGENTS.md
 .codex/
 design/
 prompts/private/
+.api_models_check.json
