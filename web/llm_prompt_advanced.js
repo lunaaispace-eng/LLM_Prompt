@@ -143,20 +143,12 @@ function onVueModeChange(cb) {
 
 app.registerExtension({
     name: "LLM_Prompt.AdvancedToggle",
-    async setup() {
-        onVueModeChange(() => {
-            const nodes = window?.app?.graph?._nodes;
-            if (!Array.isArray(nodes)) return;
-            for (const n of nodes) {
-                if (n?.type === "LLMPromptAPI") {
-                    setTimeout(() => reapply(n), 50);
-                }
-            }
-        });
-    },
+    // Retired 2026-10-12: both LLM Prompt nodes now have a face and a ⚙ panel
+    // (llm_prompt_face.js, llm_prompt_api_face.js). Kept registered with no node
+    // so an old cached copy of this file and the face never both act on a node.
+    async setup() {},
     async beforeRegisterNodeDef(nodeType, nodeData) {
-        // LLMPrompt (GGUF) has its own face and gear: llm_prompt_face.js.
-        if (nodeData.name !== "LLMPromptAPI") return;
+        if (nodeData.name !== "__none__") return;
 
         const onCreated = nodeType.prototype.onNodeCreated;
         nodeType.prototype.onNodeCreated = function () {

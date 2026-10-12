@@ -24,7 +24,7 @@
 
 import { app } from "/scripts/app.js";
 // Versioned: browsers kept an old copy of this module after Ctrl+F5 (2026-10-10). Bump on every change.
-import { closePanel, isPanelOpenFor, openPanel, recentlyClosed, refreshPanel } from "./llm_prompt_panel.mjs?v=6";
+import { closePanel, isPanelOpenFor, openPanel, recentlyClosed, refreshPanel } from "./llm_prompt_panel.mjs?v=7";
 
 const NODE = "LLMPrompt";
 const FACE = "llm_face";

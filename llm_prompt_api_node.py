@@ -748,8 +748,110 @@ try:
             )
         hidden = _gemini_hidden_models() if provider == "Gemini" else {}
         return _aiohttp_web.json_response({"provider": provider, "models": models, "hidden": hidden})
+    @PromptServer.instance.routes.get("/llm_prompt_api/model_info")
+    async def _llm_prompt_api_model_info_route(request):
+        import asyncio
+        q = request.query
+        try:
+            info = await asyncio.get_running_loop().run_in_executor(
+                None, _model_info, q.get("provider", ""), q.get("model", ""), q.get("server_url", ""))
+        except Exception as exc:
+            info = {"error": str(exc)}
+        return _aiohttp_web.json_response(info)
 except Exception as _route_exc:  # pragma: no cover — server unavailable at import
     print(f"[LLM_Prompt_API] model-list route not registered: {_route_exc}")
+
+
+# ---------------------------------------------------------------------------
+# Node face data: provider status dots, model badges, the quality cards'
+# labels. One source of truth with the run (_quality_settings), so a card
+# never promises a level the run would not send.
+# ---------------------------------------------------------------------------
+
+_STATUS_CACHE: dict[str, tuple[float, dict]] = {}
+
+
+def _provider_status(provider: str, server_url: str = "") -> dict:
+    """{"ok": bool, "text": short state} without spending anything."""
+    key = f"{provider}|{server_url}"
+    hit = _STATUS_CACHE.get(key)
+    if hit and time.time() - hit[0] < 20:
+        return hit[1]
+    cfg = PROVIDERS.get(provider) or {}
+    proto = cfg.get("native_protocol", "")
+    if proto == "lmstudio":
+        up = bool(_lmstudio_models(server_url or cfg["base_url"], _resolve_api_key(provider)))
+        st = {"ok": up, "text": f"server up {_lmstudio_base(server_url).split('//')[-1]}" if up
+              else "server not running"}
+    elif proto.endswith("_cli"):
+        exe = {"claude_cli": "claude", "codex_cli": "codex", "grok_cli": "grok", "agy_cli": "agy"}[proto]
+        try:
+            _cli_exe(exe, [str(Path.home() / ".local" / "bin" / "claude.exe"),
+                           r"D:\CLI-Data\.grok\bin\grok.exe", r"D:\CLI-Data\agy\agy.exe"])
+            st = {"ok": True, "text": f"{exe} CLI found"}
+        except Exception:
+            st = {"ok": False, "text": f"{exe} CLI not found"}
+    elif provider == "Custom":
+        st = {"ok": bool(server_url.strip()), "text": "server_url set" if server_url.strip() else "set server_url"}
+    elif cfg.get("needs_auth"):
+        ok = bool(_resolve_api_key(provider))
+        spec = cfg.get("env_var")
+        name = spec[0] if isinstance(spec, list) else spec
+        st = {"ok": ok, "text": "key found" if ok else f"no key: set {name}"}
+    else:
+        st = {"ok": True, "text": ""}
+    _STATUS_CACHE[key] = (time.time(), st)
+    return st
+
+
+def _model_info(provider: str, model: str, server_url: str = "") -> dict:
+    cfg = PROVIDERS.get(provider) or {}
+    proto = cfg.get("native_protocol", "")
+    name = (model or "").lower()
+    badges: list[list[str]] = []
+    lm: dict = {}
+    if proto == "lmstudio":
+        m = next((x for x in _lmstudio_models(server_url or cfg["base_url"], _resolve_api_key(provider))
+                  if x.get("key") == model), None)
+        if m:
+            caps = m.get("capabilities") or {}
+            inst = m.get("loaded_instances") or []
+            lm = {"quant": (m.get("quantization") or {}).get("name", ""), "params": m.get("params_string") or "",
+                  "arch": m.get("architecture") or "", "size_gb": round((m.get("size_bytes") or 0) / 1e9, 1),
+                  "loaded": bool(inst),
+                  "loaded_ctx": ((inst[0].get("config") or {}).get("context_length") if inst else None),
+                  "reasoning": (caps.get("reasoning") or {}).get("allowed_options") or []}
+            if caps.get("vision"):
+                badges.append(["vision", ""])
+            if lm["reasoning"]:
+                badges.append(["reasoning " + " / ".join(lm["reasoning"]), "a"])
+    elif proto == "gemini":
+        if "gemma" in name:
+            badges += [["vision", ""], ["no thinking control", "off"]]
+        else:
+            badges += [["vision", ""], ["video + audio", ""], ["thinking levels", "a"]]
+    elif proto == "agy_cli":
+        badges += [["vision", ""], ["audio", ""], ["subscription", "b"]]
+    elif proto.endswith("_cli"):
+        badges += [["vision", ""], ["subscription", "b"]]
+    elif provider in ("Grok (xAI)", "OpenAI"):
+        badges += [["vision", ""], ["reasoning effort", "a"]]
+
+    # Card labels: what each level sends for this model.
+    levels: dict[str, str] = {}
+    for q in ("fast", "normal", "quality", "ultra"):
+        s = _quality_settings(provider, model, q) or {}
+        v = s.get("reasoning_effort") or s.get("gemini_thinking_level") or ""
+        if proto == "lmstudio" and v and lm.get("reasoning"):
+            opts = lm["reasoning"]
+            v = v if v in opts else ("on" if v != "off" and "on" in opts else v)
+        levels[q] = v
+    hidden = _gemini_hidden_models() if proto == "gemini" else {}
+    return {"provider": provider, "model": model, "status": _provider_status(provider, server_url),
+            "providers": {p: _provider_status(p, server_url if p == provider else "")["ok"] for p in PROVIDERS},
+            "badges": badges, "lmstudio": lm, "levels": levels,
+            "audio": proto in AUDIO_PROTOCOLS and "gemma" not in name,
+            "hidden_count": len(hidden)}
 
 
 def _comfyui_root() -> Path:
@@ -2400,9 +2502,9 @@ class LLMPromptAPINode(io.ComfyNode):
             display_name="LLM Prompt (API)",
             category="Luna/LLM",
             description=(
-                "Cloud prompt generation via OpenAI-compatible / native APIs. "
-                "Gemini (default, via google-genai SDK), Grok, or any Custom endpoint. "
-                "Outputs positive / negative for image-gen workflows."
+                "Prompt writing with cloud models (Gemini, Grok, OpenAI), local models through "
+                "LM Studio, your subscriptions (Claude Max, Codex, SuperGrok, Gemini via "
+                "Antigravity) or any OpenAI-compatible server. Outputs positive / negative."
             ),
             inputs=[
                 # ===== BASIC =====

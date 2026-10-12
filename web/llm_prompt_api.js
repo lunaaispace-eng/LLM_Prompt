@@ -277,6 +277,9 @@ function setWidgetVisible(widget, visible) {
 }
 
 function updateProviderSpecificVisibility(node) {
+    // The node face (llm_prompt_api_face.js) owns widget visibility since
+    // 2026-10-12: every setting lives in its ⚙ panel, shown per provider.
+    if (node.__llmaFace) return;
     const providerW = node.widgets?.find((w) => w.name === "provider");
     const isGemini = providerW?.value === "Gemini";
 

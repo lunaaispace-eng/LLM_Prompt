@@ -122,9 +122,15 @@ function fmt(v, step) {
 
 export function openPanel(node, api) {
     // api: { C, widget, setValue(node, name, v), renderFace, levelOf, setLevel, levels, showOnNode }
+    // Optional (the API node, 2026-10-12): sections, levelOwned, autoOwned, title,
+    // sectionNote(node, title) -> text | undefined, rowVisible(node, name) -> bool.
+    // Left out, the GGUF node's own tables and notes apply unchanged.
     if (isPanelOpenFor(node)) { closePanel(); return; }
     closePanel();
     const { C } = api;
+    const sections = api.sections || SECTIONS;
+    const levelOwned = api.levelOwned || LEVEL_OWNED;
+    const autoOwned = api.autoOwned || AUTO_OWNED;
     if (!document.getElementById("llmp-css")) {
         const s = document.createElement("style");
         s.id = "llmp-css";
@@ -136,7 +142,7 @@ export function openPanel(node, api) {
 
     const el = document.createElement("div");
     el.className = "llmp";
-    el.innerHTML = `<div class="llmp-h"><span>⚙</span><span class="t">Settings</span>
+    el.innerHTML = `<div class="llmp-h"><span>⚙</span><span class="t">${api.title || "Settings"}</span>
 <span class="llmp-lv"></span><button class="llmp-reset" title="Back to the quality level">reset</button>
 <button class="llmp-x" title="Close">✕</button></div><div class="llmp-b"></div>
 <div class="llmp-f"><span data-act="shownode">Show all settings on the node</span><span data-act="close">Done</span></div>`;
@@ -145,16 +151,16 @@ export function openPanel(node, api) {
 
     // What the run will use: a quality level overrides the settings it owns.
     const val = (name) => {
-        const lv = LEVEL_OWNED.has(name) ? api.levelValue(node, name) : undefined;
+        const lv = levelOwned.has(name) ? api.levelValue(node, name) : undefined;
         return lv !== undefined ? lv : api.widget(node, name)?.value;
     };
     const set = (name, v) => {
-        if (LEVEL_OWNED.has(name) && api.levelOf(node) !== "custom") api.toCustom(node);
+        if (levelOwned.has(name) && api.levelOf(node) !== "custom") api.toCustom(node);
         api.setValue(node, name, v);
         refreshAll();
     };
 
-    for (const sec of SECTIONS) {
+    for (const sec of sections) {
         const rows = sec.rows.filter(([name]) => api.widget(node, name));
         if (!rows.length) continue;
         const box = document.createElement("div");
@@ -168,7 +174,16 @@ export function openPanel(node, api) {
             node.properties.llmPanelFolded = folded;
         });
         box.appendChild(head);
-        if (sec.title === "Sampling") {
+        if (api.sectionNote) {
+            const note = document.createElement("div");
+            note.className = "llmp-r col llmp-note";
+            refreshers.push(() => {
+                const text = api.sectionNote(node, sec.title, val);
+                note.textContent = text || "";
+                note.style.display = text ? "" : "none";
+            });
+            box.appendChild(note);
+        } else if (sec.title === "Sampling") {
             const note = document.createElement("div");
             note.className = "llmp-r col llmp-note";
             refreshers.push(() => {
@@ -189,7 +204,23 @@ export function openPanel(node, api) {
             });
             box.appendChild(note);
         }
-        for (const row of rows) box.appendChild(buildRow(node, row, val, set, refreshers, api));
+        const rowEls = rows.map((row) => {
+            const rEl = buildRow(node, row, val, set, refreshers, api, autoOwned);
+            box.appendChild(rEl);
+            return [row[0], rEl];
+        });
+        if (api.rowVisible) {
+            // Rows a provider does not use are hidden; a section with none left goes too.
+            refreshers.push(() => {
+                let any = false;
+                for (const [name, rEl] of rowEls) {
+                    const vis = api.rowVisible(node, name) !== false;
+                    rEl.style.display = vis ? "" : "none";
+                    any = any || vis;
+                }
+                box.style.display = any ? "" : "none";
+            });
+        }
         body.appendChild(box);
     }
 
@@ -253,7 +284,7 @@ export function openPanel(node, api) {
     api.onOpen?.(node);
 }
 
-function buildRow(node, [name, label, kind, chips], val, set, refreshers, api) {
+function buildRow(node, [name, label, kind, chips], val, set, refreshers, api, autoOwned = AUTO_OWNED) {
     const w = api.widget(node, name);
     const opt = w.options || {};
     const r = document.createElement("div");
@@ -263,7 +294,7 @@ function buildRow(node, [name, label, kind, chips], val, set, refreshers, api) {
     l.textContent = label;
     l.title = w.tooltip || opt.tooltip || name;
     r.appendChild(l);
-    const dimIfAuto = () => r.classList.toggle("dim", AUTO_OWNED.has(name) && !!val("auto_settings"));
+    const dimIfAuto = () => r.classList.toggle("dim", autoOwned.has(name) && !!val("auto_settings"));
     // A setting fed by a wire takes the wire's value; the control would mislead.
     const wireTag = document.createElement("span");
     wireTag.className = "llmp-wire";
@@ -340,6 +371,15 @@ function buildRow(node, [name, label, kind, chips], val, set, refreshers, api) {
             refreshers.push(() => s.classList.toggle("on", val(name) === v));
         }
         r.appendChild(ch);
+    } else if (kind === "line") {
+        // One-line text (the API node's server URL and stop sequences).
+        r.classList.add("wide");
+        const nb = document.createElement("input");
+        nb.className = "llmp-nb"; nb.type = "text"; nb.style.textAlign = "left"; nb.style.padding = "3px 6px";
+        nb.placeholder = chips || "";
+        nb.addEventListener("change", () => set(name, nb.value.trim()));
+        r.appendChild(nb);
+        refreshers.push(() => { if (document.activeElement !== nb) nb.value = val(name) ?? ""; });
     } else if (kind === "text") {
         r.classList.add("col");
         const ta = document.createElement("textarea");
