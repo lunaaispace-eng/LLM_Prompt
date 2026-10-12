@@ -686,6 +686,63 @@ function openEditor(node) {
     ta.focus();
 }
 
+// Every API node saved before 2026-08-31 (all of Peter's, checked 2026-10-12)
+// stores its first 25 values in the order of the time, with min_p and
+// repetition_penalty: 740802c removed both from the middle of the list and
+// every later value has loaded one or two places off since (validate got the
+// timeout, 120, and ComfyUI refuses the run). Later widgets were appended
+// after those 25 by re-saves. The old order is recognised by position 17: a
+// number (frequency_penalty) where the current order has the stop_sequences
+// text. Values after the first 25 are placed by their type.
+const OLD_PREFIX = ["provider", "model_name", "server_url", "model_filter", "system_prompt",
+    "custom_system_prompt", "user_prompt", "output_format", "split_output", "max_tokens", "seed",
+    "control_after_generate", "temperature", "top_p", "top_k", "min_p", "presence_penalty",
+    "frequency_penalty", "repeat_penalty", "stop_sequences", "gemini_thinking_budget",
+    "gemini_thinking_level", "enable_caching", "disable_thinking", "timeout_seconds"];
+const EFFORTS = new Set(["none", "low", "medium", "high", "xhigh", "default"]);
+// Defaults of the widgets added after the old 25 (the Python schema's).
+const LATER_DEFAULTS = { vision_mp: 0, validate: "off", auto_settings: true, reasoning_effort: "low",
+    video_input_mode: "auto", video_sample_frames: 32, gemini_video_fps: 2.0 };
+
+function repairOldLayout(node, values) {
+    if (!Array.isArray(values) || values.length < 25) return false;
+    if (typeof values[17] === "string" || typeof values[19] !== "string") return false;
+    const set = (name, v) => { const w = widget(node, name); if (w && v !== undefined && v !== null) w.value = v; };
+    // Widgets the old order had no value for got stray ones from the positional
+    // load (validate = 120): back to their defaults first.
+    for (const [name, v] of Object.entries(LATER_DEFAULTS)) set(name, v);
+    OLD_PREFIX.forEach((name, i) => set(name, values[i]));
+    const rest = values.slice(25);
+    let numbers = 0;
+    for (const v of rest) {
+        if (typeof v === "boolean") set("auto_settings", v);
+        else if (v === "off" || v === "h3") set("validate", v);
+        else if (EFFORTS.has(v)) set("reasoning_effort", v);
+        else if (["auto", "native_video", "sampled_frames"].includes(v)) set("video_input_mode", v);
+        else if (typeof v === "number") {
+            // vision_mp comes first; after the video mode: sample frames, then fps.
+            const name = ["vision_mp", "video_sample_frames", "gemini_video_fps"][numbers++];
+            if (name) set(name, v);
+        }
+    }
+    console.log(`[LLM_Prompt_API] node ${node.id}: values saved in the pre-2026-08-31 order were placed by name.`);
+    return true;
+}
+
+// A node saved before the quality levels (every saved API node on 2026-10-12:
+// layouts of 25-30 values) has no quality value; the widget would keep its
+// default "fast" and override the saved reasoning settings. "custom" runs it
+// exactly as saved (the GGUF node's rule, llm_prompt_compat.js).
+function markCustomIfNoQuality(node, info) {
+    const w = widget(node, "quality");
+    if (!w) return;
+    const named = info?.widgets_values_named;
+    if (named && typeof named === "object") { if (!("quality" in named)) w.value = "custom"; return; }
+    const serial = node.widgets.filter((x) => x.serialize !== false && x.options?.serialize !== false);
+    const idx = serial.indexOf(w);
+    if (!Array.isArray(info?.widgets_values) || info.widgets_values.length <= idx) w.value = "custom";
+}
+
 // A size saved before the face (every widget visible) leaves the node far too
 // tall; on load it shrinks to fit (the GGUF node's fix, 2026-10-10).
 function shrinkIfOversized(node) {
@@ -805,9 +862,15 @@ app.registerExtension({
         };
 
         const onConfigure = P.onConfigure;
-        P.onConfigure = function () {
+        P.onConfigure = function (info) {
             const r = onConfigure?.apply(this, arguments);
             this.__llmaFresh = false;
+            try {
+                // Also with named values: a re-save stored the shifted values under
+                // the wrong names, so the positional list is the reliable one.
+                repairOldLayout(this, info?.widgets_values);
+                markCustomIfNoQuality(this, info);
+            } catch (e) { console.error("[LLM_Prompt_API] old workflow load", e); }
             renderFace(this);
             setTimeout(() => refreshInfo(this), 200);
             setTimeout(() => {
