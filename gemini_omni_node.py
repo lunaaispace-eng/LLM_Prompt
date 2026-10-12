@@ -59,9 +59,10 @@ from .llm_prompt_api_node import _resolve_api_key, _comfyui_root
 
 _BASE = "https://generativelanguage.googleapis.com/v1beta"
 
-# Both appear on ListModels for this key with generateContent listed — which is
-# wrong; both reject generateContent. 1.1 first: it is the GA model.
-OMNI_MODELS = ["gemini-omni-1.1-flash", "gemini-omni-flash-preview"]
+# ListModels lists it with generateContent — which is wrong; it rejects
+# generateContent. gemini-omni-flash-preview removed 2026-10-12: it shuts down
+# 2026-10-22 with 1.1 as its replacement (Gemini API deprecations page).
+OMNI_MODELS = ["gemini-omni-1.1-flash"]
 ASPECT_RATIOS = ["16:9", "9:16"]
 RESOLUTIONS = ["360p", "720p", "1080p", "4k"]
 MODES = ["generate", "edit video", "extend video"]

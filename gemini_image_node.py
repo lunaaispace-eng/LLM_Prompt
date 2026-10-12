@@ -90,7 +90,8 @@ _SAFETY_BLOCK_NONE = [
 
 SAFETY_MODES = ["block_none", "google_default"]
 
-THINKING_LEVELS = ["auto", "minimal", "high"]
+# "medium" exists only on Nano Banana 2.1 (default there); see CAPS "levels".
+THINKING_LEVELS = ["auto", "minimal", "high", "medium"]
 
 RESPONSE_MODES = ["image + text", "image only", "text only"]
 
@@ -99,17 +100,20 @@ FALLBACK_IMAGE_MODELS = [
     "gemini-3-pro-image",
     "gemini-3-pro-image-preview",
     "nano-banana-pro-preview",
+    "gemini-nano-banana-2.1",
     "gemini-3.1-flash-image",
     "gemini-3.1-flash-image-preview",
     "gemini-3.1-flash-lite-image",
     "gemini-2.5-flash-image",
 ]
 
-# Preference order for model="auto" — best first.
+# Preference order for model="auto" — best first. Nano Banana 2.1 replaces
+# 3.1 Flash Image (deprecated, deprecations page 2026-10-12).
 AUTO_PREFERENCE = [
     "gemini-3-pro-image",
     "nano-banana-pro-preview",
     "gemini-3-pro-image-preview",
+    "gemini-nano-banana-2.1",
     "gemini-3.1-flash-image",
     "gemini-3.1-flash-image-preview",
     "gemini-3.1-flash-lite-image",
@@ -142,6 +146,14 @@ CAPS = {
         # (10 objects + 4 character + 3 style) -- those are budgets WITHIN
         # the 14, not additive. Affects the warning text only.
         "sizes": ["0.5K", "1K", "2K", "4K"], "max_refs": 14, "thinking": "level",
+        "levels": ["minimal", "high"],
+    },
+    # Documented 2026-10-12: no 0.5K; thinking minimal / medium / high, default
+    # medium, cannot be disabled.
+    "gemini-nano-banana-2": {
+        "label": "Nano Banana 2.1",
+        "sizes": ["1K", "2K", "4K"], "max_refs": 14, "thinking": "level",
+        "levels": ["minimal", "medium", "high"],
     },
     "gemini-2.5-flash-image": {
         "label": "Nano Banana (legacy)",
@@ -364,15 +376,16 @@ class GeminiImageNode(io.ComfyNode):
                 io.Combo.Input(
                     "model", options=model_options, default="auto",
                     tooltip="Live list from ListModels on your key, cached 24h. "
-                            "'auto' picks the best installed: 3 Pro Image > 3.1 Flash "
-                            "Image > 3.1 Flash Lite > 2.5 Flash Image."),
+                            "'auto' picks the best installed: 3 Pro Image > Nano Banana "
+                            "2.1 > 3.1 Flash Image > 3.1 Flash Lite > 2.5 Flash Image."),
                 io.Combo.Input(
                     "aspect_ratio", options=ASPECT_RATIOS, default="auto",
                     tooltip="'auto' lets the model decide (and inherit the aspect of a "
                             "reference image when editing)."),
                 io.Combo.Input(
                     "resolution", options=IMAGE_SIZES, default="auto",
-                    tooltip="1K~1MP, 2K~4MP, 4K~16MP. 0.5K is 3.1 Flash Image only. "
+                    tooltip="1K~1MP, 2K~4MP, 4K~16MP. 0.5K is 3.1 Flash Image only "
+                            "(Nano Banana 2.1 does 1K/2K/4K). "
                             "Nano Banana Pro does 1K/2K/4K; 2.5 Flash Image and 3.1 "
                             "Flash Lite are 1K only — an unsupported size is clamped "
                             "down with a console note instead of failing the run."),
@@ -414,7 +427,8 @@ class GeminiImageNode(io.ComfyNode):
                 io.Int.Input("top_k", default=64, min=1, max=200),
                 io.Combo.Input(
                     "thinking_level", options=THINKING_LEVELS, default="auto",
-                    tooltip="3.1 Flash Image only: 'minimal' (fast) or 'high' (better "
+                    tooltip="Nano Banana 2.1: 'minimal', 'medium' (its default) or 'high'. "
+                            "3.1 Flash Image: 'minimal' (fast) or 'high' (better "
                             "composition). Nano Banana Pro always thinks and ignores "
                             "this; the 1K-only models have no thinking and it is not "
                             "sent to them."),
@@ -507,7 +521,11 @@ class GeminiImageNode(io.ComfyNode):
         # — but it will still EMIT its thought images if you ask for them.
         think_kwargs = {}
         if thinking_level != "auto":
-            if caps["thinking"] == "level":
+            levels = caps.get("levels")
+            if caps["thinking"] == "level" and levels and thinking_level not in levels:
+                notes.append(f"thinking_level {thinking_level} ignored - {model} "
+                             f"accepts {' / '.join(levels)}")
+            elif caps["thinking"] == "level":
                 think_kwargs["thinking_level"] = thinking_level
             else:
                 notes.append(
