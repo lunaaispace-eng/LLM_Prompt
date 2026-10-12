@@ -25,6 +25,7 @@ from contextlib import nullcontext
 import json
 import os
 import re
+import threading
 import time
 import urllib.request
 import urllib.error
@@ -202,6 +203,75 @@ PROVIDERS = {
         "fallback_models": ["<set server_url and refresh>"],
     },
 }
+
+
+# ---------------------------------------------------------------------------
+# Quality levels (plans/api-node-ui.md). A level sets only the reasoning level
+# sent to the provider; sampling stays as auto_settings / the sliders decide.
+# "custom" leaves every widget as it is. Values checked live 2026-10-12:
+# Gemini 3.8-flash and 3.1-pro reject thinking_level "minimal" (the sender
+# falls back to "low"); Grok 4.5-4.7 accept low..xhigh and reject "none".
+# ---------------------------------------------------------------------------
+
+QUALITY_OPTIONS = ["fast", "normal", "quality", "ultra", "custom"]
+_QUALITY_INDEX = {"fast": 0, "normal": 1, "quality": 2, "ultra": 3}
+_QUALITY_EFFORTS = {
+    "gemini": ("minimal", "low", "medium", "high"),
+    "Grok (xAI)": ("low", "medium", "high", "xhigh"),
+    "OpenAI": ("none", "low", "medium", "high"),
+    "Claude (Max)": ("low", "medium", "high", "xhigh"),
+    "Codex (ChatGPT)": ("low", "medium", "high", "xhigh"),
+    "Grok (SuperGrok)": ("low", "medium", "high", "xhigh"),
+}
+
+
+# Gemini models that reject thinking_level "minimal" (live 2026-10-12, plus the
+# names Google routes to them). The sender adds any model it finds at run time.
+_GEMINI_NO_MINIMAL = {"gemini-3.8-flash", "gemini-3.7-flash", "gemini-flash-latest",
+                      "gemini-3.1-pro-preview", "gemini-3.1-pro-preview-customtools",
+                      "gemini-pro-latest"}
+
+
+def _quality_settings(provider: str, model_name: str, quality: str) -> dict | None:
+    """What a quality level overrides for this provider and model.
+
+    None = "custom" (keep the widgets). {} = the level has nothing to set here
+    (Gemma, an unknown Custom server). Otherwise one of `reasoning_effort` /
+    `gemini_thinking_level`.
+    """
+    idx = _QUALITY_INDEX.get((quality or "custom").lower())
+    if idx is None:
+        return None
+    cfg = PROVIDERS.get(provider) or {}
+    name = (model_name or "").lower()
+    if cfg.get("native_protocol") == "gemini":
+        if "gemma" in name:
+            return {}
+        # A model without "minimal" would run Fast and Normal both at "low";
+        # shift up instead: low / medium / high / high.
+        levels = _QUALITY_EFFORTS["gemini"]
+        if name in _GEMINI_NO_MINIMAL:
+            levels = levels[1:] + levels[-1:]
+        return {"gemini_thinking_level": levels[idx]}
+    efforts = _QUALITY_EFFORTS.get(provider)
+    return {"reasoning_effort": efforts[idx]} if efforts else {}
+
+
+# Last-run figures for the node face (time, tokens, served model, reasoning).
+# Each sender fills it; write_prompt_api clears it first. ComfyUI runs one
+# prompt at a time, the thread-local only keeps luna_writer_api callers apart.
+_RUN = threading.local()
+
+
+def _run_stats() -> dict:
+    stats = getattr(_RUN, "stats", None)
+    if stats is None:
+        stats = _RUN.stats = {}
+    return stats
+
+
+def _note_run(**fields) -> None:
+    _run_stats().update({k: v for k, v in fields.items() if v not in (None, "")})
 
 
 # Patterns to identify NON-chat models we should hide from the dropdown
@@ -856,6 +926,7 @@ def _send_gemini_native(
     timeout: float,
     video=None,
     video_fps: float = 2.0,
+    include_thoughts: bool = False,
 ) -> str:
     """Send a chat request via google-genai SDK.
 
@@ -972,9 +1043,10 @@ def _send_gemini_native(
         # No true "off" on Gen-3; "low" is the nearest to disabled.
         _level = thinking_level if (thinking_level and thinking_level != "None") else "low"
         try:
-            config_kwargs["thinking_config"] = types.ThinkingConfig(
-                thinking_level=_level,
-            )
+            think = {"thinking_level": _level}
+            if include_thoughts:
+                think["include_thoughts"] = True
+            config_kwargs["thinking_config"] = types.ThinkingConfig(**think)
         except Exception:
             # SDK too old for thinking_level — omit the config entirely, which
             # every model accepts, rather than sending a budget it may reject.
@@ -1001,8 +1073,6 @@ def _send_gemini_native(
     if cached_content_name:
         config_kwargs["cached_content"] = cached_content_name
 
-    gen_config = types.GenerateContentConfig(**config_kwargs)
-
     start = time.perf_counter()
     try:
         media = (gemini_video_part(client, types, video, video_fps, timeout)
@@ -1013,11 +1083,24 @@ def _send_gemini_native(
                     contents[-1].parts.append(video_part)
                 else:
                     contents.append(types.Content(role="user", parts=[video_part]))
-            response = client.models.generate_content(
-                model=model,
-                contents=contents,
-                config=gen_config,
-            )
+            try:
+                response = client.models.generate_content(
+                    model=model, contents=contents,
+                    config=types.GenerateContentConfig(**config_kwargs))
+            except Exception as e:
+                # The Fast level asks for "minimal", which 3.8-flash and
+                # 3.1-pro reject (live 2026-10-12): retry once at "low".
+                if "MINIMAL is not supported" not in str(e):
+                    raise
+                print(f"[LLM_Prompt_API] {model} has no thinking_level minimal; using low.")
+                _GEMINI_NO_MINIMAL.add(model.lower())
+                _note_run(level="low")
+                tc = config_kwargs["thinking_config"]
+                config_kwargs["thinking_config"] = types.ThinkingConfig(
+                    thinking_level="low", include_thoughts=tc.include_thoughts)
+                response = client.models.generate_content(
+                    model=model, contents=contents,
+                    config=types.GenerateContentConfig(**config_kwargs))
     except Exception as e:
         # SDK exception messages are usually descriptive enough
         raise RuntimeError(f"Gemini SDK error: {e}") from None
@@ -1025,16 +1108,24 @@ def _send_gemini_native(
         client.close()
     elapsed = max(time.perf_counter() - start, 1e-6)
 
-    # Extract text from response
-    result_text = ""
-    if response.text:
-        result_text = response.text
-    elif response.candidates:
-        for cand in response.candidates:
-            if cand.content and cand.content.parts:
-                for p in cand.content.parts:
-                    if hasattr(p, "text") and p.text:
+    # Extract text from response. Thought parts (include_thoughts) go to the
+    # run stats, never into the prompt.
+    result_text, thoughts = "", ""
+    for cand in (response.candidates or [])[:1]:
+        if cand.content and cand.content.parts:
+            for p in cand.content.parts:
+                if getattr(p, "text", None):
+                    if getattr(p, "thought", False):
+                        thoughts += p.text
+                    else:
                         result_text += p.text
+    finish = ""
+    try:
+        finish = str(response.candidates[0].finish_reason or "").replace("FinishReason.", "").lower()
+    except Exception:
+        pass
+    _note_run(seconds=round(elapsed, 2), served=getattr(response, "model_version", None) or model,
+              finish=finish, reasoning=thoughts.strip())
 
     # Log usage like Luna Core does
     try:
@@ -1045,6 +1136,7 @@ def _send_gemini_native(
         tt = getattr(usage, "thoughts_token_count", None) or 0
         cache_note = f", cached={cached}" if cached else ""
         think_note = f", thoughts={tt}" if tt else ""
+        _note_run(tokens_in=pt, tokens_out=ct, reasoning_tokens=tt or None)
         print(
             f"[LLM_Prompt_API] Gemini | {model} | "
             f"prompt={pt}, completion={ct}{cache_note}{think_note}, "
@@ -1204,6 +1296,12 @@ def _send_chat_completion(
         f"[LLM_Prompt_API] {provider} | {model} | "
         f"prompt={pt}, completion={ct}{cache_note}, time={elapsed:.2f}s"
     )
+    details = usage.get("completion_tokens_details")
+    reasoning = msg.get("reasoning_content") or msg.get("reasoning") or ""
+    _note_run(seconds=round(elapsed, 2), tokens_in=pt, tokens_out=ct, served=data.get("model") or model,
+              finish=str(first.get("finish_reason") or ""),
+              reasoning_tokens=details.get("reasoning_tokens") if isinstance(details, dict) else None,
+              reasoning=reasoning.strip() if isinstance(reasoning, str) else "")
 
     return str(content or "").strip()
 
@@ -1326,8 +1424,12 @@ def _send_claude_cli(model: str, messages: list[dict], timeout: float, reasoning
     if result.get("is_error"):
         raise RuntimeError(f"Claude CLI: {result.get('result')}")
     used = ", ".join((result.get("modelUsage") or {}).keys()) or model
+    elapsed = time.perf_counter() - t0
     print(f"[LLM_Prompt_API] Claude (Max) | {used} | {len(images)} image(s) | "
-          f"time={time.perf_counter() - t0:.2f}s (api {result.get('duration_api_ms', 0) / 1000:.1f}s)")
+          f"time={elapsed:.2f}s (api {result.get('duration_api_ms', 0) / 1000:.1f}s)")
+    u = result.get("usage") or {}
+    _note_run(seconds=round(elapsed, 2), served=used, tokens_in=u.get("input_tokens"),
+              tokens_out=u.get("output_tokens"))
     return result.get("result") or ""
 
 
@@ -1355,8 +1457,10 @@ def _send_codex_cli(model: str, messages: list[dict], timeout: float, reasoning_
     if not answer:
         raise RuntimeError(f"Codex CLI returned nothing (exit {p.returncode}): "
                            f"{(p.stderr or p.stdout)[-600:]}")
+    elapsed = time.perf_counter() - t0
     print(f"[LLM_Prompt_API] Codex (ChatGPT) | {model} | {len(images)} image(s) | "
-          f"time={time.perf_counter() - t0:.2f}s")
+          f"time={elapsed:.2f}s")
+    _note_run(seconds=round(elapsed, 2), served=model)
     return answer
 
 
@@ -1424,8 +1528,10 @@ def _send_grok_cli(model: str, messages: list[dict], timeout: float, reasoning_e
     answer = (payload.get("text") or "").strip()
     if not answer:
         raise RuntimeError(f"Grok CLI returned no text (stopReason={payload.get('stopReason')}).")
+    elapsed = time.perf_counter() - t0
     print(f"[LLM_Prompt_API] Grok (SuperGrok) | {model} | {note or 'text only'} | "
-          f"time={time.perf_counter() - t0:.2f}s")
+          f"time={elapsed:.2f}s")
+    _note_run(seconds=round(elapsed, 2), served=model, finish=str(payload.get("stopReason") or ""))
     return answer
 
 
@@ -1484,6 +1590,7 @@ def write_prompt_api(
     video_input_mode: str = "auto",
     video_sample_frames: int = 32,
     gemini_video_fps: float = 2.0,
+    quality: str = "custom",
 ) -> tuple[str, str, str]:
     """The LLM Prompt (API) writer: build the messages, call the provider, clean and split.
 
@@ -1496,12 +1603,23 @@ def write_prompt_api(
     canvas block; no fallback to the images' size is made here. video: a VIDEO object, for
     native Gemini only; sampled frames go in images_b64, so video_sample_frames (the node's
     sampling setting) is not used here. disable_thinking is accepted and unused, as on the
-    node.
+    node. quality: a level from QUALITY_OPTIONS sets the reasoning level over the widgets;
+    "custom" (the default here, so luna_writer_api callers are unchanged) keeps them.
+    Figures of the run land in _run_stats() for the node face.
     """
     cfg, native_video = _video_route(provider, model_name, video, video_input_mode)
     if video is not None and not native_video:
         raise ValueError("write_prompt_api takes `video` only for native Gemini; "
                          "send sampled frames as images_b64 instead.")
+    _run_stats().clear()
+
+    level = _quality_settings(provider, model_name, quality)
+    if level is not None:
+        reasoning_effort = level.get("reasoning_effort", reasoning_effort)
+        gemini_thinking_level = level.get("gemini_thinking_level", gemini_thinking_level)
+        print(f"[LLM_Prompt_API] quality={quality} -> "
+              + (", ".join(f"{k}={v}" for k, v in level.items()) or "nothing to set for this model"))
+    _note_run(quality=(quality or "custom").lower(), level=", ".join(level.values()) if level else "")
 
     # Official sampling values for the model family, applied server-side on
     # every run. The frontend cannot do this job: a JS preset only fires on a
@@ -1725,6 +1843,7 @@ def write_prompt_api(
             timeout=float(timeout_seconds),
             video=video if native_video else None,
             video_fps=gemini_video_fps,
+            include_thoughts=level is not None,
         )
     else:
         raw = _send_chat_completion(
@@ -1923,6 +2042,15 @@ class LLMPromptAPINode(io.ComfyNode):
                              tooltip="Maximum evenly spaced still frames in sampled_frames mode. Separate from the target clip's frames validation input. Higher counts increase request size and cost."),
                 io.Float.Input("gemini_video_fps", default=2.0, min=0.1, max=24.0, step=0.1,
                                tooltip="Gemini native video sampling rate, in frames per second. Audio remains in the uploaded clip. Higher rates increase token use; ignored in sampled_frames mode."),
+                # Last in the list: saved workflows store widget values by
+                # position. Optional so old API-format prompts still validate;
+                # a missing value runs as "custom" (the execute() default).
+                io.Combo.Input("quality", options=QUALITY_OPTIONS, default="fast", optional=True,
+                               tooltip="Prompt quality: sets the reasoning level the provider gets. "
+                                       "fast = the lowest (Gemini minimal or low, OpenAI none, Grok low). "
+                                       "normal / quality / ultra = more reasoning, slower. "
+                                       "custom = use reasoning_effort and gemini_thinking_level as set. "
+                                       "Gemma and Custom servers have no reasoning control."),
             ],
             outputs=[
                 io.String.Output("positive", display_name="positive"),
@@ -1982,6 +2110,7 @@ class LLMPromptAPINode(io.ComfyNode):
         video_input_mode: str = "auto",
         video_sample_frames: int = 32,
         gemini_video_fps: float = 2.0,
+        quality: str = "custom",
     ):
         # Provider and video-mode errors first, as before the writer core existed.
         _cfg, native_video = _video_route(provider, model_name, video, video_input_mode)
@@ -2029,6 +2158,7 @@ class LLMPromptAPINode(io.ComfyNode):
             server_url=server_url, validate=validate, frames=frames,
             video=video if native_video else None, video_input_mode=video_input_mode,
             video_sample_frames=video_sample_frames, gemini_video_fps=gemini_video_fps,
+            quality=quality,
         )
         # Sampled frames are this node's work, so their log line is added here,
         # ahead of the validation report, as before.
@@ -2036,7 +2166,15 @@ class LLMPromptAPINode(io.ComfyNode):
             print(f"[LLM_Prompt_API] {sampled_log}")
             log = "\n".join(part for part in (sampled_log, log) if part)
 
-        return io.NodeOutput(positive, negative, log)
+        # The node face reads these in onExecuted: the last-run line and its
+        # "view thinking" link.
+        stats = dict(_run_stats())
+        reasoning = stats.pop("reasoning", "")
+        stats.update(provider=provider, model=model_name)
+        ui = {"llm_stats": [stats]}
+        if reasoning:
+            ui["llm_reasoning"] = [reasoning]
+        return io.NodeOutput(positive, negative, log, ui=ui)
 
 
 # ---------------------------------------------------------------------------

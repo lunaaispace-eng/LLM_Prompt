@@ -239,7 +239,8 @@ class WriterApiCoreTest(unittest.TestCase):
             sampling={"temperature": 0.7, "top_p": 0.9, "top_k": 0, "presence_penalty": 0.0,
                       "frequency_penalty": 0.0, "max_tokens": 4096, "seed": 0},
             output_format="text", stop_sequences=[], thinking_budget=5, thinking_level="high",
-            cached_content_name=None, timeout=120.0, video=None, video_fps=2.0))
+            cached_content_name=None, timeout=120.0, video=None, video_fps=2.0,
+            include_thoughts=False))
 
     def test_output_formats_json_and_list(self):
         for fmt, tail in (("json", "valid JSON object"), ("list", "numbered list")):
@@ -332,13 +333,14 @@ class WriterApiCoreTest(unittest.TestCase):
             "frequency_penalty", "seed", "stop_sequences", "gemini_thinking_budget",
             "gemini_thinking_level", "enable_caching", "disable_thinking", "timeout_seconds",
             "auto_settings", "reasoning_effort", "server_url", "validate", "frames", "video",
-            "video_input_mode", "video_sample_frames", "gemini_video_fps"])
+            "video_input_mode", "video_sample_frames", "gemini_video_fps", "quality"])
         self.assertTrue(all(p.kind is inspect.Parameter.KEYWORD_ONLY for p in params.values()))
         schema = self._schema()
         widgets = {i.id: getattr(i, "default", None) for i in schema.inputs}
         compared = []
         for name, p in params.items():
-            if p.default is inspect.Parameter.empty or widgets.get(name) is None:
+            # quality: "fast" for a new node, "custom" for callers that pass nothing.
+            if p.default is inspect.Parameter.empty or widgets.get(name) is None or name == "quality":
                 continue
             with self.subTest(name=name):
                 self.assertEqual(p.default, widgets[name])
@@ -355,7 +357,7 @@ class WriterApiCoreTest(unittest.TestCase):
             "stop_sequences", "gemini_thinking_budget", "gemini_thinking_level", "enable_caching",
             "disable_thinking", "timeout_seconds", "vision_mp", "validate", "auto_settings",
             "reasoning_effort", "style", "context", "width", "height", "image", "video", "frames",
-            "video_input_mode", "video_sample_frames", "gemini_video_fps"])
+            "video_input_mode", "video_sample_frames", "gemini_video_fps", "quality"])
 
 
 if __name__ == "__main__":
