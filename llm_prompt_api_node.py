@@ -136,6 +136,19 @@ PROVIDERS = {
             "gpt-5.6-luna",   # cheapest / fastest
         ],
     },
+    # Local models through LM Studio's own REST API (Peter, 2026-10-12: "Lm studio
+    # is used for Local Models in Luna Bridge Claude so the server is ok, we can
+    # use a function LM Studio has to unload the model"). Native /api/v1, not
+    # the OpenAI-compatible /v1: it reports load state, reasoning options and
+    # whether a request loaded the model, which the unload rule needs.
+    "LM Studio": {
+        "base_url": "http://localhost:1234",
+        "env_var": ["LM_API_TOKEN"],  # only when the server requires a token
+        "needs_auth": False,
+        "live_models": True,
+        "native_protocol": "lmstudio",
+        "fallback_models": ["<start LM Studio's server and refresh>"],
+    },
     # ---- Subscription routes (Peter, 2026-10-04: "not on API but on my Max
     # sub", "do the same for codex", "and Grok sub cli"). Each runs the
     # vendor's own CLI headless on its stored login - the sanctioned way to use
@@ -194,6 +207,24 @@ PROVIDERS = {
             "grok-4.5",
         ],
     },
+    "Gemini (Antigravity)": {
+        # `agy` (Antigravity CLI) on Peter's Gemini login (Peter, 2026-10-12:
+        # "yes"). The npm `gemini` CLI has no login on this machine. agy has
+        # no stdin prompt, so the request goes in prompt.md in a throwaway
+        # folder with the images and audio, and agy runs in read-only plan
+        # mode. Its models carry the reasoning level in the name
+        # (gemini-3.8-flash-low); the node appends it. Takes audio (TESTED).
+        "base_url": "",
+        "env_var": None,
+        "needs_auth": False,
+        "live_models": False,
+        "native_protocol": "agy_cli",
+        "fallback_models": [
+            "gemini-3.8-flash",
+            "gemini-3.6-flash",
+            "gemini-3.1-pro",
+        ],
+    },
     "Custom": {
         "base_url": "",  # user supplies via the server_url widget
         "env_var": None,
@@ -221,6 +252,10 @@ _QUALITY_EFFORTS = {
     "Claude (Max)": ("low", "medium", "high", "xhigh"),
     "Codex (ChatGPT)": ("low", "medium", "high", "xhigh"),
     "Grok (SuperGrok)": ("low", "medium", "high", "xhigh"),
+    # LM Studio models with only off / on get "on" for the three thinking
+    # levels (the sender maps it from the model's own options).
+    "LM Studio": ("off", "low", "medium", "high"),
+    "Gemini (Antigravity)": ("low", "medium", "high", "high"),
 }
 
 
@@ -346,6 +381,8 @@ def _fetch_models_from_server(base_url: str, api_key: str | None, native: str = 
     """
     if not base_url:
         return []
+    if native == "lmstudio":
+        return [m["key"] for m in _lmstudio_models(base_url, api_key) if m.get("type") == "llm"]
     try:
         if native == "gemini":
             # Native Gemini models endpoint
@@ -409,6 +446,55 @@ def _fetch_models_from_server(base_url: str, api_key: str | None, native: str = 
             if isinstance(name, str) and name:
                 names.append(name)
     return names
+
+
+def _lmstudio_base(base_url: str) -> str:
+    """LM Studio's root URL; a pasted OpenAI-style .../v1 address is accepted too."""
+    base = (base_url or PROVIDERS["LM Studio"]["base_url"]).rstrip("/")
+    return base[:-3] if base.endswith("/v1") else base
+
+
+def _lmstudio_request(base_url: str, path: str, api_key: str | None, body: dict | None = None,
+                      timeout: float = 5.0) -> dict:
+    url = _lmstudio_base(base_url) + path
+    req = urllib.request.Request(url, data=json.dumps(body).encode() if body is not None else None,
+                                 method="POST" if body is not None else "GET")
+    req.add_header("Content-Type", "application/json")
+    if api_key:
+        req.add_header("Authorization", f"Bearer {api_key}")
+    try:
+        with urllib.request.urlopen(req, timeout=timeout) as resp:
+            return json.loads(resp.read().decode("utf-8"))
+    except urllib.error.HTTPError as e:
+        try:
+            msg = e.read().decode("utf-8", errors="replace")[:500]
+        except Exception:
+            msg = ""
+        raise RuntimeError(f"LM Studio HTTP {e.code} on {path}: {msg or e.reason}") from None
+    except (urllib.error.URLError, ConnectionError, TimeoutError) as e:
+        raise RuntimeError(
+            f"LM Studio's server does not answer at {_lmstudio_base(base_url)} ({getattr(e, 'reason', e)}). "
+            f"Start it in LM Studio (Developer > Start server) or run `lms server start`.") from None
+
+
+def _lmstudio_models(base_url: str, api_key: str | None = None) -> list[dict]:
+    """GET /api/v1/models; [] when the server is not running. The keys of the
+    last answer are kept on disk so a model picked while LM Studio was down at
+    ComfyUI start still passes validation."""
+    try:
+        models = _lmstudio_request(base_url, "/api/v1/models", api_key, timeout=3.0).get("models") or []
+    except Exception:
+        return []
+    keys = sorted(m["key"] for m in models if m.get("type") == "llm" and m.get("key"))
+    if keys and _check_load().get("_lmstudio", {}).get("models") != keys:
+        with _model_check_lock:
+            data = _check_load()
+            data["_lmstudio"] = {"models": keys, "at": time.time()}
+            try:
+                _MODEL_CHECK_FILE.write_text(json.dumps(data, indent=1, sort_keys=True), encoding="utf-8")
+            except Exception:
+                pass
+    return models
 
 
 def _apply_model_pattern(provider: str, models: list[str]) -> list[str]:
@@ -581,8 +667,10 @@ def _get_models_for_provider(
     if not raw_models:
         raw_models = list(cfg.get("fallback_models") or [])
 
-    # Filter out non-chat models (embeddings, image-gen, TTS, etc.)
-    filtered = [m for m in raw_models if not _NON_CHAT_PATTERNS.search(m)]
+    # Filter out non-chat models (embeddings, image-gen, TTS, etc.). LM Studio
+    # already lists only its LLMs, and local names often carry "instruct".
+    filtered = (list(raw_models) if cfg.get("native_protocol") == "lmstudio"
+                else [m for m in raw_models if not _NON_CHAT_PATTERNS.search(m)])
     if not filtered:
         # If the filter ate everything (rare), keep the raw list so user can see something
         filtered = raw_models
@@ -1075,6 +1163,7 @@ def _send_gemini_native(
     video=None,
     video_fps: float = 2.0,
     include_thoughts: bool = False,
+    audio: list[bytes] | None = None,
 ) -> str:
     """Send a chat request via google-genai SDK.
 
@@ -1137,6 +1226,15 @@ def _send_gemini_native(
                             pass
         if parts:
             contents.append(types.Content(role=gemini_role, parts=parts))
+
+    # Audio clips (WAV) ride inline with the user turn. TESTED 2026-10-12:
+    # gemini-3.8-flash quoted a spoken test sentence exactly.
+    for clip in audio or []:
+        part = types.Part(inline_data=types.Blob(mime_type="audio/wav", data=clip))
+        if contents and contents[-1].role == "user":
+            contents[-1].parts.append(part)
+        else:
+            contents.append(types.Content(role="user", parts=[part]))
 
     # Build the SDK config — match Luna Core's simple pattern
     config_kwargs: dict[str, Any] = {}
@@ -1684,9 +1782,173 @@ def _send_grok_cli(model: str, messages: list[dict], timeout: float, reasoning_e
     return answer
 
 
+def _send_agy_cli(model: str, messages: list[dict], timeout: float, reasoning_effort: str,
+                  audio: list[tuple[bytes, str]] | None = None) -> str:
+    """Antigravity CLI (`agy`) headless on Peter's Gemini login. TESTED 2026-10-12: it reads
+    prompt.md, looks at the images and listens to the audio in its folder, in plan mode."""
+    import base64 as _b64
+    exe = _cli_exe("agy", [r"D:\CLI-Data\agy\agy.exe"])
+    system, text, images = _cli_split_messages(messages)
+    # The level rides in the model name: gemini-3.8-flash-low / -medium / -high.
+    # 3.1 Pro has only low and high.
+    effort = {"none": "low", "low": "low", "medium": "medium", "high": "high",
+              "xhigh": "high", "max": "high"}.get((reasoning_effort or "").lower(), "low")
+    base = re.sub(r"-(low|medium|high)$", "", model)
+    if "pro" in base and effort == "medium":
+        effort = "high"
+    slug = f"{base}-{effort}"
+    with _cli_workdir() as wd:
+        names = []
+        for i, b in enumerate(images):
+            (Path(wd) / f"image_{i:02d}.png").write_bytes(_b64.b64decode(b))
+            names.append(f"image_{i:02d}.png")
+        for i, (data, ext) in enumerate(audio or []):
+            (Path(wd) / f"audio_{i:02d}.{ext}").write_bytes(data)
+            names.append(f"audio_{i:02d}.{ext}")
+        body = text or "Describe a scene vividly."
+        if system:
+            body = f"SYSTEM INSTRUCTIONS:\n{system}\n\n---\n\n{body}"
+        if names:
+            body += "\n\nATTACHED FILES (in this folder): " + ", ".join(names)
+        (Path(wd) / "prompt.md").write_text(body, encoding="utf-8")
+        cmd = [exe, "-p",
+               "Read prompt.md in the current folder and follow it exactly. Look at and listen to the "
+               "attached files it names. Do not write, edit or run anything. Reply with only the final "
+               "answer text.",
+               "--mode", "plan", "--dangerously-skip-permissions", "--model", slug,
+               "--output-format", "json", "--print-timeout", f"{int(timeout)}s"]
+        t0 = time.perf_counter()
+        p = _cli_run(cmd, input_text=None, cwd=wd, timeout=timeout + 15)
+    try:
+        payload = json.loads(p.stdout.strip().splitlines()[-1])
+    except Exception:
+        raise RuntimeError(f"Antigravity CLI returned no JSON (exit {p.returncode}): "
+                           f"{(p.stderr or p.stdout)[-600:]}") from None
+    answer = (payload.get("response") or "").strip()
+    if payload.get("status") != "SUCCESS" or not answer:
+        raise RuntimeError(f"Antigravity CLI: status {payload.get('status')}: {(p.stderr or p.stdout)[-400:]}")
+    elapsed = time.perf_counter() - t0
+    u = payload.get("usage") or {}
+    print(f"[LLM_Prompt_API] Gemini (Antigravity) | {slug} | {len(names)} file(s) | time={elapsed:.2f}s")
+    _note_run(seconds=round(elapsed, 2), served=slug, tokens_in=u.get("input_tokens"),
+              tokens_out=u.get("output_tokens"), reasoning_tokens=u.get("thinking_tokens") or None)
+    return answer
+
+
+def _send_lmstudio(base_url: str, api_key: str | None, model: str, messages: list[dict],
+                   sampling: dict, timeout: float, reasoning_effort: str, context_length: int,
+                   unload_after_run: bool) -> str:
+    """LM Studio's native chat (POST /api/v1/chat), with the unload rule.
+
+    Unload rule (Peter, 2026-10-12, "yes"): unload only a model this request
+    loaded — the reply carries model_load_time_seconds only then. A model that
+    was already loaded (by Peter or Luna Bridge) is used as it is: no
+    context_length is sent for it, because a different one makes LM Studio
+    load a second copy and evict the first (TESTED 2026-10-12).
+    """
+    info = next((m for m in _lmstudio_models(base_url, api_key) if m.get("key") == model), None)
+    if info is None and not _lmstudio_models(base_url, api_key):
+        _lmstudio_request(base_url, "/api/v1/models", api_key)  # raises the plain "not running" error
+    loaded = bool(info and info.get("loaded_instances"))
+
+    system, text, images = _cli_split_messages(messages)
+    content = [{"type": "text", "content": text or "Describe a scene vividly."}]
+    content += [{"type": "image", "data_url": f"data:image/png;base64,{b}"} for b in images]
+    body: dict[str, Any] = {"model": model, "input": content, "store": False,
+                            "max_output_tokens": int(sampling.get("max_tokens") or 4096)}
+    if system:
+        body["system_prompt"] = system
+    for k in ("temperature", "top_p", "top_k", "min_p", "repeat_penalty"):
+        if k in sampling:
+            body[k] = sampling[k]
+    if body.get("top_k") == 0:
+        body.pop("top_k")
+    if not loaded and context_length and context_length > 0:
+        body["context_length"] = int(context_length)
+
+    # Reasoning: the model's own options decide. Off / on models get "on" for
+    # any thinking level; a model without reasoning gets nothing.
+    allowed = ((info or {}).get("capabilities") or {}).get("reasoning", {}) or {}
+    options = allowed.get("allowed_options") or []
+    e = (reasoning_effort or "").lower()
+    want = {"none": "off", "off": "off", "low": "low", "medium": "medium", "high": "high",
+            "xhigh": "high", "on": "on"}.get(e)
+    if options and want:
+        if want not in options:
+            want = "on" if want != "off" and "on" in options else ("off" if "off" in options else None)
+        if want:
+            body["reasoning"] = want
+
+    t0 = time.perf_counter()
+    data = _lmstudio_request(base_url, "/api/v1/chat", api_key, body, timeout=timeout)
+    elapsed = time.perf_counter() - t0
+    answer, thoughts = "", ""
+    for item in data.get("output") or []:
+        if item.get("type") == "message":
+            answer += item.get("content") or ""
+        elif item.get("type") == "reasoning":
+            thoughts += item.get("content") or ""
+    st = data.get("stats") or {}
+    instance = data.get("model_instance_id") or model
+    load_s = st.get("model_load_time_seconds")
+    unloaded = False
+    if load_s is not None and unload_after_run:
+        try:
+            _lmstudio_request(base_url, "/api/v1/models/unload", api_key, {"instance_id": instance}, timeout=30)
+            unloaded = True
+        except Exception as ex:
+            print(f"[LLM_Prompt_API] LM Studio unload failed: {ex}")
+    state = "unloaded" if unloaded else ("loaded by this run, kept" if load_s is not None else "already loaded, kept")
+    print(f"[LLM_Prompt_API] LM Studio | {instance} | reasoning={body.get('reasoning', '-')} | "
+          f"out={st.get('total_output_tokens')} tok, {st.get('tokens_per_second') or 0:.0f} tok/s | "
+          f"time={elapsed:.2f}s | {state}")
+    _note_run(seconds=round(elapsed, 2), served=instance, tokens_in=st.get("input_tokens"),
+              tokens_out=st.get("total_output_tokens"), reasoning_tokens=st.get("reasoning_output_tokens") or None,
+              tok_s=round(st.get("tokens_per_second") or 0, 1) or None,
+              load_s=round(load_s, 1) if load_s is not None else None,
+              model_state=state, level=body.get("reasoning"), reasoning=thoughts.strip())
+    return answer.strip()
+
+
 # ---------------------------------------------------------------------------
 # The writer core (shared by the node and luna_writer_api)
 # ---------------------------------------------------------------------------
+
+# Routes that take audio (Peter, 2026-10-12: "and dont forget the audio input").
+# TESTED with a spoken clip 2026-10-12: Gemini API and agy yes; Grok API, OpenAI
+# gpt-5.6 / gpt-6 chat and Codex CLI no; LM Studio's chat takes text + image only.
+AUDIO_PROTOCOLS = ("gemini", "agy_cli")
+_AUDIO_MAX_SECONDS = 15 * 60  # Gemini's limit for all audio in one prompt
+
+
+def _audio_to_wav(audio) -> list[bytes]:
+    """A ComfyUI AUDIO dict ({"waveform": [B, C, T], "sample_rate"}) -> 16-bit WAV per batch item."""
+    if not audio or not isinstance(audio, dict) or audio.get("waveform") is None:
+        return []
+    import io as _stdio  # module-level `io` is comfy_api.latest.io
+    import wave
+    import torch
+    wav = audio["waveform"]
+    rate = int(audio.get("sample_rate") or 44100)
+    if getattr(wav, "ndim", 0) == 2:
+        wav = wav.unsqueeze(0)
+    clips = []
+    for item in wav:
+        if item.shape[-1] == 0:
+            continue
+        if item.shape[-1] / rate > _AUDIO_MAX_SECONDS:
+            raise ValueError(f"The audio is {item.shape[-1] / rate / 60:.1f} min long; "
+                             f"Gemini takes at most {_AUDIO_MAX_SECONDS // 60} min per prompt.")
+        pcm = (item.float().clamp(-1, 1) * 32767).round().to(dtype=torch.int16)
+        buf = _stdio.BytesIO()
+        with wave.open(buf, "wb") as w:
+            w.setnchannels(int(pcm.shape[0]))
+            w.setsampwidth(2)
+            w.setframerate(rate)
+            w.writeframes(pcm.t().contiguous().numpy().tobytes())
+        clips.append(buf.getvalue())
+    return clips
+
 
 def _video_route(provider: str, model_name: str, video, video_input_mode: str) -> tuple[dict, bool]:
     """(provider config, native_video). Raises the node's provider / video-mode errors."""
@@ -1740,6 +2002,11 @@ def write_prompt_api(
     video_sample_frames: int = 32,
     gemini_video_fps: float = 2.0,
     quality: str = "custom",
+    min_p: float = 0.0,
+    repeat_penalty: float = 1.0,
+    context_length: int = 8192,
+    unload_after_run: bool = True,
+    audio=None,
 ) -> tuple[str, str, str]:
     """The LLM Prompt (API) writer: build the messages, call the provider, clean and split.
 
@@ -1754,12 +2021,22 @@ def write_prompt_api(
     sampling setting) is not used here. disable_thinking is accepted and unused, as on the
     node. quality: a level from QUALITY_OPTIONS sets the reasoning level over the widgets;
     "custom" (the default here, so luna_writer_api callers are unchanged) keeps them.
-    Figures of the run land in _run_stats() for the node face.
+    Figures of the run land in _run_stats() for the node face. min_p, repeat_penalty,
+    context_length and unload_after_run are LM Studio's. audio: a ComfyUI AUDIO dict, for the
+    routes in AUDIO_PROTOCOLS only.
     """
     cfg, native_video = _video_route(provider, model_name, video, video_input_mode)
     if video is not None and not native_video:
         raise ValueError("write_prompt_api takes `video` only for native Gemini; "
                          "send sampled frames as images_b64 instead.")
+    audio_clips = _audio_to_wav(audio)
+    if audio_clips and cfg.get("native_protocol") not in AUDIO_PROTOCOLS:
+        raise ValueError(
+            f"{provider} cannot take audio. Audio input works with Gemini and Gemini (Antigravity) "
+            "(tested 2026-10-12: Grok, OpenAI, Codex and LM Studio reject it). Pick one of those "
+            "providers or disconnect the audio input.")
+    if audio_clips and "gemma" in (model_name or "").lower():
+        raise ValueError("Gemma on the Gemini API does not take audio; pick a Gemini model.")
     _run_stats().clear()
 
     level = _quality_settings(provider, model_name, quality)
@@ -1775,15 +2052,18 @@ def write_prompt_api(
     # manual dropdown click, so on workflow load the sliders keep stale
     # values — the same bug the local node was fixed for.
     if auto_settings:
-        resolved = _resolve_model_settings((model_name or "").lower())
+        thinking_on = (cfg.get("native_protocol") == "lmstudio" and level is not None
+                       and (quality or "").lower() != "fast")
+        resolved = _resolve_model_settings((model_name or "").lower(), thinking=thinking_on)
         if resolved:
             temperature = resolved["temperature"]
             top_p = resolved["top_p"]
             top_k = resolved["top_k"]
             presence_penalty = resolved["presence_penalty"]
-            # min_p / repetition_penalty are still in the preset table (the
-            # local GGUF node uses them) but this node no longer exposes or
-            # sends them — every cloud provider rejects both.
+            # min_p / repetition_penalty: only LM Studio takes them (every
+            # cloud provider rejects both), so only its sender reads them.
+            min_p = resolved.get("min_p", min_p)
+            repeat_penalty = resolved.get("repetition_penalty", repeat_penalty)
             print(
                 f"[LLM_Prompt_API] auto_settings -> temp={temperature}, top_p={top_p}, "
                 f"top_k={top_k}, presence_penalty={presence_penalty}"
@@ -1965,6 +2245,15 @@ def write_prompt_api(
         _send = {"claude_cli": _send_claude_cli, "codex_cli": _send_codex_cli,
                  "grok_cli": _send_grok_cli}[_cli]
         raw = _send(model_name, messages, float(timeout_seconds), reasoning_effort)
+    elif _cli == "agy_cli":
+        raw = _send_agy_cli(model_name, messages, float(timeout_seconds), reasoning_effort,
+                            audio=[(b, "wav") for b in audio_clips])
+    elif _cli == "lmstudio":
+        raw = _send_lmstudio(
+            base_url=base_url, api_key=resolved_key, model=model_name, messages=messages,
+            sampling={**sampling, "min_p": float(min_p), "repeat_penalty": float(repeat_penalty)},
+            timeout=float(timeout_seconds), reasoning_effort=reasoning_effort,
+            context_length=int(context_length), unload_after_run=bool(unload_after_run))
     elif cfg.get("native_protocol") == "gemini":
         # Caching: create or reuse a cached content resource for the stable prefix
         cache_name: str | None = None
@@ -1993,6 +2282,7 @@ def write_prompt_api(
             video=video if native_video else None,
             video_fps=gemini_video_fps,
             include_thoughts=level is not None,
+            audio=audio_clips,
         )
     else:
         raw = _send_chat_completion(
@@ -2093,6 +2383,8 @@ class LLMPromptAPINode(io.ComfyNode):
                 all_models.extend(_apply_model_pattern(prov_name, live))
             except Exception:
                 pass
+        # LM Studio's last-seen models, for when its server is down at start.
+        all_models.extend((_check_load().get("_lmstudio") or {}).get("models") or [])
         # Dedupe while preserving order
         seen: set[str] = set()
         model_options: list[str] = []
@@ -2115,7 +2407,7 @@ class LLMPromptAPINode(io.ComfyNode):
             inputs=[
                 # ===== BASIC =====
                 io.Combo.Input("provider", options=providers, default=default_provider,
-                               tooltip="Which backend to call. Gemini / Grok = cloud APIs (need an API key in an env var or a .env at the ComfyUI root). Custom = any OpenAI-compatible endpoint (set server_url)."),
+                               tooltip="Which backend to call. Gemini / Grok / OpenAI = cloud APIs (need an API key in an env var or a .env at the ComfyUI root). LM Studio = local models through LM Studio's server (localhost:1234). Claude (Max), Codex (ChatGPT), Grok (SuperGrok), Gemini (Antigravity) = your subscriptions through their CLIs. Custom = any OpenAI-compatible endpoint (set server_url)."),
                 io.Combo.Input("model_name", options=model_options,
                                tooltip="Available models. Gemini fetches your account's accessible models. Grok shows the curated list (no /models endpoint). Refreshes when the provider changes."),
                 io.String.Input("server_url", default="",
@@ -2183,6 +2475,10 @@ class LLMPromptAPINode(io.ComfyNode):
                              tooltip="Image height - drives an aspect-ratio composition profile."),
                 io.Image.Input("image", optional=True, tooltip="Input image for vision-capable models."),
                 io.Video.Input("video", optional=True, tooltip="Gemini native mode sends the clip including its audio. Sampled-frame mode sends still images only."),
+                io.Audio.Input("audio", optional=True,
+                               tooltip="An audio clip for the model to listen to (up to 15 min). Works with "
+                                       "Gemini and Gemini (Antigravity); Grok, OpenAI, Codex, Claude and "
+                                       "LM Studio cannot take audio and stop with a message."),
                 io.Int.Input("frames", optional=True, force_input=True,
                              tooltip="The clip's real frame count, for `validate`. Lets S.SS and the cut times be checked against the actual duration instead of just their format."),
                 io.Combo.Input("video_input_mode", options=["auto", "native_video", "sampled_frames"], default="auto",
@@ -2200,6 +2496,16 @@ class LLMPromptAPINode(io.ComfyNode):
                                        "normal / quality / ultra = more reasoning, slower. "
                                        "custom = use reasoning_effort and gemini_thinking_level as set. "
                                        "Gemma and Custom servers have no reasoning control."),
+                # LM Studio only (2026-10-12). Cloud providers reject min_p and
+                # repeat penalties, so only the LM Studio route sends them.
+                io.Float.Input("min_p", default=0.0, min=0.0, max=1.0, step=0.01, advanced=True,
+                               tooltip="LM Studio only. Minimum token probability. Overridden when auto_settings is ON and the model family is known."),
+                io.Float.Input("repeat_penalty", default=1.0, min=1.0, max=2.0, step=0.01, advanced=True,
+                               tooltip="LM Studio only. 1.0 = off. Overridden when auto_settings is ON and the model family is known."),
+                io.Int.Input("context_length", default=8192, min=0, max=262144, step=1024, advanced=True,
+                             tooltip="LM Studio only: the context to load a model with when this node loads it. 0 = the model's LM Studio default. A model that is already loaded (by you or Luna Bridge) is used as it is - a different value would make LM Studio load a second copy."),
+                io.Boolean.Input("unload_after_run", default=True, advanced=True,
+                                 tooltip="LM Studio only. ON = unload the model after the run, but only if this run loaded it. A model that was already loaded stays loaded."),
             ],
             outputs=[
                 io.String.Output("positive", display_name="positive"),
@@ -2260,6 +2566,11 @@ class LLMPromptAPINode(io.ComfyNode):
         video_sample_frames: int = 32,
         gemini_video_fps: float = 2.0,
         quality: str = "custom",
+        min_p: float = 0.0,
+        repeat_penalty: float = 1.0,
+        context_length: int = 8192,
+        unload_after_run: bool = True,
+        audio=None,
     ):
         # Provider and video-mode errors first, as before the writer core existed.
         _cfg, native_video = _video_route(provider, model_name, video, video_input_mode)
@@ -2307,7 +2618,8 @@ class LLMPromptAPINode(io.ComfyNode):
             server_url=server_url, validate=validate, frames=frames,
             video=video if native_video else None, video_input_mode=video_input_mode,
             video_sample_frames=video_sample_frames, gemini_video_fps=gemini_video_fps,
-            quality=quality,
+            quality=quality, min_p=min_p, repeat_penalty=repeat_penalty,
+            context_length=context_length, unload_after_run=unload_after_run, audio=audio,
         )
         # Sampled frames are this node's work, so their log line is added here,
         # ahead of the validation report, as before.

@@ -240,7 +240,7 @@ class WriterApiCoreTest(unittest.TestCase):
                       "frequency_penalty": 0.0, "max_tokens": 4096, "seed": 0},
             output_format="text", stop_sequences=[], thinking_budget=5, thinking_level="high",
             cached_content_name=None, timeout=120.0, video=None, video_fps=2.0,
-            include_thoughts=False))
+            include_thoughts=False, audio=[]))
 
     def test_output_formats_json_and_list(self):
         for fmt, tail in (("json", "valid JSON object"), ("list", "numbered list")):
@@ -333,7 +333,8 @@ class WriterApiCoreTest(unittest.TestCase):
             "frequency_penalty", "seed", "stop_sequences", "gemini_thinking_budget",
             "gemini_thinking_level", "enable_caching", "disable_thinking", "timeout_seconds",
             "auto_settings", "reasoning_effort", "server_url", "validate", "frames", "video",
-            "video_input_mode", "video_sample_frames", "gemini_video_fps", "quality"])
+            "video_input_mode", "video_sample_frames", "gemini_video_fps", "quality",
+            "min_p", "repeat_penalty", "context_length", "unload_after_run", "audio"])
         self.assertTrue(all(p.kind is inspect.Parameter.KEYWORD_ONLY for p in params.values()))
         schema = self._schema()
         widgets = {i.id: getattr(i, "default", None) for i in schema.inputs}
@@ -356,8 +357,9 @@ class WriterApiCoreTest(unittest.TestCase):
             "seed", "temperature", "top_p", "top_k", "presence_penalty", "frequency_penalty",
             "stop_sequences", "gemini_thinking_budget", "gemini_thinking_level", "enable_caching",
             "disable_thinking", "timeout_seconds", "vision_mp", "validate", "auto_settings",
-            "reasoning_effort", "style", "context", "width", "height", "image", "video", "frames",
-            "video_input_mode", "video_sample_frames", "gemini_video_fps", "quality"])
+            "reasoning_effort", "style", "context", "width", "height", "image", "video", "audio",
+            "frames", "video_input_mode", "video_sample_frames", "gemini_video_fps", "quality",
+            "min_p", "repeat_penalty", "context_length", "unload_after_run"])
 
 
 if __name__ == "__main__":

@@ -79,6 +79,14 @@ const PROVIDERS = {
             "gpt-5.6-luna",
         ],
     },
+    // Local models through LM Studio's server; the list comes from the server route.
+    "LM Studio": {
+        defaultUrl: "http://localhost:1234",
+        liveModels: true,
+        needsAuth: false,
+        envVar: null,
+        fallback: ["<start LM Studio's server and refresh>"],
+    },
     // Subscription CLI routes - no key, no live list (see the Python side).
     "Claude (Max)": {
         defaultUrl: "",
@@ -100,6 +108,13 @@ const PROVIDERS = {
         needsAuth: false,
         envVar: null,
         fallback: ["grok-4.7", "grok-4.7-build-fast", "grok-4.6", "grok-4.5"],
+    },
+    "Gemini (Antigravity)": {
+        defaultUrl: "",
+        liveModels: false,
+        needsAuth: false,
+        envVar: null,
+        fallback: ["gemini-3.8-flash", "gemini-3.6-flash", "gemini-3.1-pro"],
     },
     "Custom": {
         defaultUrl: "",
@@ -128,8 +143,9 @@ function classifyCapability(modelId) {
     return "text";
 }
 
-function shouldShow(modelId, filterMode) {
-    if (NON_CHAT_PATTERN.test(modelId)) return false;  // always hide non-chat
+function shouldShow(modelId, filterMode, provider) {
+    // LM Studio lists only its LLMs, and local names often carry "instruct".
+    if (provider !== "LM Studio" && NON_CHAT_PATTERN.test(modelId)) return false;  // always hide non-chat
     if (filterMode === "all") return true;
     const cap = classifyCapability(modelId);
     if (filterMode === "text only") return cap === "text";
@@ -227,7 +243,7 @@ async function refreshModels(node, preserveValue = false) {
         source = `fallback (server route unavailable — server resolves ${cfg.envVar || "server_url"} from env / .env)`;
     }
 
-    const filtered = all.filter((m) => shouldShow(m, filterMode));
+    const filtered = all.filter((m) => shouldShow(m, filterMode, provider));
     const final = filtered.length > 0 ? filtered : all;
 
     updateModelDropdown(node, final, preserveValue);
