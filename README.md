@@ -37,8 +37,8 @@ support. See [Google's video input documentation](https://ai.google.dev/gemini-a
 | Node | What it does |
 | --- | --- |
 | `LLM Prompt` | Local GGUF prompt generation through `llama-cpp-python`. Supports Qwen, Gemma, Llama-style models, vision projectors, image/reference/video/audio inputs, model-family presets, and model caching. |
-| `LLM Prompt (API)` | API prompt generation through Gemini native REST, xAI Grok, or a custom OpenAI-compatible endpoint. Uses the same prompt presets and output splitter as the local node. |
-| `Gemini Image (API Key)` | Google Gemini image generation and editing (Nano Banana / Nano Banana Pro / Nano Banana 2) using your own `GEMINI_API_KEY`. Live model list, up to 4K, reference-image editing, multimodal text + thought-image outputs. |
+| `LLM Prompt (API)` | Prompt generation with cloud models (Gemini, Grok, OpenAI), local models through LM Studio, your subscriptions (Claude Max, Codex, SuperGrok, Gemini through Antigravity) or any OpenAI-compatible server. Same presets and output splitter as the local node; quality levels, a ⚙ panel, audio input on Gemini. |
+| `Gemini Image (API Key)` | Google Gemini image generation and editing (Nano Banana Pro / Nano Banana 2.1 / Nano Banana 2) using your own `GEMINI_API_KEY`. Live model list, up to 4K, reference-image editing, multimodal text + thought-image outputs. |
 | `Gemini Omni Video (API Key)` | Google Gemini Omni text/image-to-video and video edit over the Interactions API, with your own `GEMINI_API_KEY`. |
 | `GPT Image (API Key)` | OpenAI GPT Image generation and editing (gpt-image-2.5 flare / sunburst, gpt-image-2, 1.x) with your own `OPENAI_API_KEY`: free sizes up to 3840x2160, multi-image edit, MASK inpainting, transparent background. |
 | `Grok Image (API Key)` | Direct xAI Grok Imagine text-to-image using your own `XAI_API_KEY`. |
@@ -234,24 +234,72 @@ Outputs:
 
 ## LLM Prompt API
 
-The API node uses the same prompt library and splitter, but sends requests to remote or local API servers.
+The API node uses the same prompt library and splitter, but sends requests to cloud APIs, your
+subscriptions, or LM Studio.
 
-Built-in providers:
+### The node face
+
+Like the local node, the API node shows a compact face; every other setting lives in the **⚙** panel.
+
+- **Provider buttons** with a dot: green means ready (key found, LM Studio's server up, CLI found).
+- **Model card**: what the model can do (vision, video + audio, reasoning options); for LM Studio also the
+  quant, size and whether it is loaded. **↻** refreshes the model list — for Gemini it also re-checks every
+  listed model (about 20 tiny calls, under $0.01) and hides retired ones.
+- **Prompt quality**: `Fast`, `Normal`, `Quality`, `Ultra` set the reasoning level the provider gets. Each card
+  shows what it sends for the chosen model; a dimmed card is the same as the one before it.
+
+| Provider | Fast | Normal | Quality | Ultra |
+| --- | --- | --- | --- | --- |
+| Gemini 3 (`thinking_level`) | minimal | low | medium | high |
+| Gemini 3.8 Flash / 3.1 Pro (no `minimal`) | low | medium | high | high |
+| Grok (xAI) | low | medium | high | xhigh |
+| OpenAI | none | low | medium | high |
+| LM Studio | off | on | on | on (models that offer only off / on) |
+| Claude Max, Codex, SuperGrok | low | medium | high | xhigh |
+| Gemini (Antigravity) | -low model | -medium | -high | -high |
+
+  `custom` uses `reasoning_effort` / `gemini_thinking_level` as set in ⚙. Gemma and Custom servers have no
+  reasoning control. Measured on gemini-3.8-flash with the Krea preset: Fast 6 s, Normal 17 s, Ultra 22 s.
+- **Last run**: time, tokens, the model that actually answered, and **view thinking** when the provider returns
+  its reasoning (Gemini, LM Studio).
+- **✎ idea** opens a large editor; **ⓘ** shows a short help.
+
+Workflows saved with older versions of the node load with their values in the right settings and run as
+`custom`.
+
+### Providers
 
 | Provider | Endpoint behavior | Auth |
 | --- | --- | --- |
 | `Gemini` | Native Gemini REST through `google-genai`. Default provider. | `GEMINI_API_KEY`, `GOOGLE_API_KEY`, or `GOOGLE_GEMINI_API_KEY`. |
 | `Grok (xAI)` | xAI OpenAI-compatible chat endpoint. | `XAI_API_KEY` or `GROK_API_KEY`. |
 | `OpenAI` | OpenAI Chat Completions, dropdown limited to the GPT-5.6 and GPT-6 families. | `OPENAI_API_KEY`. |
+| `LM Studio` | Local models through LM Studio's own REST API (`http://localhost:1234`). | None (or `LM_API_TOKEN` if the server requires one). |
 | `Claude (Max)` | Your Claude Max **subscription** through the Claude Code CLI (`claude -p`) — no API key. | The CLI's own login. |
 | `Codex (ChatGPT)` | Your ChatGPT **subscription** through the Codex CLI (`codex exec`), read-only sandbox. | The CLI's own login. |
 | `Grok (SuperGrok)` | Your SuperGrok **subscription** through the Grok CLI; the API key is hidden from it so it bills the grok.com login. | The CLI's own login. |
-| `Custom` | User-supplied OpenAI-compatible `server_url`. Use this for OpenRouter, LM Studio, llama.cpp server, vLLM, Ollama-compatible gateways, etc. | Optional, depending on server. |
+| `Gemini (Antigravity)` | Your Gemini **subscription** through the Antigravity CLI (`agy`), read-only plan mode. | The CLI's own login. |
+| `Custom` | User-supplied OpenAI-compatible `server_url`. Use this for OpenRouter, llama.cpp server, vLLM, Ollama-compatible gateways, etc. | Optional, depending on server. |
 
-The three subscription providers run the vendor's own CLI headless (the CLI must be installed and logged
-in). They use that subscription's quota, take a few seconds of CLI start-up per call (6-9 s measured), ignore
-the sampling sliders, and map `reasoning_effort` to the CLI's effort setting. Images are supported on all three;
-Grok downscales them to fit Windows' command-line limit.
+The subscription providers run the vendor's own CLI headless (the CLI must be installed and logged in). They
+use that subscription's quota, take a few seconds of CLI start-up per call, ignore the sampling sliders, and
+take their reasoning level from the quality card. Images are supported on all of them; Grok downscales them to
+fit Windows' command-line limit.
+
+**LM Studio.** The model list, vision and reasoning options and load state come from LM Studio. A model this
+node loads is unloaded after the run (`unload_after_run`, on by default); a model you or another app (e.g. Luna
+Bridge) already loaded is used as it is and stays loaded. `context_length` (default 8k) applies only when this
+node loads the model — LM Studio would otherwise load a second copy. `min_p` and `repeat_penalty` are sent only
+to LM Studio.
+
+**Audio input.** Connect a ComfyUI **AUDIO** output to the `audio` socket (up to 15 minutes). It works with
+`Gemini` and `Gemini (Antigravity)`; Grok, OpenAI, Codex, Claude and LM Studio reject audio (tested 2026-10-12),
+so the node stops with a plain message on those.
+
+**Gemini model check.** Google keeps listing retired models. The node probes each listed Gemini model once a
+week (new ones at once) with a tiny call, and hides models that no longer answer or are answered by a newer
+model (on 2026-10-12: the three `gemini-2.5` models, `gemini-3.7-flash` → 3.8, `gemini-3.5-flash` → 3.6). A run
+that is answered by another model marks it the same way. Results live in `.api_models_check.json`.
 
 The node intentionally has no `api_key` widget. Keys are read from process environment variables or `.env` files so workflow JSON does not leak credentials.
 
@@ -267,16 +315,14 @@ Fallback `.env` location:
 ComfyUI/custom_nodes/LLM_Prompt/.env
 ```
 
-API-specific controls include:
+API-specific controls (in ⚙, shown per provider) include:
 
 ```text
-provider
-model_name
+quality
+reasoning_effort
+gemini_thinking_level
 server_url
 model_filter
-gemini_thinking_budget
-gemini_thinking_level
-reasoning_effort
 enable_caching
 disable_thinking
 timeout_seconds
@@ -286,12 +332,14 @@ validate
 video_input_mode
 video_sample_frames
 gemini_video_fps
+min_p, repeat_penalty, context_length, unload_after_run   (LM Studio)
 ```
 
-Optional inputs: `style`, `context`, `width` / `height`, `image`, `video`, `frames` (same
+Optional inputs: `style`, `context`, `width` / `height`, `image`, `video`, `audio`, `frames` (same
 meaning as on the local node).
 
-`gemini_thinking_level` is for Gemini 3 Pro style models and overrides `gemini_thinking_budget` when set to `low`, `medium`, or `high`.
+`gemini_thinking_level` applies to every Gemini 3 model. `gemini_thinking_budget` only applied to Gemini 2.5,
+which no longer answers new users; it stays in saved workflows and is not shown.
 
 ## Gemini Image (API Key)
 
@@ -309,7 +357,8 @@ Models seen on a current key:
 | Model | Sizes | Reference images | Thinking |
 | --- | --- | --- | --- |
 | `gemini-3-pro-image` (Nano Banana Pro) | 1K / 2K / 4K | 14 | always on |
-| `gemini-3.1-flash-image` (Nano Banana 2) | 0.5K / 1K / 2K / 4K | 14 | `minimal` / `high` |
+| `gemini-nano-banana-2.1` (Nano Banana 2.1) | 1K / 2K / 4K | 14 | `minimal` / `medium` / `high` |
+| `gemini-3.1-flash-image` (Nano Banana 2, deprecated → 2.1) | 0.5K / 1K / 2K / 4K | 14 | `minimal` / `high` |
 | `gemini-3.1-flash-lite-image` | 1K | 14 | none |
 | `gemini-2.5-flash-image` (Nano Banana, legacy) | 1K | 3 | none |
 
@@ -392,7 +441,8 @@ expander, not a quality switch. Mask edits always go direct.
 
 ## Gemini Omni Video (API Key)
 
-Google's Omni video model through the Interactions API (Omni rejects `generateContent`). Omni
+Google's Omni video model (`gemini-omni-1.1-flash`; the preview model shuts down 2026-10-22 and was
+removed from the list) through the Interactions API (Omni rejects `generateContent`). Omni
 outputs **video only** — 10 s, 24 fps, with audio; there is no image output and no duration
 control. Aspect `16:9` / `9:16`; resolution `360p` / `720p` / `1080p` / `4k` (360p ≈ $0.34 per
 clip, 720p ≈ $1.01).
@@ -543,23 +593,21 @@ All markers and labels are stripped from the final outputs. If no split is found
 
 ## Advanced UI
 
-The GGUF node (`LLMPrompt`) has its own face and ⚙ panel (see LLM Prompt above).
-`web/llm_prompt_advanced.js` adds an `Advanced` toggle for `LLMPromptAPI`.
-
-The current extension owns the fold behavior in both classic canvas and modern Vue/DOM node modes. It hides advanced widgets through both legacy widget hiding and Vue-compatible `options.hidden`, then nudges the frontend to re-render.
-
-The button is appended at the end of `node.widgets` to avoid corrupting saved widget positions.
+Both prompt nodes have their own face and ⚙ panel (see LLM Prompt and LLM Prompt API above), in the classic
+canvas and in Nodes 2.0. The old `Advanced` fold is retired. The face is the last widget and is never saved,
+so saved widget positions stay intact.
 
 ## Frontend Helpers
 
 | File | Purpose |
 | --- | --- |
 | `web/llm_prompt_face.js` | GGUF node face: model card, quality buttons, last run, ⓘ / ⚙, idea editor. |
-| `web/llm_prompt_panel.mjs` | The GGUF node's ⚙ settings panel. |
+| `web/llm_prompt_api_face.js` | API node face: provider buttons, model card, quality cards, last run, ⓘ / ⚙, idea editor; loads old saved API nodes with their values in the right settings. |
+| `web/llm_prompt_panel.mjs` | The ⚙ settings panel of both nodes. |
 | `web/llm_prompt_compat.js` | Loads workflows saved with older GGUF node layouts with their values in the right settings. |
-| `web/llm_prompt_advanced.js` | Advanced widget folding for the API node. |
+| `web/llm_prompt_advanced.js` | Retired (kept empty so an old cached copy does nothing). |
 | `web/llm_prompt_presets.js` | Model-family sampler autofill and callback self-healing. |
-| `web/llm_prompt_api.js` | API provider/model dropdown refresh and Gemini-only widget visibility. |
+| `web/llm_prompt_api.js` | API provider/model dropdown refresh. |
 
 ## Removed Feature
 
