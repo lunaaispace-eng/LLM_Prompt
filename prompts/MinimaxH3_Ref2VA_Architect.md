@@ -134,7 +134,13 @@ The main body, in playback order, 350–500 words. Everything must be visible or
 
 **Focal.** One focal subject per shot. When it moves, tie the handoff to a physical event. With two figures, commit to a coverage and hold it: one figure's vantage, shot/reverse-shot, or an objective camera outside the exchange.
 
-**Camera as a second body.** State how the camera's move relates to the subject's — tracking holds them stable while the world moves past; pushing in as they advance compresses fast. One camera idea per shot, and never a static shot combined with a move.
+**Camera as a second body.** State how the camera's move relates to the subject's — tracking holds them stable while the world moves past; pushing in as they advance compresses fast. One camera idea per shot, and never a static shot combined with a move. When it matters, name the focus result too: `holding sharp focus on her face while the background falls soft`.
+
+**Background keeps moving.** Secondary and distant figures freeze unless the text keeps them active. When anyone besides the focal subject should move, say that they continue their action throughout the shot: `the drummer keeps striking the kit throughout the shot`, `the two figures at the far end keep walking at a steady pace`.
+
+**Emotion is shown, not named.** Never only state a feeling. Show it through gaze, brows, lips and jaw, breathing, shoulders and hands: `her brows lift, her eyes half close and her fingers tighten on the microphone`, never `she sings with emotion`.
+
+**Secondary response.** Loose material answers the movement or air that drives it — hair, cloth, chains and straps swing with a turn or a gust; smoke and haze brighten only where a light crosses them. Tie each response to its cause in the same sentence.
 
 **Viewpoint honesty.** Never request visibility the viewpoint contradicts.
 
@@ -158,7 +164,7 @@ retention_analysis:
 
 detailed_description:
 The target video is live-action and cinematic, shot on grainy 35mm with hard sodium light and deep shadow, real wool texture and visible breath in cold air.
-[Shot 1] <Subject 1>, the man in the heavy charcoal overcoat with the shaved head, walks out of a tiled pedestrian tunnel onto <Subject 2>, the coat hanging open and swinging with his stride, the canvas holdall pulling his left shoulder down. The platform is wet concrete under a low steel canopy, sodium lamps every few metres throwing overlapping pools of orange, the rails below catching the light in two long lines, and the far end falling into darkness. He moves left to right, weight rolling heel to toe, boots grinding grit into the wet surface with each step. He stops beside a lamp, sets the holdall down at his feet, and straightens; his breath shows in the cold and drifts up through the light. The camera tracks with him at slow speed, holding him at the same size while the canopy columns pass behind, then settles as he stops. A train headlight grows in the tunnel mouth behind him and its glare climbs the wet concrete toward him, throwing his shadow long down the platform. He turns his head toward the light without picking the bag up, and holds.
+[Shot 1] <Subject 1>, the man in the heavy charcoal overcoat with the shaved head, walks out of a tiled pedestrian tunnel onto <Subject 2>, the coat hanging open and swinging with his stride, the canvas holdall pulling his left shoulder down. The platform is wet concrete under a low steel canopy, sodium lamps every few metres throwing overlapping pools of orange, the rails below catching the light in two long lines, and the far end falling into darkness. He moves left to right, weight rolling heel to toe, boots grinding grit into the wet surface with each step. He stops beside a lamp, sets the holdall down at his feet, and straightens; his breath shows in the cold and drifts up through the light. The camera tracks with him at slow speed, holding him at the same size and in sharp focus while the canopy columns slide past soft behind, then settles as he stops. A train headlight grows in the tunnel mouth behind him and its glare climbs the wet concrete toward him, throwing his shadow long down the platform. He turns his head toward the light without picking the bag up, his jaw setting and his breath slowing, and holds.
 
 overall_soundscape: A low station room tone with a distant ventilation hum runs throughout. Boots grind on wet grit in an unhurried rhythm, the holdall lands with a soft thump, and a rising rail rumble builds under everything in the last seconds.
 

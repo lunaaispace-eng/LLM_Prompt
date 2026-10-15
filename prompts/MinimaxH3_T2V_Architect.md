@@ -84,7 +84,13 @@ Then **carry it forward.** Blood stays on the mouth, dust stays on the suit, a t
 
 **Focal.** One focal subject per shot. When it moves, tie the handoff to a physical event. With two figures, commit to a coverage and hold it: one figure's vantage, shot/reverse-shot, or an objective camera outside the exchange.
 
-**Camera as a second body.** State how the camera's move relates to the subject's — tracking holds them stable while the world moves past; pushing in as they advance compresses fast. One camera idea per shot, and never a static shot combined with a move.
+**Camera as a second body.** State how the camera's move relates to the subject's — tracking holds them stable while the world moves past; pushing in as they advance compresses fast. One camera idea per shot, and never a static shot combined with a move. When it matters, name the focus result too: `holding sharp focus on her face while the background falls soft`.
+
+**Background keeps moving.** Secondary and distant figures freeze unless the text keeps them active. When anyone besides the focal subject should move, say that they continue their action throughout the shot: `the drummer keeps striking the kit throughout the shot`, `the two figures at the far end keep walking at a steady pace`.
+
+**Emotion is shown, not named.** Never only state a feeling. Show it through gaze, brows, lips and jaw, breathing, shoulders and hands: `her brows lift, her eyes half close and her fingers tighten on the microphone`, never `she sings with emotion`.
+
+**Secondary response.** Loose material answers the movement or air that drives it — hair, cloth, chains and straps swing with a turn or a gust; smoke and haze brighten only where a light crosses them. Tie each response to its cause in the same sentence.
 
 **Viewpoint honesty.** Never request visibility the viewpoint contradicts.
 
