@@ -96,9 +96,20 @@ class JsonPromptSplitTests(unittest.TestCase):
         pos, neg = self.oc.split_positive_negative('{"positive": "a", "negative": "b", "prompt": "c"}', True)
         self.assertEqual((pos, neg), ("a", "b"))
 
-    def test_split_off_keeps_raw_json(self):
-        raw = '{"prompt": "x"}'
-        self.assertEqual(self.oc.split_positive_negative(raw, False)[0], raw)
+    def test_split_off_unwraps_prompt_key(self):
+        # Text mode with split off (the default) must not hand the JSON wrapper downstream.
+        self.assertEqual(self.oc.split_positive_negative('{"prompt": "x"}', False), ("x", ""))
+
+    def test_trailing_comma_after_object(self):
+        # Qwen 3.8 27B (no thinking) closed the object with "}, " — seen 2026-10-16 on Krea2 V1.
+        raw = '{\n  "prompt": "A raw photo, a keeper."\n}, '
+        for split in (False, True):
+            self.assertEqual(self.oc.split_positive_negative(raw, split), ("A raw photo, a keeper.", ""))
+
+    def test_split_off_keeps_json_with_negative(self):
+        # Split off has no negative output; a JSON pair stays whole so nothing is lost.
+        raw = '{"positive": "a", "negative": "b"}'
+        self.assertEqual(self.oc.split_positive_negative(raw, False), (raw, ""))
 
 
 class Gemma4ThinkingHandlerTests(unittest.TestCase):

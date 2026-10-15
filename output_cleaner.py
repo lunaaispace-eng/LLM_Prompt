@@ -218,14 +218,14 @@ def _try_json_pos_neg(text: str):
     """Parse {"positive"|"prompt": ..., "negative": ...} (optionally code-fenced). None if not JSON.
 
     "prompt" is the key the Krea presets' JSON contract names for the paragraph.
+    Trailing junk after the object (e.g. "}, " from Qwen with thinking off) is ignored.
     """
-    import json
     s = re.sub(r'^```(?:json)?|```$', '', (text or "").strip(), flags=re.IGNORECASE).strip()
     if not (s.startswith("{") and ("positive" in s.lower() or '"prompt"' in s.lower())):
         return None
     try:
-        obj = json.loads(s)
-    except Exception:
+        obj, _end = json.JSONDecoder().raw_decode(s)
+    except ValueError:
         return None
     if isinstance(obj, dict):
         pos = (obj.get("positive") or obj.get("Positive") or obj.get("prompt") or obj.get("Prompt")
@@ -245,11 +245,16 @@ def split_positive_negative(text: str, do_split: bool) -> tuple[str, str]:
     '|' pipe. ALL markers/labels are stripped, so the returned strings contain no
     bracket or label residue. If nothing matches (or do_split is False), the whole
     text goes to positive and negative is empty — the prompt is never lost.
+    With do_split False a JSON wrapper is still unwrapped, unless it carries a
+    negative (there is no negative output to put it in).
     """
     text = (text or "").strip()
     if not text:
         return "", ""
     if not do_split:
+        parsed = _try_json_pos_neg(text)
+        if parsed and not parsed[1]:
+            return parsed[0], ""
         return _strip_pos_marker(text), ""
 
     # 1) JSON object
