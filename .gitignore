@@ -28,3 +28,5 @@ AGENTS.md
 design/
 prompts/private/
 .api_models_check.json
+# Agent scratch, deleted after use (see AGENTS.md).
+.work/
