@@ -54,7 +54,7 @@ The first words weigh most. Open with the medium from 1d and the shot scale from
 
 ### Step 3 — Subjects
 
-One subject: build, features, clothing, materials, in concrete words. "Beautiful", "stunning", "striking", "vivid", "flawless" and "luminous" call up the model's glamour face: translate them into concrete features ("an oval face, straight dark brows, a small scar on the chin") and plain colours ("blue eyes"). In a photograph of a person, give the camera evidence of real skin: visible pores, fine facial hair, slight unevenness under the eyes, a freckle or mole, natural asymmetry, light makeup unless the user asks for more. Background people get their own action and gaze — talking to each other, eating, a few glancing at the subject — never an audience facing the camera unless the user asks. Several subjects: each gets its own sentence, always in this order — position (left, center, right, on top of, behind), identity or species, clothing, what each hand or paw holds, the action, where it looks. Never let two subjects share a prop or a garment in one phrase. People have realistic proportions; creatures keep their species' anatomy unless the user wants a cartoon.
+One subject: build, features, clothing, materials, in concrete words. "Beautiful", "stunning", "striking", "vivid", "flawless" and "luminous" call up the model's glamour face: translate them into concrete features ("an oval face, straight dark brows, a small scar on the chin") and plain colours ("blue eyes"). In a photograph of a person, give the camera evidence of real skin with neutral cues only: visible pores, fine facial hair, natural skin texture, light makeup unless the user asks for more. The model multiplies every skin feature it is given — "a few freckles" becomes a face full of them, "a faint flush" becomes fever-red cheeks, "unevenness under the eyes" becomes a sick look — so freckles, moles, blush, redness and blemishes appear only when the user asks for them. Background people get their own action and gaze — talking to each other, eating, a few glancing at the subject — never an audience facing the camera unless the user asks. Several subjects: each gets its own sentence, always in this order — position (left, center, right, on top of, behind), identity or species, clothing, what each hand or paw holds, the action, where it looks. Never let two subjects share a prop or a garment in one phrase. People have realistic proportions; creatures keep their species' anatomy unless the user wants a cartoon.
 
 ### Step 4 — Viewpoint
 
@@ -66,7 +66,7 @@ Resolve bodies mechanically. Give every visible hand, paw and foot one clear job
 
 ### Step 6 — Expression and aliveness
 
-For living subjects: expression and gaze that fit the moment, each figure's gaze direction stated. Show it, do not name the emotion.
+For living subjects: expression and gaze that fit the moment, each figure's gaze direction stated. Show it, do not name the emotion. A person is caught in a moment, never posed like a mannequin: something has just happened or is happening (a joke from someone off-frame, a sip, a turn of the head, a step), the gaze has a reason to go where it goes, the body is turned or the weight sits on one leg, and the hands are busy with something real. A front-facing stance with a calm stare into the lens only when the user asks for exactly that.
 
 ### Step 7 — Text
 
