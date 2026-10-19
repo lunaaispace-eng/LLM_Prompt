@@ -708,9 +708,7 @@ def _get_models_for_provider(
 # queue: once to validate, once per linked input, once to read the inputs. Each
 # build live-queried every provider (MEASURED 2026-10-19: 3.3-3.8 s per build),
 # so a run waited many seconds before its own API call.
-_SCHEMA_MODELS: list[str] = []
-_SCHEMA_MODELS_TS = 0.0
-_SCHEMA_MODELS_TTL_SECONDS = 300
+_SCHEMA_MODELS: list[str] | None = None
 _schema_models_lock = threading.Lock()
 
 
@@ -734,31 +732,18 @@ def _fetch_schema_live_models() -> list[str]:
     return models
 
 
-def _refresh_schema_models() -> None:
-    global _SCHEMA_MODELS, _SCHEMA_MODELS_TS
-    try:
-        _SCHEMA_MODELS = _fetch_schema_live_models()
-        _SCHEMA_MODELS_TS = time.time()
-    finally:
-        _schema_models_lock.release()
-
-
 def _schema_live_models() -> list[str]:
-    """The cached live lists plus every list the dropdown route has shown.
+    """The live lists fetched once at the first build, plus every list the dropdown route has shown.
 
-    Only the first build waits for the network. A stale cache is answered at
-    once and refreshed in the background. The dropdown's own lists are added,
-    so a model the node face shows always passes validation.
+    No timed refresh (Peter, 2026-10-19: "providers dont release new models so
+    often"). A new model reaches validation through the dropdown, which loads
+    its list on node add, workflow open, provider change and the refresh button.
     """
-    if not _SCHEMA_MODELS_TS:
-        if _schema_models_lock.acquire():
-            if not _SCHEMA_MODELS_TS:
-                _refresh_schema_models()
-            else:
-                _schema_models_lock.release()
-    elif time.time() - _SCHEMA_MODELS_TS > _SCHEMA_MODELS_TTL_SECONDS:
-        if _schema_models_lock.acquire(blocking=False):
-            threading.Thread(target=_refresh_schema_models, daemon=True).start()
+    global _SCHEMA_MODELS
+    if _SCHEMA_MODELS is None:
+        with _schema_models_lock:
+            if _SCHEMA_MODELS is None:
+                _SCHEMA_MODELS = _fetch_schema_live_models()
     models = list(_SCHEMA_MODELS)
     for listed in list(_MODEL_LIST_CACHE.values()):
         models.extend(listed)

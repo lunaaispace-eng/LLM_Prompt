@@ -3,7 +3,6 @@ import contextlib
 import io
 import json
 import tempfile
-import threading
 import unittest
 import urllib.error
 from pathlib import Path
@@ -97,7 +96,7 @@ class SchemaModelCacheTest(unittest.TestCase):
         cls.mod = _comfy.load("llm_prompt_api_node")
 
     def setUp(self):
-        for name, value in (("_SCHEMA_MODELS", []), ("_SCHEMA_MODELS_TS", 0.0), ("_MODEL_LIST_CACHE", {})):
+        for name, value in (("_SCHEMA_MODELS", None), ("_MODEL_LIST_CACHE", {})):
             p = mock.patch.object(self.mod, name, value)
             p.start()
             self.addCleanup(p.stop)
@@ -111,17 +110,17 @@ class SchemaModelCacheTest(unittest.TestCase):
             self.assertIn("live-model", self.mod._schema_live_models())
         self.assertEqual(self.fetch.call_count, 1)
 
-    def test_stale_cache_answers_at_once_and_refreshes(self):
+    def test_no_timed_refresh(self):
         self.mod._schema_live_models()
-        self.mod._SCHEMA_MODELS_TS -= self.mod._SCHEMA_MODELS_TTL_SECONDS + 1
-        release = threading.Event()
-        self.fetch.side_effect = lambda: release.wait(5) and ["newer-model"]
-        self.assertIn("live-model", self.mod._schema_live_models())  # the stale list, no wait
-        release.set()
-        with self.mod._schema_models_lock:  # held until the background refresh ends
-            pass
-        self.assertEqual(self.fetch.call_count, 2)
-        self.assertIn("newer-model", self.mod._schema_live_models())
+        with mock.patch.object(self.mod.time, "time", return_value=10 ** 10):  # far in the future
+            self.mod._schema_live_models()
+        self.assertEqual(self.fetch.call_count, 1)
+
+    def test_empty_first_fetch_is_kept(self):
+        self.fetch.return_value = []  # every provider down at start: the dropdown fills in later
+        self.mod._schema_live_models()
+        self.mod._schema_live_models()
+        self.assertEqual(self.fetch.call_count, 1)
 
     def test_dropdown_lists_pass_validation(self):
         self.mod._MODEL_LIST_CACHE[("Gemini", "x")] = ["dropdown-model"]
