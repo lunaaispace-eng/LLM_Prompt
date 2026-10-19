@@ -3,6 +3,7 @@ import contextlib
 import io
 import json
 import tempfile
+import threading
 import unittest
 import urllib.error
 from pathlib import Path
@@ -86,6 +87,53 @@ class ApiModelsTest(unittest.TestCase):
         data = self.mod._check_load()
         self.assertEqual(data["gemini-3.5-flash"]["status"], "routed")
         self.assertEqual(set(data), {"gemini-3.5-flash"})
+
+
+class SchemaModelCacheTest(unittest.TestCase):
+    """ComfyUI rebuilds the schema several times per queue; only the first build may wait."""
+
+    @classmethod
+    def setUpClass(cls):
+        cls.mod = _comfy.load("llm_prompt_api_node")
+
+    def setUp(self):
+        for name, value in (("_SCHEMA_MODELS", []), ("_SCHEMA_MODELS_TS", 0.0), ("_MODEL_LIST_CACHE", {})):
+            p = mock.patch.object(self.mod, name, value)
+            p.start()
+            self.addCleanup(p.stop)
+        self.fetch = mock.Mock(return_value=["live-model"])
+        p = mock.patch.object(self.mod, "_fetch_schema_live_models", self.fetch)
+        p.start()
+        self.addCleanup(p.stop)
+
+    def test_live_lists_fetched_once(self):
+        for _ in range(4):
+            self.assertIn("live-model", self.mod._schema_live_models())
+        self.assertEqual(self.fetch.call_count, 1)
+
+    def test_stale_cache_answers_at_once_and_refreshes(self):
+        self.mod._schema_live_models()
+        self.mod._SCHEMA_MODELS_TS -= self.mod._SCHEMA_MODELS_TTL_SECONDS + 1
+        release = threading.Event()
+        self.fetch.side_effect = lambda: release.wait(5) and ["newer-model"]
+        self.assertIn("live-model", self.mod._schema_live_models())  # the stale list, no wait
+        release.set()
+        with self.mod._schema_models_lock:  # held until the background refresh ends
+            pass
+        self.assertEqual(self.fetch.call_count, 2)
+        self.assertIn("newer-model", self.mod._schema_live_models())
+
+    def test_dropdown_lists_pass_validation(self):
+        self.mod._MODEL_LIST_CACHE[("Gemini", "x")] = ["dropdown-model"]
+        self.assertIn("dropdown-model", self.mod._schema_live_models())
+
+    def test_lmstudio_uses_ipv4(self):
+        base = self.mod._lmstudio_base
+        self.assertEqual(base(""), "http://127.0.0.1:1234")
+        self.assertEqual(base("http://localhost:1234/v1/"), "http://127.0.0.1:1234")
+        self.assertEqual(base("http://LOCALHOST:5000"), "http://127.0.0.1:5000")
+        self.assertEqual(base("http://192.168.1.5:1234"), "http://192.168.1.5:1234")
+        self.assertEqual(base("http://localhost.lan:1234"), "http://localhost.lan:1234")
 
 
 if __name__ == "__main__":

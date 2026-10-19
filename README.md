@@ -274,7 +274,7 @@ Workflows saved with older versions of the node load with their values in the ri
 | `Gemini` | Native Gemini REST through `google-genai`. Default provider. | `GEMINI_API_KEY`, `GOOGLE_API_KEY`, or `GOOGLE_GEMINI_API_KEY`. |
 | `Grok (xAI)` | xAI OpenAI-compatible chat endpoint. | `XAI_API_KEY` or `GROK_API_KEY`. |
 | `OpenAI` | OpenAI Chat Completions, dropdown limited to the GPT-5.6 and GPT-6 families. | `OPENAI_API_KEY`. |
-| `LM Studio` | Local models through LM Studio's own REST API (`http://localhost:1234`). | None (or `LM_API_TOKEN` if the server requires one). |
+| `LM Studio` | Local models through LM Studio's own REST API (`http://127.0.0.1:1234`). | None (or `LM_API_TOKEN` if the server requires one). |
 | `Claude (Max)` | Your Claude Max **subscription** through the Claude Code CLI (`claude -p`) — no API key. | The CLI's own login. |
 | `Codex (ChatGPT)` | Your ChatGPT **subscription** through the Codex CLI (`codex exec`), read-only sandbox. | The CLI's own login. |
 | `Grok (SuperGrok)` | Your SuperGrok **subscription** through the Grok CLI; the API key is hidden from it so it bills the grok.com login. | The CLI's own login. |

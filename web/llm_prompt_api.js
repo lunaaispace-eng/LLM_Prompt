@@ -81,7 +81,7 @@ const PROVIDERS = {
     },
     // Local models through LM Studio's server; the list comes from the server route.
     "LM Studio": {
-        defaultUrl: "http://localhost:1234",
+        defaultUrl: "http://127.0.0.1:1234",
         liveModels: true,
         needsAuth: false,
         envVar: null,

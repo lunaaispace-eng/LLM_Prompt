@@ -142,7 +142,9 @@ PROVIDERS = {
     # the OpenAI-compatible /v1: it reports load state, reasoning options and
     # whether a request loaded the model, which the unload rule needs.
     "LM Studio": {
-        "base_url": "http://localhost:1234",
+        # 127.0.0.1, not localhost: Python on Windows tries IPv6 ::1 first and
+        # waits ~2 s for the refusal before IPv4 (MEASURED 2026-10-19: 2.06 s vs 0.02 s).
+        "base_url": "http://127.0.0.1:1234",
         "env_var": ["LM_API_TOKEN"],  # only when the server requires a token
         "needs_auth": False,
         "live_models": True,
@@ -451,6 +453,8 @@ def _fetch_models_from_server(base_url: str, api_key: str | None, native: str = 
 def _lmstudio_base(base_url: str) -> str:
     """LM Studio's root URL; a pasted OpenAI-style .../v1 address is accepted too."""
     base = (base_url or PROVIDERS["LM Studio"]["base_url"]).rstrip("/")
+    # A typed or saved localhost address gets the same IPv4 shortcut.
+    base = re.sub(r"^(https?://)localhost(?=[:/]|$)", r"\g<1>127.0.0.1", base, flags=re.I)
     return base[:-3] if base.endswith("/v1") else base
 
 
@@ -698,6 +702,67 @@ def _get_models_for_provider(
     _MODEL_LIST_CACHE[cache_key] = deduped
     _MODEL_LIST_CACHE_TS[cache_key] = now
     return deduped
+
+
+# The validation superset's live part. ComfyUI rebuilds the node schema on every
+# queue: once to validate, once per linked input, once to read the inputs. Each
+# build live-queried every provider (MEASURED 2026-10-19: 3.3-3.8 s per build),
+# so a run waited many seconds before its own API call.
+_SCHEMA_MODELS: list[str] = []
+_SCHEMA_MODELS_TS = 0.0
+_SCHEMA_MODELS_TTL_SECONDS = 300
+_schema_models_lock = threading.Lock()
+
+
+def _fetch_schema_live_models() -> list[str]:
+    """Live-query each provider that has a URL and, where needed, a key."""
+    models: list[str] = []
+    for prov_name, prov_cfg in PROVIDERS.items():
+        base = prov_cfg.get("base_url") or ""
+        if not prov_cfg.get("live_models") or not base:
+            continue  # Custom has no URL until the user fills in the widget
+        key = _resolve_api_key(prov_name, "")
+        if prov_cfg.get("needs_auth") and not key:
+            continue
+        try:
+            live = _fetch_models_from_server(base, key, prov_cfg.get("native_protocol", ""))
+            # Same whitelist the dropdown route applies, so the validation
+            # superset and the visible list agree.
+            models.extend(_apply_model_pattern(prov_name, live))
+        except Exception:
+            pass
+    return models
+
+
+def _refresh_schema_models() -> None:
+    global _SCHEMA_MODELS, _SCHEMA_MODELS_TS
+    try:
+        _SCHEMA_MODELS = _fetch_schema_live_models()
+        _SCHEMA_MODELS_TS = time.time()
+    finally:
+        _schema_models_lock.release()
+
+
+def _schema_live_models() -> list[str]:
+    """The cached live lists plus every list the dropdown route has shown.
+
+    Only the first build waits for the network. A stale cache is answered at
+    once and refreshed in the background. The dropdown's own lists are added,
+    so a model the node face shows always passes validation.
+    """
+    if not _SCHEMA_MODELS_TS:
+        if _schema_models_lock.acquire():
+            if not _SCHEMA_MODELS_TS:
+                _refresh_schema_models()
+            else:
+                _schema_models_lock.release()
+    elif time.time() - _SCHEMA_MODELS_TS > _SCHEMA_MODELS_TTL_SECONDS:
+        if _schema_models_lock.acquire(blocking=False):
+            threading.Thread(target=_refresh_schema_models, daemon=True).start()
+    models = list(_SCHEMA_MODELS)
+    for listed in list(_MODEL_LIST_CACHE.values()):
+        models.extend(listed)
+    return models
 
 
 # ---------------------------------------------------------------------------
@@ -2463,28 +2528,9 @@ class LLMPromptAPINode(io.ComfyNode):
         all_models: list[str] = []
         for prov_name, prov_cfg in PROVIDERS.items():
             all_models.extend(prov_cfg.get("fallback_models") or [])
-        # Live-query each provider that supports it AND has credentials
-        # available at INPUT_TYPES time (env var or no auth needed). This is
-        # critical: the JS extension's browser-side live query may show models
-        # to the user that aren't in our hardcoded fallback, and those would
-        # fail server-side validation if we don't include them here too.
-        for prov_name, prov_cfg in PROVIDERS.items():
-            if not prov_cfg.get("live_models"):
-                continue
-            base = prov_cfg.get("base_url") or ""
-            if not base:
-                continue  # Custom — no URL until user fills in widget
-            # Use the full key resolver so .env files are honored at scan time too
-            key = _resolve_api_key(prov_name, "")
-            if prov_cfg.get("needs_auth") and not key:
-                continue  # Skip auth-required providers without a key
-            try:
-                live = _fetch_models_from_server(base, key, prov_cfg.get("native_protocol", ""))
-                # Same whitelist the dropdown route applies, so the validation
-                # superset and the visible list agree.
-                all_models.extend(_apply_model_pattern(prov_name, live))
-            except Exception:
-                pass
+        # The providers' live lists, so the JS dropdown's models pass server-side
+        # validation. Cached: ComfyUI calls this on every queue, several times.
+        all_models.extend(_schema_live_models())
         # LM Studio's last-seen models, for when its server is down at start.
         all_models.extend((_check_load().get("_lmstudio") or {}).get("models") or [])
         # Dedupe while preserving order
@@ -2509,7 +2555,7 @@ class LLMPromptAPINode(io.ComfyNode):
             inputs=[
                 # ===== BASIC =====
                 io.Combo.Input("provider", options=providers, default=default_provider,
-                               tooltip="Which backend to call. Gemini / Grok / OpenAI = cloud APIs (need an API key in an env var or a .env at the ComfyUI root). LM Studio = local models through LM Studio's server (localhost:1234). Claude (Max), Codex (ChatGPT), Grok (SuperGrok), Gemini (Antigravity) = your subscriptions through their CLIs. Custom = any OpenAI-compatible endpoint (set server_url)."),
+                               tooltip="Which backend to call. Gemini / Grok / OpenAI = cloud APIs (need an API key in an env var or a .env at the ComfyUI root). LM Studio = local models through LM Studio's server (127.0.0.1:1234). Claude (Max), Codex (ChatGPT), Grok (SuperGrok), Gemini (Antigravity) = your subscriptions through their CLIs. Custom = any OpenAI-compatible endpoint (set server_url)."),
                 io.Combo.Input("model_name", options=model_options,
                                tooltip="Available models. Gemini fetches your account's accessible models. Grok shows the curated list (no /models endpoint). Refreshes when the provider changes."),
                 io.String.Input("server_url", default="",
